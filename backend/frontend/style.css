@@ -149,6 +149,8 @@ body {
 .bubble .voice-play .bar { flex: 1; height: 14px; }
 .bubble audio { display: none; }
 .sys { text-align: center; color: #9a9aa0; font-size: 12px; margin: 10px 0; }
+.recall-tag { font-size: 11px; color: #b0b0b6; margin: 0 4px 3px; }
+.msg.right .recall-tag { text-align: right; }
 
 /* 问答抽屉 */
 .drawer {

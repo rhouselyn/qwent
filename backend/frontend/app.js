@@ -518,6 +518,11 @@ function renderMsg(m) {
     const who = document.createElement("div"); who.className = "who"; who.textContent = m.sender_name;
     col.appendChild(who);
   }
+  if (m.recalled) {
+    const tag = document.createElement("div"); tag.className = "recall-tag";
+    tag.textContent = "已撤回";
+    col.appendChild(tag);
+  }
   const b = document.createElement("div"); b.className = "bubble";
   b.appendChild(renderBubbleContent(m, p));
   col.appendChild(b);

@@ -221,7 +221,13 @@ def parse_message(m: sqlite3.Row) -> dict:
         else:
             out["text"] = c
     elif t in (10000, 10002):
-        out["system"] = re.sub(r"<[^>]+>", "", c)[:300]
+        if t == 10000 and "revokemsg" in c:
+            # 撤回通知只取 <content>：整段去标签会把 <revoketime>0 的尾巴带出来
+            mc = re.search(r"<content>(.*?)</content>", c, re.S)
+            out["system"] = _quote_oneline(_xml_unescape(mc.group(1))) if mc \
+                else re.sub(r"<[^>]+>", "", c)[:300]
+        else:
+            out["system"] = re.sub(r"<[^>]+>", "", c)[:300]
     elif t == 3:
         attrs = dict(XML_ATTR.findall(c[:2000]))
         out["kind"] = "image"
@@ -337,6 +343,84 @@ def msg_row(m: sqlite3.Row, con) -> dict:
     }
 
 
+# ---------------------------------------------------------------- 撤回还原
+RECALL_WINDOW = 600   # 撤回通知与原消息的最大间隔(秒)：自己撤回限2分钟，管理员撤回可更久
+
+
+def _recall_name(content: str) -> str | None:
+    """撤回通知 content → 被撤回者的名字；自己撤回返回 ""，非撤回通知返回 None。"""
+    if "revokemsg" not in (content or ""):
+        return None
+    mc = re.search(r"<content>(.*?)</content>", content, re.S)
+    txt = _quote_oneline(_xml_unescape(mc.group(1))) if mc else ""
+    nm = re.match(r'^"(.+?)"\s*撤回', txt)
+    return nm.group(1) if nm else ""
+
+
+def _recall_target(nrow: sqlite3.Row, con) -> sqlite3.Row | None:
+    """还原撤回通知对应的原消息。
+
+    微信 4.0 撤回时会把原消息行从自己的库里删掉，只有实时同步先于删除
+    抓到过原消息，knowledge.db 里才有。找不到就返回 None（界面退回显示
+    "xx 撤回了一条消息"）。同一发送者连撤多条时，通知按时间顺序依次认领
+    "当时最新"的未认领候选，先模拟掉更早通知的认领再轮到本通知。
+    """
+    name = _recall_name(nrow["content"])
+    if name is None:
+        return None
+    T = nrow["ts"] or 0
+    cands = con.execute(
+        "SELECT * FROM message WHERE chat_user=? AND ts>=? AND ts<? "
+        "AND type NOT IN (10000,10002) AND (noise=0 OR noise IS NULL) "
+        "ORDER BY ts DESC, id DESC LIMIT 50",
+        (nrow["chat_user"], T - RECALL_WINDOW, T)).fetchall()
+    if name:
+        cands = [c for c in cands
+                 if sender_name(con, nrow["chat_user"], c["sender"], c["is_sender"]) == name]
+    else:
+        cands = [c for c in cands if c["is_sender"] == 1]
+    used: set[int] = set()
+    for e in con.execute(
+            "SELECT * FROM message WHERE chat_user=? AND type=10000 "
+            "AND ts>=? AND ts<? AND id<? ORDER BY ts, id",
+            (nrow["chat_user"], T - RECALL_WINDOW, T, nrow["id"])):
+        if _recall_name(e["content"]) != name:
+            continue
+        for c in cands:                       # cands 新→旧，取 e 当时能认领的最新一条
+            if c["ts"] < e["ts"] and c["id"] not in used:
+                used.add(c["id"])
+                break
+    for c in cands:
+        if c["id"] not in used:
+            return c
+    return None
+
+
+def _recall_pass(rows: list[sqlite3.Row], con, drop_noise: bool = True) -> list[dict]:
+    """消息列表渲染前的撤回处理：通知能还原出原消息时跳过通知、给原消息打标。
+
+    drop_noise 与各端点既有行为对齐：主列表一直显示未转写语音(noise=1)，
+    实时流/增量刷新则一直隐藏。
+    """
+    targets: set[int] = set()
+    skip: set[int] = set()
+    for r in rows:
+        if (r["type"] or 0) == 10000 and "revokemsg" in (r["content"] or ""):
+            t = _recall_target(r, con)
+            if t is not None:
+                targets.add(t["id"])
+                skip.add(r["id"])
+    out = []
+    for r in rows:
+        if r["id"] in skip or (drop_noise and r["noise"]):
+            continue
+        d = msg_row(r, con)
+        if r["id"] in targets:
+            d["recalled"] = True
+        out.append(d)
+    return out
+
+
 # ---------------------------------------------------------------- API: 会话/消息
 @app.get("/api/status")
 def api_status():
@@ -414,7 +498,7 @@ def api_messages(chat: str, before: int = 0, limit: int = 40):
         rows = con.execute(
             "SELECT * FROM message WHERE chat_user=? ORDER BY id DESC LIMIT ?",
             (chat, limit)).fetchall()
-    rows = [msg_row(m, con) for m in reversed(rows)]
+    rows = _recall_pass(list(reversed(rows)), con, drop_noise=False)
     has_more = 1 if rows and con.execute(
         "SELECT 1 FROM message WHERE chat_user=? AND id < ? LIMIT 1",
         (chat, rows[0]["id"])).fetchone() else 0
@@ -434,7 +518,7 @@ def api_context(id: int, around: int = 15):
                        "WHERE username=?", (m["chat_user"],)).fetchone()
     return {"chat": m["chat_user"],
             "chat_name": chat[0] if chat else m["chat_user"],
-            "messages": [msg_row(r, con) for r in rows], "focus": id}
+            "messages": _recall_pass(rows, con), "focus": id}
 
 
 @app.get("/api/search")
@@ -2487,7 +2571,7 @@ def api_messages_stream(chat: str, after_id: int = 0):
                 rows = con.execute("SELECT * FROM message WHERE chat_user=? AND id > ? "
                                    "ORDER BY id LIMIT 40", (chat, last)).fetchall()
                 if rows:
-                    out = [msg_row(r, con) for r in rows if not r["noise"]]
+                    out = _recall_pass(rows, con)
                     last = max(last, max(r["id"] for r in rows))
                     if out:
                         payload = json.dumps({"messages": out, "max_id": last},
@@ -2515,7 +2599,7 @@ def api_messages_new(chat: str, after_id: int = 0, limit: int = 60):
     con = db()
     rows = con.execute("SELECT * FROM message WHERE chat_user=? AND id > ? "
                        "ORDER BY id LIMIT ?", (chat, after_id, min(limit, 200))).fetchall()
-    out = [msg_row(r, con) for r in rows if not r["noise"]]
+    out = _recall_pass(rows, con)
     # 若该会话最新消息没变多，也返回最新 id 便于前端对齐
     top = con.execute("SELECT MAX(id) FROM message WHERE chat_user=?", (chat,)).fetchone()
     last_ts = con.execute("SELECT MAX(ts) FROM message WHERE chat_user=?", (chat,)).fetchone()
