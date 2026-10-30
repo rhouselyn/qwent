@@ -5,5 +5,4 @@
 
 - 内置版本:`f9fcdb4`(v0.5.1,2026-10 内置)
 - 用途:微信 4.x 密钥捕获(keyagent)、本地库解密、图片/.dat 媒体解码(以 `PYTHONPATH=src` 方式引用)
-- 上游更新:重新 clone 上游后,用 `src/` 覆盖本目录即可(或删除本目录后执行
-  `python backend/scripts/download_models.py --chattrace` 自动补拉)
+- 上游更新:重新 clone 上游后,用 `src/` 覆盖本目录即可

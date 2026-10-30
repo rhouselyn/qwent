@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""模型权重一键下载(开箱即用)。
+"""模型权重与 ChatTrace 一键下载(开箱即用)。
 
 下载内容:
   1. models/bge-small-zh          中文向量模型(约 91MB,优先 hf-mirror.com 镜像)

@@ -4,7 +4,7 @@ data/
 # ===== 本机配置,含真实 API key =====
 backend/config.json
 
-# ===== 大模型权重(约 250MB 必需部分,见 README 下载说明)=====
+# ===== 大模型权重(约 170MB 必需部分,见 README 下载说明)=====
 models/
 
 # ===== refs:本地研究资料不入库,仅内置运行时必需的 ChatTrace =====

@@ -19,6 +19,11 @@ sys.path.insert(0, str(PROJECT / "backend" / "scripts"))
 
 OK, BAD = "[✓]", "[✗]"
 
+# 运行必需的第三方包(模块名);setup.py 复用此列表做安装结果判定
+DEPS = ["fastapi", "uvicorn", "requests", "numpy", "cryptography", "zstandard",
+        "psutil", "sqlite_vec", "transformers", "torch", "sherpa_onnx",
+        "av", "rapidocr_onnxruntime", "docx", "openpyxl"]
+
 
 def check(name: str, ok: bool, fix: str = "", note: str = "") -> bool:
     print(f"{OK if ok else BAD} {name}" + (f" — {note}" if note else ""))
@@ -37,13 +42,10 @@ def main() -> int:
                          "安装 Python 3.11+", note=sys.version.split()[0]))
 
     # 2. 依赖(find_spec 只查存在性,不真正 import,秒回)
-    deps = ["fastapi", "uvicorn", "requests", "numpy", "cryptography", "zstandard",
-            "psutil", "sqlite_vec", "transformers", "torch", "sherpa_onnx",
-            "av", "rapidocr_onnxruntime", "docx", "openpyxl"]
-    missing = [d for d in deps if importlib.util.find_spec(d) is None]
+    missing = [d for d in DEPS if importlib.util.find_spec(d) is None]
     results.append(check("pip 依赖已安装", not missing,
                          "pip install -r requirements.txt",
-                         f"缺少: {', '.join(missing)}" if missing else f"{len(deps)} 个全部就绪"))
+                         f"缺少: {', '.join(missing)}" if missing else f"{len(DEPS)} 个全部就绪"))
 
     # 3. 配置文件
     cfg_path = PROJECT / "backend" / "config.json"
