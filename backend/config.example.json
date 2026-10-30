@@ -1,0 +1,23 @@
+{
+  "llm": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "sk-在这里填你的DeepSeek密钥",
+    "model": "deepseek-chat",
+    "thinking": false,
+    "thinking_model": "deepseek-reasoner"
+  },
+  "embedding": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "",
+    "model": "BAAI/bge-m3"
+  },
+  "qa": {
+    "max_context_messages": 30,
+    "temperature": 0.3,
+    "recent_hours": 24
+  },
+  "sync": {
+    "realtime": true,
+    "realtime_sec": 60
+  }
+}

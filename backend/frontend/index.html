@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微信知识助手</title>
+<link rel="stylesheet" href="style.css?v=33">
+</head>
+<body>
+<div class="app">
+  <!-- 左侧功能栏 -->
+  <nav class="rail">
+    <div class="avatar">微</div>
+    <button class="rail-btn active" data-view="chats" title="聊天">💬</button>
+    <button class="rail-btn" data-view="contacts" title="通讯录">👥</button>
+    <button class="rail-btn" data-view="files" title="文件">📁</button>
+    <button class="rail-btn" data-view="links" title="链接 / 公众号">📰</button>
+    <div class="rail-spacer"></div>
+    <button class="rail-btn" data-view="settings" title="设置">⚙️</button>
+  </nav>
+
+  <!-- 中栏列表 -->
+  <section class="list-pane">
+    <div class="searchbar">
+      <input id="searchInput" placeholder="搜索会话 / 全局搜消息（回车）">
+    </div>
+    <div id="sessionList" class="session-list"></div>
+    <div id="resultList" class="session-list" style="display:none"></div>
+    <div id="contactList" class="session-list" style="display:none"></div>
+    <div id="fileList" class="session-list" style="display:none"></div>
+    <div id="linkList" class="session-list" style="display:none"></div>
+    <div id="aiSessionList" class="session-list" style="display:none"></div>
+
+  </section>
+
+  <!-- 右区：聊天列 + AI 结果列 -->
+  <section class="chat-pane">
+    <div id="chatEmpty" class="chat-empty">
+      <div class="logo-big">微</div>
+      <h2>微信知识助手</h2>
+      <p>选择一个会话浏览记录，或在置顶的 <b>✦ AI 助手</b> 里全局提问</p>
+      <p class="hint" id="statusHint"></p>
+    </div>
+
+    <div id="chatMain" class="chat-main" style="display:none">
+      <!-- 中间：聊天 / 预览 -->
+      <div class="chat-column">
+        <header class="chat-header">
+          <div class="chat-title-row">
+            <span id="backToChat" class="back-btn" style="display:none" title="返回聊天">←</span>
+            <span id="chatTitle" class="chat-title"></span>
+            <span id="chatMeta" class="chat-meta"></span>
+          </div>
+          <div class="chat-actions"></div>
+        </header>
+        <div class="chat-body">
+          <div id="msgList" class="msg-list">
+            <div id="loadMore" class="load-more" style="display:none">加载更早的消息…</div>
+            <div id="msgs"></div>
+          </div>
+          <div id="previewPane" class="preview-pane" style="display:none">
+            <div id="pvBody" class="pv-body"></div>
+          </div>
+        </div>
+        <footer class="composer-wrap">
+          <div id="scopeBar" class="scope-bar" style="display:none">
+            <label class="scope-toggle" id="scopeToggleWrap"
+                   title="勾选：只在当前会话/文件内检索提问；取消勾选：全局检索">
+              <input type="checkbox" id="scopeToggle" checked>
+              <span id="scopeLabel">仅在当前会话内提问</span>
+            </label>
+          </div>
+          <div id="quoteBar" class="quote-bar" style="display:none">
+            <div class="quote-bar-body">
+              <div class="quote-bar-title">引用 <span id="quoteCount"></span></div>
+              <div id="quoteList" class="quote-list"></div>
+            </div>
+            <span id="quoteClear" class="quote-clear" title="取消引用">✕</span>
+          </div>
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="问 AI（Enter 发送，Shift+Enter 换行；可在消息上点「引用」）"></textarea>
+            <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
+              <input type="checkbox" id="thinkToggle"> 🧠
+            </label>
+            <button id="newSessionBtn" class="ghost-btn" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
+            <button id="sendBtn">发送</button>
+          </div>
+        </footer>
+      </div>
+
+      <!-- 右侧：只显示提问与 AI 结果 -->
+      <button id="drawerFab" class="drawer-fab" style="display:none" title="显示 AI 问答">✦</button>
+      <div id="settingsFull" class="settings-full" style="display:none">
+        <div class="sf-nav" id="sfNav"></div>
+        <div class="sf-body" id="sfBody"></div>
+      </div>
+      <aside id="assistantPane" class="assistant-pane" style="display:none">
+        <div class="drawer-head">
+          <span id="assistantTitle">✦ 全局助手</span>
+          <span class="drawer-scope" id="assistantScopeWrap" style="display:none">
+            <label class="scope-toggle" title="勾选后只在这个会话里检索">
+              <input type="checkbox" id="assistantScopeToggle" checked> 仅本会话
+              <b id="assistantScopeName"></b>
+            </label>
+          </span>
+          <span id="assistantMeta" class="drawer-scope"></span>
+        </div>
+        <div id="assistantConv" class="qa-list"></div>
+        <footer class="composer">
+          <textarea id="assistantInput" rows="1" placeholder="问 AI（全局检索全部聊天记录，Enter 发送）"></textarea>
+          <label class="think-toggle" title="深度思考">
+            <input type="checkbox" id="assistantThink"> 🧠
+          </label>
+          <button id="assistantNew" class="ghost-btn">＋ 新会话</button>
+          <button id="assistantSend">发送</button>
+        </footer>
+      </aside>
+      <aside id="aiSessionsPanel" class="ai-sessions-panel" style="display:none">
+        <div class="drawer-head">
+          <span>✦ AI 会话</span>
+          <span class="drawer-scope">点一条在中间继续</span>
+        </div>
+        <div id="aiTreeInPanel" class="ai-tree"></div>
+      </aside>
+      <aside id="drawer" class="drawer">
+        <div class="drawer-head">
+          <span>✦ AI 问答结果</span>
+          <span id="drawerScope" class="drawer-scope"></span>
+        </div>
+        <div id="qaList" class="qa-list"></div>
+      </aside>
+    </div>
+  </section>
+</div>
+<div id="toast" class="toast"></div>
+<script src="app.js?v=61"></script>
+<script src="stream_qa.js?v=14"></script>
+</body>
+</html>
