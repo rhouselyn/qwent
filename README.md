@@ -69,16 +69,13 @@ python backend/server.py 8721          # 启动,浏览器打开 http://127.0.0.1
 > 命令行版支持 `--yes`(非交互)和 `--index-url`(换 pip 源)。
 
 <details>
-<summary><b>全新环境首次建库</b>(本机没有历史数据备份时,点击展开)</summary>
+<summary><b>全新环境首次建库</b>(本机没有历史数据时,点击展开)</summary>
 
-```bash
-python backend/scripts/m0_decrypt.py     # 解密微信本地库
-python backend/scripts/m0_import.py      # 解析消息入库
-python backend/scripts/build_vectors.py  # 构建向量索引
-```
+一键配置检测到没有知识库时会自动询问,二选一:**恢复旧电脑的备份包** 或 **从本机微信自动建库**
+(增量解密 → 解析导入,全程无需手动敲命令)。
 
-数据库密钥通过 ChatTrace 运行时捕获(24 小时有效),步骤见 [项目文档.md](./项目文档.md)。
-微信账号目录自动发现(`xwechat_files` 下取最近使用的账号),多账号可在配置中手动指定。
+数据库密钥通过 ChatTrace 运行时捕获(24 小时有效,微信重启后需重新抓取);
+多账号可在 `backend/config.json` 的 `account.account_dir` 手动指定。
 
 </details>
 
