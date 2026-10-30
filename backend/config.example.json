@@ -1,4 +1,8 @@
 {
+  "account": {
+    "account_dir": "",
+    "data_root": ""
+  },
   "llm": {
     "base_url": "https://api.deepseek.com",
     "api_key": "sk-在这里填你的DeepSeek密钥",

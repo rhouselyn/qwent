@@ -28,11 +28,7 @@ KNOWLEDGE_DB = DATA / "knowledge.db"
 CONFIG = PROJECT / "backend" / "config.json"
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
-ACCOUNT_DIR = Path(os.path.expandvars(
-    r"%USERPROFILE%\xwechat_files\wxid_hs7bm9yapf5x12_965a"))
-DECRYPTED_DIR = Path(os.environ["LOCALAPPDATA"]) / "ChatTrace" / "accounts" / \
-    "wxid_hs7bm9yapf5x12_965a" / "decrypted"
-ACCOUNT_ID = "wxid_hs7bm9yapf5x12_965a"
+from paths import ACCOUNT_DIR, ACCOUNT_ID, DECRYPTED_DIR  # noqa: E402 自动定位微信账号目录
 
 if CHATTRACE_SRC.is_dir():
     sys.path.insert(0, str(CHATTRACE_SRC))

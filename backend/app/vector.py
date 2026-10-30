@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,9 +24,23 @@ MAX_LEN = 128          # 消息很短，128 token 足够，显著提速
 _model = None
 _tokenizer = None
 _device = None
+_dl_tried = False
 
 
 def available() -> bool:
+    global _dl_tried
+    if (MODEL_DIR / "config.json").exists():
+        return True
+    if _dl_tried:
+        return False
+    _dl_tried = True
+    try:                                   # 首次使用自动下载(约 95MB,走 hf-mirror)
+        sys.path.insert(0, str(PROJECT / "backend" / "scripts"))
+        from download_models import ensure_bge
+        ensure_bge()
+    except Exception as e:
+        print(f"[vector] 自动下载 bge-small-zh 失败: {e}\n"
+              f"        可手动执行 python backend/scripts/download_models.py --bge")
     return (MODEL_DIR / "config.json").exists()
 
 

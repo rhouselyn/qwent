@@ -8,12 +8,12 @@ import sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent.parent
+_app_dir = PROJECT / "backend" / "app"
+if str(_app_dir) not in sys.path:
+    sys.path.insert(0, str(_app_dir))
 sys.path.insert(0, str(PROJECT / "refs" / "ChatTrace" / "src"))
 
-ACCOUNT_DIR = Path(os.path.expandvars(r"%USERPROFILE%\xwechat_files\wxid_hs7bm9yapf5x12_965a"))
-DECRYPTED_DIR = Path(os.environ["LOCALAPPDATA"]) / "ChatTrace" / "accounts" / \
-    "wxid_hs7bm9yapf5x12_965a" / "decrypted"
-ACCOUNT_ID = "wxid_hs7bm9yapf5x12_965a"
+from paths import ACCOUNT_DIR, ACCOUNT_ID, DECRYPTED_DIR  # noqa: E402 自动定位微信账号目录
 
 _media = None
 _res = None

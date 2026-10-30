@@ -91,10 +91,13 @@ def main():
     n = sum(1 for _ in open(OUT))
     print(f"[*] 捕获候选 {n} 条，保存于 {OUT}")
     # 立即用 page1 指纹校验
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    sys.path.insert(0, os.path.join(here, "..", "app"))
     from m0lib import check_raw_key, load_page1
-    page1 = load_page1(os.path.expanduser(
-        r"~\xwechat_files\wxid_hs7bm9yapf5x12_965a\db_storage\message\message_0.db"))
+    from paths import ACCOUNT_DIR
+    page1 = load_page1(os.path.join(str(ACCOUNT_DIR),
+                                    "db_storage", "message", "message_0.db"))
     hit = False
     for line in open(OUT):
         parts = line.strip().split()

@@ -41,12 +41,23 @@ def build_sherpa():
     model = next((f for f in files if f.endswith(".onnx")), None)
     tokens = "tokens.txt" if "tokens.txt" in files else None
     if not model or not tokens:
+        try:                               # 缺模型时自动下载(约 230MB)
+            from download_models import ensure_para
+            ensure_para()
+            files = os.listdir(PARA_DIR)
+            model = next((f for f in files if f.endswith(".onnx")), None)
+            tokens = "tokens.txt" if "tokens.txt" in files else None
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"[asr] 自动下载模型失败: {e}")
+    if not model or not tokens:
         raise SystemExit(
             "[!] 缺少 sherpa-onnx 模型（models/para-zh 下需有 *.onnx 与 tokens.txt）。\n"
             "    下载途径（任选其一）：\n"
-            "      a) GitHub: k2-fsa/sherpa-onnx → releases → asr-models → "
-            "sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2\n"
-            "      b) 已解压后放到 models/para-zh/ 再重跑")
+            "      a) python backend/scripts/download_models.py --asr\n"
+            "      b) GitHub: k2-fsa/sherpa-onnx → releases → asr-models → "
+            "sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2，解压到 models/para-zh/")
     return sherpa_onnx.OfflineRecognizer.from_paraformer(
         paraformer=os.path.join(PARA_DIR, model),
         tokens=os.path.join(PARA_DIR, tokens),

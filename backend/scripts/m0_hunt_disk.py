@@ -9,7 +9,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 from m0lib import RESERVE_CANDIDATES, HEADER_FINGERPRINT, check_raw_key, load_page1  # noqa: E402
+from paths import ACCOUNT_DIR  # noqa: E402 自动定位微信账号目录
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: E402
 
 DPAPI_MAGIC = bytes.fromhex("01000000d08c9ddf")
@@ -50,8 +52,7 @@ def try_key_window(buf: bytes, page1: bytes) -> tuple[int, int] | None:
 
 
 def main():
-    account_dir = sys.argv[1] if len(sys.argv) > 1 else \
-        r"C:\Users\14815\xwechat_files\wxid_hs7bm9yapf5x12_965a"
+    account_dir = sys.argv[1] if len(sys.argv) > 1 else str(ACCOUNT_DIR)
     target_db = sys.argv[2] if len(sys.argv) > 2 else \
         os.path.join(account_dir, "db_storage", "message", "message_0.db")
     page1 = load_page1(target_db)

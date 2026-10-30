@@ -6,5 +6,17 @@ numpy==1.26.4
 cryptography==42.0.2
 psutil==5.9.0
 zstandard==0.19.0
+# 向量检索:本地 bge-small-zh 嵌入 + sqlite-vec 索引
+transformers==4.46.3
+torch==2.5.1            # 本机装的是 cu121 版,CPU 版同样可跑
+sqlite-vec==0.1.9
+# 语音识别(语音消息/视频转写)
+sherpa-onnx==2.0.1
+av==18.1.0              # PyAV,音频解码
+# 图片 OCR
+rapidocr-onnxruntime==1.4.4
+# 文件预览
+python-docx
+openpyxl
 # 仅 m0_frida_hook.py(扫描微信进程密钥)需要;其余功能可不装
 frida==17.24.3
