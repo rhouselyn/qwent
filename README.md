@@ -1,119 +1,172 @@
+<div align="center">
+
 # 微信知识助手
 
-把本机微信 4.0 的全部聊天记录、收发文件、图片、语音、链接变成**本地个人知识库**,提供语义搜索与带引用溯源的 RAG 问答。
+**把你的微信聊天记录,变成一个能语义搜索、带引用问答的私人知识库**
 
-- 只读本地数据,不向微信发送任何消息,零封号风险
-- 架构:数据采集(解密微信本地 SQLCipher 库)→ ETL(消息归一化 + 富媒体解析)→ SQLite + 全文 + 向量检索 → RAG 问答 → Web UI
-- **开箱即用**:双击 `一键配置.bat` 自动完成依赖、配置、模型下载与自检,并显示每步进度
+*全程本地运行 · 只读不发包 · 零封号风险*
 
-## 目录结构
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?logo=windows11&logoColor=white)
+![WeChat](https://img.shields.io/badge/%E5%BE%AE%E4%BF%A1-4.x-07C160?logo=wechat&logoColor=white)
+![Privacy](https://img.shields.io/badge/%E6%95%B0%E6%8D%AE-%E5%85%A8%E7%A8%8B%E6%9C%AC%E5%9C%B0-8A2BE2)
 
-```
-backend/
-  app/            FastAPI 后端(agent、RAG、媒体解析、流式问答、账号发现 paths.py)
-  frontend/       Web 前端(原生 JS)
-  scripts/        数据管线与工具(解密 / 导入 / 建向量 / setup.py / doctor.py / backup_data.py)
-  server.py       服务入口(默认端口 8721)
-  config.json     本机配置(含 API key,不入库;模板见 config.example.json)
-data/             解密数据与 knowledge.db(私密,不入库,见下方"一比一迁移")
-models/           本地模型权重(不入库,自动下载)
-refs/ChatTrace    第三方解密/媒体组件 —— 已内置(MIT,来源见其 VENDORED.md)
-需求文档.md / 项目文档.md
-一键配置.bat      双击:装依赖 → 生成配置 → 下载模型 → 自检
-启动助手.bat      双击:启动服务(未配置时会提示先跑一键配置)
-```
+</div>
 
-## 克隆后你会得到什么
+---
 
-仓库里只有代码和文档(`backend/`、两个 bat、md 文档)。其余内容**首次运行时自动生成**,不需要预先放好:
+## 💡 为什么需要它
 
-| 内容 | 是否随仓库 | 怎么就位 |
+几年下来,微信里沉淀了几十万条消息、文件、语音、图片和链接——那是你真实的个人知识资产。但你一定遇到过:
+
+- 🗣️ "朋友语音里说过的一个地址",翻两百条语音还没找到
+- 📄 "明明发过一份合同",只记得大概聊过,记不住原文用什么词
+- 🖼️ 截图里的报错、名片、表格,微信搜索永远搜不到
+- 🔗 群里分享过的文章和视频,内容既搜不到,也没法"问"
+- ❓ 最关键的:**没有任何工具能回答"我和某某聊过什么"这种问题**
+
+微信自带的搜索只能匹配准确关键词,跨不过语音、图片、链接这些媒介。本项目把它们全部补齐:
+
+> 解密本地数据库 → 文字/语音/图片/文件/链接**全部入库建索引** → AI 问答,
+> **每个答案都带 `[n]` 引用编号,点击直达原始消息、文件或链接原文**。
+
+## ✨ 核心特性
+
+| | 特性 | 说明 |
 |---|---|---|
-| 全部代码、前端、文档、脚本 | ✅ 随 git | clone 即有 |
-| `refs/ChatTrace`(解密/媒体组件) | ✅ **已内置** | clone 即有,无需任何 clone 步骤 |
-| `models/` 模型权重(~170MB) | ❌ 不入 git | **自动下载**(hf-mirror 镜像),一键配置时进行 |
-| `data/` 知识库(你的聊天记录) | ❌ 永不入 git | 二选一:① `backup_data.py` 恢复备份(一比一)② 从本机微信重新解密导入 |
+| 🔍 | **语义 + 全文双路搜索** | 向量检索(bge-small-zh)+ FTS5 三元分词,意思对了就能搜到,不必逐字匹配 |
+| 🤖 | **带引用溯源的 RAG 问答** | Agent 自动调用 11 个工具(检索/读文件/读链接/统计…)组织答案,正文 `[n]` 可点击跳转原文,答案下方保留完整引用合集 |
+| 🎙️ | **语音消息全文可搜** | Paraformer 离线转写,气泡下方直接显示文字 |
+| 🖼️ | **图片内容可搜** | OCR 提取截图/照片中的文字并建索引 |
+| 🔗 | **链接内容可搜可问** | 公众号正文、小红书图文(OCR)、B 站视频(字幕优先,无字幕转写音频)自动解析入库 |
+| ⚡ | **实时同步** | 监听微信数据库变化,新消息约 1 秒自动入库、可检索、可问答 |
+| 🛡️ | **零封号风险** | 只读本地文件,不向微信发送任何消息、不注入任何进程钩子(密钥捕获仅读取内存) |
+| 📦 | **开箱即用** | 双击 `一键配置.bat`:装依赖 → 生成配置 → 自动下载模型(国内镜像)→ 自检,全程显示进度 |
+| 🔁 | **一比一迁移** | 内置备份/恢复工具,换电脑时聊天记录、向量索引、媒体缓存原样搬走 |
 
-`data/` 是解密后的**私人聊天记录**(knowledge.db 3.7GB,超 GitHub 100MB 单文件限制),按设计不进 git;
-换电脑想要和现在完全一致,用 [`backup_data.py`](#换电脑--一比一迁移) 打包恢复即可。
+> 作者实测规模:54 万条消息、1.8 万联系人、827 个会话,检索毫秒级响应。
 
-## 快速开始
+## 🏗️ 工作原理
 
-环境要求:Windows 10/11、Python 3.11+、微信 4.x(本机登录过、本地有聊天记录)。
+```mermaid
+flowchart LR
+    subgraph S1[数据采集 · 本地]
+        W[微信 4.x 加密本地库] -->|ChatTrace 密钥捕获 + 解密| D[29 个明文库]
+    end
+    subgraph S2[知识库 · 本地]
+        D -->|归一化 + 语音转写 + 图片OCR + 链接解析| DB[(knowledge.db\nFTS5 全文 + 向量索引)]
+    end
+    subgraph S3[交互 · 本地]
+        DB --> A[RAG Agent]
+        A -->|SSE 流式输出 + 引用溯源| U[Web UI]
+    end
+    U -->|只读| W
+```
 
-### 方式一:一键(推荐)
+| 层 | 技术选型 |
+|---|---|
+| 后端 | Python 3.11 · FastAPI · SSE 流式 |
+| 存储 | SQLite + FTS5(trigram)+ sqlite-vec 分区向量索引 |
+| 嵌入 | bge-small-zh-v1.5(本地推理,CPU 即可) |
+| 语音 | sherpa-onnx Paraformer-zh-small(离线) |
+| OCR | RapidOCR(离线) |
+| 解密 | [ChatTrace](https://github.com/qiaodogbear/ChatTrace)(MIT,已内置) |
+| LLM | DeepSeek 等任意 OpenAI 兼容接口,不支持函数调用的模型也可用 |
+
+## 🚀 快速开始
+
+**环境要求**:Windows 10/11 · Python 3.11+ · 微信 4.x(本机登录过、本地有聊天记录)
 
 ```bat
 git clone https://github.com/rhouselyn/wechat-knowledge-assistant.git
 cd wechat-knowledge-assistant
-一键配置.bat      :: 双击;装依赖 → 生成 config 并询问 API key → 下载模型 → 自检
-启动助手.bat      :: 自检全 ✓ 后双击即用
 ```
 
-一键配置可重复运行,已完成的步骤自动跳过;每一步显示进度与用时,失败项给出修复提示。
-命令行等价:`python backend/scripts/setup.py`(`--yes` 非交互,`--index-url` 换 pip 源,默认清华源)。
+然后双击两个脚本:
 
-### 方式二:分步执行
+| 步骤 | 双击 | 它会做什么 |
+|---|---|---|
+| ① 初始化 | `一键配置.bat` | 安装依赖 → 生成配置并**询问 DeepSeek API key** → 自动下载模型与组件 → 逐项自检。可重复运行,已完成的步骤自动跳过 |
+| ② 启动 | `启动助手.bat` | 打开 [http://127.0.0.1:8721](http://127.0.0.1:8721) |
+
+<details>
+<summary><b>命令行方式 / 分步执行</b>(点击展开)</summary>
 
 ```bash
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+copy backend\config.example.json backend\config.json    # 填入 api_key
 
-copy backend\config.example.json backend\config.json   # 填入 DeepSeek API key
+python backend/scripts/setup.py                          # 一键配置(命令行版)
+python backend/scripts/doctor.py                         # 就绪自检
+python backend/server.py 8721                            # 启动
 
-python backend/scripts/download_models.py              # 模型 + ChatTrace(可选,会自动)
-
-python backend/scripts/m0_decrypt.py                   # 仅新环境且无 data 备份时需要:
-python backend/scripts/m0_import.py                    # 解密 → 导入 knowledge.db
-python backend/scripts/build_vectors.py                # 构建向量索引
-
-python backend/scripts/doctor.py                       # 自检,全 ✓ 即可启动
-python backend/server.py 8721                          # 或双击 启动助手.bat
+# 全新环境(无 data 备份)首次建库:
+python backend/scripts/m0_decrypt.py                     # 解密微信本地库
+python backend/scripts/m0_import.py                      # 解析消息入库
+python backend/scripts/build_vectors.py                  # 构建向量索引
 ```
 
-### 微信账号目录自动发现
+</details>
 
-启动时按以下优先级定位账号目录(即微信 4.x 的 `xwechat_files\wxid_xxx`):
+<details>
+<summary><b>它如何找到我的微信数据?</b>(点击展开)</summary>
 
-1. `backend/config.json` 的 `account.account_dir`(手动指定,多账号推荐)
+启动时自动定位微信 4.x 的账号目录(`xwechat_files\wxid_xxx`),优先级:
+
+1. `backend/config.json` 的 `account.account_dir`(多账号推荐手动指定)
 2. 环境变量 `WECHAT_ACCOUNT_DIR`
-3. 自动扫描 `%USERPROFILE%\xwechat_files\`,取最近使用的账号(多账号时打印全部)
+3. 自动扫描 `%USERPROFILE%\xwechat_files\`,取最近使用的账号
 
-自检:`python backend/app/paths.py` 会打印识别到的目录。
+验证:`python backend/app/paths.py`
 
-### 模型自动下载
+**抓取数据库密钥**(仅首次/微信更新后需要):ChatTrace 以运行时捕获方式读取密钥(24 小时有效),
+具体步骤见 [项目文档.md](./项目文档.md)。
 
-| 模型 | 用途 | 大小 | 来源 |
-|---|---|---|---|
-| `models/bge-small-zh` | 中文向量嵌入 | ~91MB | BAAI/bge-small-zh-v1.5,优先 hf-mirror.com 镜像 |
-| `models/para-zh` | 语音消息/视频转文字 | ~78MB | sherpa-onnx 官方 releases(paraformer-zh-small) |
+</details>
 
-缺哪个就下哪个;向量模型在首次检索时自动下载,语音模型在首次转写时自动下载。也可用 `download_models.py --bge / --asr / --chattrace` 单独控制。
+## 📦 换电脑 / 一比一迁移
 
-## 换电脑 / 一比一迁移
-
-`data/` 不随 git 走,想在新机器/新目录**直接可用**(聊天记录、向量索引、媒体缓存全部原样):
+`data/`(解密后的聊天记录,约 3.7GB)按设计**永不入 git**——它超过 GitHub 单文件限制,更是你的隐私。迁移用内置工具:
 
 ```bash
-# 旧机器:打包(含 knowledge.db 快照 + 库密钥 all_keys.json + 媒体缓存;服务运行中也可备份)
+# 旧电脑:打包(数据库快照 + 密钥 + 媒体缓存;服务运行中也可备份)
 python backend/scripts/backup_data.py D:\backup\wechat_data.zip
 
-# 新机器:clone → 一键配置.bat → 恢复备份 → 自检
+# 新电脑:clone → 一键配置.bat → 恢复 → 自检
 python backend/scripts/backup_data.py --restore D:\backup\wechat_data.zip
-python backend/scripts/doctor.py      # 全部 ✓ 后直接启动
+python backend/scripts/doctor.py        # 全部 ✓ 后即可启动
 ```
 
-没有备份也可以在新机器从头建库(需该机微信登录过且有聊天记录):走「方式二」的解密管线;
-抓取数据库密钥的步骤见 [项目文档.md](./项目文档.md)(ChatTrace keyagent,密钥 24h 有效)。
+## ⚙️ 常用配置(`backend/config.json`)
 
-详细技术方案见 [项目文档.md](./项目文档.md),需求背景见 [需求文档.md](./需求文档.md)。
+| 字段 | 说明 |
+|---|---|
+| `llm.api_key` | DeepSeek API key(必填,其余可不动) |
+| `llm.model` / `thinking_model` | 对话模型 / 深度思考模型,设置页可切换 |
+| `account.account_dir` | 微信账号目录,留空 = 自动发现 |
+| `sync.realtime` / `realtime_sec` | 实时同步开关与轮询间隔(默认开,60s) |
+| `qa.temperature` / `max_context_messages` | 问答风格与上下文长度 |
 
-## 安全与隐私
+## 🔒 隐私与安全
 
-- `data/` 内含**解密后的聊天记录**与数据库密钥(`all_keys.json`),已在 `.gitignore` 中排除,**严禁提交或分享**
-- `backend/config.json` 含真实 API key,不入库;仓库只保留 `config.example.json` 模板
-- `models/`(模型权重)不入库,首次配置时自动下载;`refs/` 下仅内置运行时必需的 ChatTrace,其余本地研究资料不入库
+- **数据不出本机**:解密、索引、语音转写、OCR、向量推理全部本地完成;唯一外发请求是调用你配置的 LLM API 生成回答
+- **仓库不含任何隐私**:`data/`(聊天记录与密钥)、`config.json`(API key)、`models/` 均被 `.gitignore` 排除,仓库只有代码
+- **只读原则**:不调用微信任何发送接口、不修改微信数据、无防撤回等高风险功能
 
-## 路线图
+## 🗺️ 路线图
 
-- ✅ 一期:全量历史消息解密入库、语义/全文搜索、带引用 RAG 问答、语音/图片/链接解析
-- ⏳ 二期:评估微信内小号查询入口(参考 wechaty),发送消息、防撤回、朋友圈均不做
+- ✅ 一期:全量历史解密入库、语义/全文搜索、带引用 RAG 问答、语音/图片/链接解析、实时同步
+- ⏳ 二期:评估微信内小号查询入口(参考 wechaty)
+- ❌ 明确不做:发送消息、防撤回、朋友圈、多账号、商业化
+
+## 🙏 致谢
+
+- [ChatTrace](https://github.com/qiaodogbear/ChatTrace) — 微信 4.x 密钥捕获、全库解密与媒体解码(已内置,MIT)
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — 离线中文语音识别
+- [BGE (BAAI)](https://huggingface.co/BAAI/bge-small-zh-v1.5) — 中文向量模型
+- 调研参考:[WeFlow](https://github.com/hicccc77/WeFlow)、[chatlog](https://github.com/sjzar/chatlog)、[PyWxDump](https://github.com/xaoyaoo/PyWxDump)
+
+## ⚠️ 免责声明
+
+本项目仅供**个人本地数据备份与知识管理**学习研究使用。请妥善保管解密后的数据与密钥,
+勿用于侵犯他人隐私、数据倒卖等非法用途;因使用不当造成的任何后果由使用者自行承担。
