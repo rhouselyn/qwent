@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""模型权重与 ChatTrace 一键下载(开箱即用)。
+"""模型权重一键下载(开箱即用)。
 
 下载内容:
-  1. models/bge-small-zh          中文向量模型(约 95MB,优先 hf-mirror.com 镜像)
-  2. models/para-zh               sherpa-onnx 中文语音识别(约 230MB,GitHub releases)
-  3. refs/ChatTrace               媒体解密依赖(可选,git clone,MIT 开源)
+  1. models/bge-small-zh          中文向量模型(约 91MB,优先 hf-mirror.com 镜像)
+  2. models/para-zh               sherpa-onnx 中文语音识别(约 78MB,GitHub releases)
+  3. refs/ChatTrace               媒体解密依赖 —— 已内置在仓库中;仅当缺失时才补 clone
 
 用法:
   python backend/scripts/download_models.py           # 全部缺的都下载
