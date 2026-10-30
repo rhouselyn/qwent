@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -131,6 +132,57 @@ XML_FILENAME = re.compile(r"<(?:filename|title)>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<
 XML_TOTALEN = re.compile(r"<totallen>(\d+)</totallen>")
 XML_VOICelen = re.compile(r'voicelength="(\d+)"')
 _SENDER_PREFIX_XML = re.compile(r"^(?:wxid_[0-9A-Za-z]+|[0-9A-Za-z_\-]{6,40}):\s*")
+# refermsg 的 <content>：贪婪到块内最后一个 </content>，引用套引用时取最外层正文
+XML_REFER_CONTENT = re.compile(r"<content>(.*)</content>", re.S)
+XML_QUOTE_MEDIA = re.compile(r"<(img|voicemsg|videomsg|emoji|voipmsg|location)[\s>/]")
+_QUOTE_MEDIA_LABEL = {"img": "[图片]", "voicemsg": "[语音]", "videomsg": "[视频]",
+                      "emoji": "[表情]", "voipmsg": "[通话]", "location": "[位置]"}
+
+
+def _xml_unescape(s: str) -> str:
+    """反转义到稳定为止：部分老消息的 refermsg.content 被多重转义，一层解不开。"""
+    for _ in range(4):
+        d = html.unescape(s)
+        if d == s:
+            return d
+        s = d
+    return s
+
+
+def _quote_oneline(s: str) -> str:
+    """引用预览压成单行，避免界面出现多行转义残渣。"""
+    return re.sub(r"\s+", " ", s or "").strip()[:200]
+
+
+def _refer_text(ref: str) -> str:
+    """refermsg 的人可读正文：优先 <title>，否则取 <content>。
+
+    不能对整个 refermsg 块去标签——那会把 type/svrid/fromusr/msgsource 等
+    字段一起倒出来，界面上就是一串乱码。content 本身还可能是内嵌 XML
+    （引用了图片/语音/链接/另一条引用），按形状转成简短说明。
+    """
+    mt = XML_TITLE.search(ref)
+    if mt and mt.group(1).strip():
+        return _quote_oneline(_xml_unescape(mt.group(1)))
+    mc = XML_REFER_CONTENT.search(ref)
+    if not mc:
+        return ""
+    c = _SENDER_PREFIX_XML.sub("", _xml_unescape(mc.group(1).strip()))
+    if not c.startswith("<"):
+        # openim 等账号形如 "xxx@openim: " 的发送者前缀：仅当后面跟着 XML 才剥，
+        # 避免误伤 "注意: xxx" 这类以冒号开头的正文
+        m2 = re.match(r"^[^\s<>:]{1,64}:\s*", c)
+        if m2 and c[m2.end():].startswith("<"):
+            c = c[m2.end():]
+    if c.startswith("<"):
+        mt = XML_TITLE.search(c)
+        if mt and mt.group(1).strip():
+            return _quote_oneline(_xml_unescape(mt.group(1)))
+        m = XML_QUOTE_MEDIA.search(c)
+        if m:
+            return _QUOTE_MEDIA_LABEL[m.group(1)]
+        return _quote_oneline(re.sub(r"<[^>]+>", " ", c))
+    return _quote_oneline(c)
 
 
 def has_xml_text(content: str) -> bool:
@@ -148,13 +200,12 @@ def _appmsg_dict(c: str) -> dict:
         return {"text": title or "[拍了拍]"}
     if subtype in ("57",):
         ref = XML_REFER.search(c)
-        rdisp = rcont = rtitle = ""
+        rdisp = rtitle = ""
         if ref:
             x = XML_DISPLAYNAME.search(ref.group(1))
-            rdisp = x.group(1) if x else ""
-            mt2 = XML_TITLE.search(ref.group(1))
-            rtitle = mt2.group(1) if mt2 else re.sub(r"<[^>]+>", "", ref.group(1))[:200]
-        return {"kind": "quote", "title": title, "refer": {"who": rdisp, "title": rtitle or rcont}}
+            rdisp = _quote_oneline(_xml_unescape(x.group(1))) if x else ""
+            rtitle = _refer_text(ref.group(1))
+        return {"kind": "quote", "title": title, "refer": {"who": rdisp, "title": rtitle}}
     return {"kind": "link", "title": title or "[消息]",
             "des": (md_.group(1) if md_ else "")[:200],
             "url": (mu.group(1) if mu else "")}
@@ -204,17 +255,14 @@ def parse_message(m: sqlite3.Row) -> dict:
             out["text"] = clean_display(62, c) or "[拍了拍]"
         elif subtype == "57":
             ref = XML_REFER.search(c)
-            rdisp = rcont = rtitle = ""
+            rdisp = rtitle = ""
             if ref:
-                rdisp = (XML_DISPLAYNAME.search(ref.group(1)) or [None, ""])[1] \
-                    if XML_DISPLAYNAME.search(ref.group(1)) else ""
-                mt = XML_TITLE.search(ref.group(1))
-                rtitle = mt.group(1) if mt else ""
-                if not rtitle:
-                    rcont = re.sub(r"<[^>]+>", "", ref.group(1))[:200]
+                x = XML_DISPLAYNAME.search(ref.group(1))
+                rdisp = _quote_oneline(_xml_unescape(x.group(1))) if x else ""
+                rtitle = _refer_text(ref.group(1))
             out["kind"] = "quote"
-            out["title"] = title
-            out["refer"] = {"who": rdisp, "title": rtitle or rcont}
+            out["title"] = _quote_oneline(_xml_unescape(title))
+            out["refer"] = {"who": rdisp, "title": rtitle}
         elif subtype in ("5", "6"):
             fn = XML_FILENAME.search(c)
             total = XML_TOTALEN.search(c)
