@@ -481,6 +481,7 @@ function onMsgScroll() {
 function showChatPane() {
   $("#chatEmpty").style.display = "none";
   $("#chatMain").style.display = "flex";
+  $("#settingsFull").style.display = "none";   // 从设置页切走时清残留
 }
 
 /* ---------------- 消息渲染 ---------------- */
@@ -1801,6 +1802,7 @@ async function openFilePreview(f) {
 /* ---------------- 视图切换与事件 ---------------- */
 function switchView(v) {
   state.view = v;
+  if (v !== "settings") $("#settingsFull").style.display = "none";
   if (typeof previewLink !== "undefined" && v !== "links") previewLink = null;
   document.querySelectorAll(".rail-btn").forEach(b => b.classList.toggle("active", b.dataset.view === v));
   if (v === "chats") {
