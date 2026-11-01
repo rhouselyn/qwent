@@ -9,6 +9,7 @@ function bindRefLinks(container, refs) {
       const n = +el.dataset.ref;
       const r = (refs || []).find(x => x.n === n);
       if (r) {
+        if (r.kind === "moment" && r.tid) return openMomentByTid(r.tid);
         if (r.kind === "link" && r.url) return openLinkPreview(r.url, r.chat_name);
         if (r.kind === "file") return openFilePreview({
           chat: r.chat, id: r.local_id || 0, ts: r.ts || 0,
@@ -46,7 +47,7 @@ function attachSourceFiles(turnEl, refs) {
   else turnEl.appendChild(wrap);
 }
 
-/* 可展开的「引用来源」合集：每条都可点击（消息跳原文 / 公众号打开正文 / 文件打开源文件） */
+/* 可展开的「引用来源」合集：每条都可点击（消息跳原文 / 朋友圈打开详情 / 公众号打开正文 / 文件打开源文件） */
 function buildRefsWrap(refs) {
   if (!refs || !refs.length) return null;
   const wrap = document.createElement("div");
@@ -60,13 +61,15 @@ function buildRefsWrap(refs) {
     item.className = "ref-item";
     const isLink = r.kind === "link" && r.url;
     const isFile = r.kind === "file";
+    const isMoment = r.kind === "moment" && r.tid;
     const label = isFile ? (r.title || r.snippet || "文件")
                 : isLink ? (r.chat_name || "网页文章") : (r.chat_name || "");
     item.innerHTML = `<div class="ref-head">
-        <span class="ref-chip">[${r.n}] ${esc(label)} ${r.ts ? fmtTime(r.ts) : ""}</span>
-        <span class="ref-jump">${isLink ? "打开原文 ↗" : isFile ? "打开文件 ↗" : "跳转原文 ↗"}</span></div>`;
+        <span class="ref-chip">[${r.n}] ${esc(isMoment ? "朋友圈 · " + label : label)} ${r.ts ? fmtTime(r.ts) : ""}</span>
+        <span class="ref-jump">${isMoment ? "查看朋友圈 ↗" : isLink ? "打开原文 ↗" : isFile ? "打开文件 ↗" : "跳转原文 ↗"}</span></div>`;
     item.querySelector(".ref-jump").onclick = () => {
-      if (isLink) openLinkPreview(r.url, r.chat_name);
+      if (isMoment) openMomentByTid(r.tid);
+      else if (isLink) openLinkPreview(r.url, r.chat_name);
       else if (isFile) openFilePreview({ chat: r.chat, id: r.local_id || 0, ts: r.ts || 0,
         title: r.title || r.snippet || "", chat_name: r.chat_name || "", size: r.size || 0 });
       else jumpToRef(r);
@@ -164,6 +167,20 @@ async function askStream(question) {
     : null;
   const chat = (fileCtx || linkCtx) ? null : currentAskScope();
   const sc = (typeof aiScopeForContext === "function") ? aiScopeForContext() : null;
+  // 发问前就把会话建好并放进 tree：否则要等流结束才出现，从其它窗口跳回来是空的
+  if (!aiState.currentSession && typeof api === "function") {
+    try {
+      const r = await api("/api/ai/sessions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: sc ? sc.key : (chat || "assistant"),
+          name: question.slice(0, 24),
+        }),
+      });
+      aiState.currentSession = r.id;
+      await loadAiTree(); renderAiTree();
+    } catch {}
+  }
   const turn = makeTurnShell(question);
   const modeEl = turn.querySelector(".mode");
   const answerEl = turn.querySelector(".a");

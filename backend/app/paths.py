@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent.parent
@@ -44,11 +45,27 @@ def _recency(d: Path) -> float:
     return d.stat().st_mtime
 
 
+def _default_roots() -> list[Path]:
+    if os.name == "nt":
+        return [Path(os.path.expandvars(r"%USERPROFILE%\xwechat_files"))]
+    if sys.platform == "darwin":
+        # mac 微信 4.x 数据根（容器目录，按常见度排列）
+        return [
+            Path.home() / "Library/Containers/com.tencent.xinWeChat"
+            / "Data/Documents/xwechat_files",
+            Path.home() / "Library/Containers/com.tencent.xinWeChat"
+            / "Data/Library/Application Support/xwechat_files",
+            Path.home() / "Documents/xwechat_files",
+        ]
+    return [Path.home() / "xwechat_files"]
+
+
 def discover_accounts(root: Path | None = None) -> list[Path]:
-    base = root or Path(os.path.expandvars(r"%USERPROFILE%\xwechat_files"))
-    if not base.is_dir():
-        return []
-    found = [d for d in base.iterdir() if _looks_like_account(d)]
+    roots = [root] if root else _default_roots()
+    found: list[Path] = []
+    for base in roots:
+        if base.is_dir():
+            found += [d for d in base.iterdir() if _looks_like_account(d)]
     found.sort(key=_recency, reverse=True)
     return found
 
@@ -80,8 +97,14 @@ def resolve() -> tuple[Path, str]:
 
 
 ACCOUNT_DIR, ACCOUNT_ID = resolve()
-DECRYPTED_DIR = Path(os.path.expandvars(r"%LOCALAPPDATA%")) / "ChatTrace" / \
-    "accounts" / ACCOUNT_ID / "decrypted"
+if os.name == "nt":
+    DECRYPTED_DIR = Path(os.path.expandvars(r"%LOCALAPPDATA%")) / "ChatTrace" / \
+        "accounts" / ACCOUNT_ID / "decrypted"
+else:
+    # mac/Linux：解密产物放本项目的用户态状态目录（ChatTrace CLI 不跨平台，
+    # 进程内解密由 main._decrypt_quick 的非 Windows 分支完成）
+    DECRYPTED_DIR = Path.home() / ".local/state/wechat-knowledge-assistant" / \
+        ACCOUNT_ID / "decrypted"
 
 if __name__ == "__main__":
     print(f"account_dir = {ACCOUNT_DIR}")

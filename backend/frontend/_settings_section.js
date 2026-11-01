@@ -171,7 +171,7 @@ function renderSettingsAbout(body, status) {
       <div style="margin-top:6px"><span class="k">问答模式</span>${status.llm === "configured"
         ? "AI 生成（" + esc(status.llm_model) + "）" : "检索模式（未配置 Key）"}</div>
       <div style="margin-top:6px"><span class="k">数据库密钥</span>fp=${status.key_fp}
-        （24h 有效，微信重启后需重新捕获）</div>
+        （密钥账号级稳定，服务会定期 HMAC 实测；失效时自动扫运行中微信内存重取，免退出微信）</div>
       <div style="margin-top:6px"><span class="k">数据位置</span>data/knowledge.db 与
         data/decrypted（全部在本机）</div>
     </div>`;

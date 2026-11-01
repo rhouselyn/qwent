@@ -231,7 +231,7 @@ async function api(path, opts) {
 }
 
 const PANES = ["#sessionList", "#resultList", "#contactList", "#fileList",
-               "#linkList", "#settingsPane", "#aiSessionList"];
+               "#linkList", "#settingsPane", "#aiSessionList", "#snsList"];
 function showPane(id) {
   PANES.forEach(p => { const el = $(p); if (el) el.style.display = "none"; });
   if (id) { const el = $(id); if (el) el.style.display = "block"; }
@@ -786,6 +786,7 @@ function renderQA() {
 /* ---------------- AI 助手的作用域（仅本会话） ---------------- */
 function scopeNameOf(scope) {
   if (!scope || scope === "assistant") return "";
+  if (scope.startsWith("moment:")) return "朋友圈";
   const s = state.sessions.find(x => x.username === scope);
   return s ? s.name : scope;
 }
@@ -821,6 +822,9 @@ function aiScopeForContext() {
     return { key: `link:${hashStr(previewLink.url)}`,
              name: previewLink.title || "链接",
              kind: "link" };
+  }
+  if (typeof previewMoment !== "undefined" && previewMoment) {
+    return { key: `moment:${previewMoment}`, name: "朋友圈", kind: "moment" };
   }
   if (isAssistant() || !state.current) return { key: "assistant", name: "全局助手", kind: "assistant" };
   return { key: state.current.username, name: state.current.name || state.current.username,
@@ -864,6 +868,7 @@ async function jumpToRef(r) {
   // 从文件/文章预览里跳走时，结束"仅此文件/本文"上下文，回到会话提问
   previewFile = null;
   if (typeof previewLink !== "undefined") previewLink = null;
+  if (typeof previewMoment !== "undefined") previewMoment = null;
   $(".composer #input").placeholder = "问 AI（Enter 发送，Shift+Enter 换行）";
   const data = await api(`/api/messages/context?id=${r.id}&around=15`);
   state.current = { username: data.chat, name: data.chat_name,
@@ -1102,6 +1107,174 @@ async function showLinks(q = "") {
   showPane("#linkList");
 }
 
+/* ---------------- 朋友圈（本地永久留存 + 实时增量同步） ---------------- */
+let previewMoment = null;
+let snsOffset = 0;
+
+async function showMoments(q = "", reset = true) {
+  const box = $("#snsList");
+  if (reset) { snsOffset = 0; box.innerHTML = `<div class="qa-empty">加载中…</div>`; }
+  let data;
+  try {
+    data = await api(`/api/sns/posts?offset=${snsOffset}&limit=50&q=${encodeURIComponent(q)}`);
+  } catch (e) {
+    box.innerHTML = `<div class="qa-empty">加载失败：${esc(e.message)}</div>`;
+    showPane("#snsList");
+    return;
+  }
+  if (reset) box.innerHTML = "";
+  if (!data.items.length && !snsOffset) {
+    box.innerHTML = `<div class="qa-empty">还没有朋友圈数据。<br>服务启动时会自动从微信解密库同步，稍等片刻再试。</div>`;
+    showPane("#snsList");
+    return;
+  }
+  if (reset) {
+    const head = document.createElement("div");
+    head.className = "qa-empty";
+    head.id = "snsStatusBar";
+    box.appendChild(head);
+    refreshSnsStatus();
+  }
+  for (const p of data.items) {
+    const d = document.createElement("div");
+    d.className = "result-item sns-item";
+    const media = [
+      p.n_img ? `🖼 ${p.n_img}${p.n_local ? `<span class="sns-local">·${p.n_local}</span>` : ""}` : "",
+      p.n_vid ? `🎬 ${p.n_vid}` : "",
+      p.n_links ? `🔗 ${p.n_links}` : "",
+      p.n_comments ? `💬 ${p.n_comments}` : ""].filter(Boolean).join(" ");
+    d.innerHTML = `<div class="sns-item-main">
+        <div class="meta">${esc(p.author_name || p.author)} · ${fmtTime(p.ts)} ${media}</div>
+        <div class="snippet">${p.text ? esc(p.text.slice(0, 120)) : "<i>(纯图/视频)</i>"}</div>
+      </div>` +
+      (p.first_img != null
+        ? `<img class="sns-thumb" loading="lazy" decoding="async"
+             src="/api/sns/image?tid=${encodeURIComponent(p.tid)}&idx=${p.first_img}">`
+        : "");
+    d.onclick = () => openMomentDetail(p.tid);
+    box.appendChild(d);
+  }
+  snsOffset += data.items.length;
+  if (data.items.length && data.total > snsOffset) {
+    const more = document.createElement("div");
+    more.className = "qa-empty load-more-sns";
+    more.textContent = "加载更多…";
+    more.onclick = () => { more.textContent = "加载中…"; showMoments(q, false); };
+    box.appendChild(more);
+  }
+  showPane("#snsList");
+}
+
+async function openMomentDetail(tid) {
+  showChatPane();
+  $("#assistantPane").style.display = "none";
+  $("#aiSessionsPanel").style.display = "none";
+  $("#settingsFull").style.display = "none";
+  document.querySelector(".chat-column").style.display = "flex";
+  $("#msgList").style.display = "none";
+  $("#previewPane").style.display = "flex";
+  $("#previewPane").style.flexDirection = "column";
+  $("#backToChat").style.display = "inline";
+  previewMoment = tid;
+  $("#pvBody").innerHTML = `<div class="qa-empty">加载中…</div>`;
+  $("#drawer").style.display = "flex";
+  $("#drawerFab").style.display = "none";
+  let p;
+  try {
+    p = await api(`/api/sns/post/${encodeURIComponent(tid)}`);
+  } catch (e) {
+    $("#pvBody").innerHTML = `<div class="qa-empty">加载失败：${esc(e.message)}</div>`;
+    return;
+  }
+  if (previewMoment !== tid) return;      // 用户已切走
+  const name = p.author_name || p.author;
+  $("#chatTitle").textContent = `${name} 的朋友圈`;
+  $("#chatMeta").textContent = `${fmtTime(p.ts)}${p.location ? " · " + p.location : ""}`;
+  // 每条朋友圈有自己独立的 AI 会话作用域
+  await enterAiScope(`moment:${tid}`, `${name} 的朋友圈`);
+  $("#scopeToggle").checked = true;
+  updateScopeBar();
+  updateDrawerScope();
+  $("#input").placeholder = "针对这条朋友圈提问…";
+  const imgs = (p.media || []).filter(m => !m.video);
+  const vids = (p.media || []).filter(m => m.video);
+  let html = `<div class="pv-head"><span class="pv-name">${esc(name)}</span>
+      <span class="pv-time">${fmtTime(p.ts)}${p.location ? " · 📍" + esc(p.location) : ""}</span></div>`;
+  if (p.text) html += `<pre class="pv-text sns-text">${esc(p.text)}</pre>`;
+  for (const l of (p.links || [])) {
+    html += `<div class="sns-link" data-url="${esc(l.url)}">
+      <span class="sns-link-ico">🔗</span>
+      <span class="sns-link-body"><span class="sns-link-title">${esc(l.title || l.url)}</span>
+      <span class="sns-link-url">${esc(l.url.slice(0, 80))}</span></span>
+      <span class="sns-link-go">读正文 ↗</span></div>`;
+  }
+  if (imgs.length) {
+    html += `<div class="sns-img-grid">` + imgs.map(m => {
+      const tip = m.ocr ? esc(m.ocr.slice(0, 80)) : "点击放大";
+      return `<div class="sns-img-wrap" title="${tip}">
+          <div class="sns-img-ph loading">…</div>
+          <img class="sns-img" loading="lazy" decoding="async" alt="图 ${m.i + 1}"
+             src="/api/sns/image?tid=${encodeURIComponent(tid)}&idx=${m.i}"
+             onload="const ph=this.parentNode.querySelector('.sns-img-ph'); if(ph) ph.remove();"
+             onerror="const w=this.parentNode; const ph=w && w.querySelector('.sns-img-ph'); if(ph){ ph.textContent='拉取失败'; ph.classList.remove('loading'); } if(this.parentNode) this.remove();">
+        </div>`;
+    }).join("") + `</div>`;
+  }
+  for (const v of vids) {
+    if (v.playable) {
+      html += `<video class="sns-video" controls preload="metadata"
+          src="/api/sns/video?tid=${encodeURIComponent(tid)}&idx=${v.i}"
+          onerror="this.outerHTML='<div class=sns-video-ph>🎬 视频（${v.dur || "?"} 秒）— CDN 拉取失败，无法回放</div>'"></video>`;
+    } else {
+      html += `<div class="sns-video-ph">🎬 视频（${v.dur ? v.dur + " 秒" : "时长未知"}）— 无可用的视频源</div>`;
+    }
+  }
+  const ocrAll = (p.media || []).filter(m => m.ocr && m.ocr.trim());
+  if (ocrAll.length) {
+    html += `<div class="sns-ocr-box"><div class="sns-ocr-toggle">图片文字（OCR，${ocrAll.length} 张） ▸</div>
+      <div class="sns-ocr-body" style="display:none">` +
+      ocrAll.map(m => `<div class="sns-ocr-item"><b>图 ${m.i + 1}</b><pre>${esc(m.ocr)}</pre></div>`).join("") +
+      `</div></div>`;
+  }
+  if ((p.comments || []).length) {
+    html += `<div class="sns-comments"><div class="sns-c-head">评论 ${p.comments.filter(c => c.ctype !== 1).length} · 赞 ${p.n_likes || 0}</div>` +
+      p.comments.map(c => c.ctype === 1
+        ? `<div class="sns-like-line">👍 ${esc(c.nick || "好友")}</div>`
+        : `<div class="sns-comment"><span class="who">${esc(c.nick || "好友")}</span>
+             <span class="text">${esc(c.text || "")}</span>
+             <span class="ts">${fmtTime(c.ts)}</span></div>`).join("") +
+      `</div>`;
+  }
+  html += `<div class="sns-hint">本条已永久保存在本地知识库：作者删除或设为“三天可见”不影响这份留存。</div>`;
+  $("#pvBody").innerHTML = html;
+  const og = $("#pvBody .sns-ocr-toggle");
+  if (og) og.onclick = () => {
+    const b = $("#pvBody .sns-ocr-body");
+    const open = b.style.display !== "none";
+    b.style.display = open ? "none" : "block";
+    og.textContent = `图片文字（OCR，${ocrAll.length} 张） ${open ? "▸" : "▾"}`;
+  };
+  $("#pvBody").querySelectorAll(".sns-img-wrap img").forEach(el => {
+    el.onclick = () => el.classList.toggle("big");
+  });
+  $("#pvBody").querySelectorAll(".sns-link").forEach(el => {
+    el.onclick = () => openLinkPreview(el.dataset.url, el.querySelector(".sns-link-title").textContent);
+  });
+  $("#input").focus();
+}
+
+function openMomentByTid(tid) { openMomentDetail(String(tid)); }
+
+async function refreshSnsStatus() {
+  try {
+    const st = await api("/api/sns/status");
+    const el = $("#snsStatusBar");
+    if (el) el.textContent = `${st.posts} 条朋友圈 · ${st.comments} 评论 · 图片文字 ${st.ocr_done} 张` +
+      (st.loop_error ? ` · 同步异常: ${st.loop_error}` : "") +
+      (st.sync_running ? " · 同步中…" : "");
+  } catch {}
+}
+
 async function refreshJobs() {
   const box = $("#jobsBox");
   if (!box) return;
@@ -1315,7 +1488,7 @@ function renderSettingsAbout(body, status) {
       <div style="margin-top:6px"><span class="k">问答模式</span>${status.llm === "configured"
         ? "AI 生成（" + esc(status.llm_model) + "）" : "检索模式（未配置 Key）"}</div>
       <div style="margin-top:6px"><span class="k">数据库密钥</span>fp=${status.key_fp}
-        （24h 有效，微信重启后需重新捕获）</div>
+        （密钥账号级稳定，服务会定期 HMAC 实测；失效时自动扫运行中微信内存重取，免退出微信）</div>
       <div style="margin-top:6px"><span class="k">数据位置</span>data/knowledge.db 与
         data/decrypted（全部在本机）</div>
     </div>`;
@@ -1494,6 +1667,7 @@ function exitPreview() {
   $("#drawer").style.display = "flex";
   previewFile = null;
   if (typeof previewLink !== "undefined") previewLink = null;
+  if (typeof previewMoment !== "undefined") previewMoment = null;
   if (state.current) $("#chatTitle").textContent = state.current.name;
   // 回到会话上下文：右侧切回该会话自己的 AI 对话
   if (state.current && state.current.username !== "assistant") {
@@ -1599,11 +1773,18 @@ function switchView(v) {
     showLinks();
     return;
   }
+  if (v === "moments") {
+    $("#searchInput").placeholder = "搜索朋友圈文字（含图片 OCR）";
+    showMoments();
+    refreshSnsStatus();
+    return;
+  }
   $("#searchInput").placeholder = "搜索会话 / 全局搜消息（回车）";
   if (v === "settings") showSettings();
 }
 $("#searchInput").addEventListener("input", (e) => {
   if (state.view === "links") { showLinks(e.target.value); return; }
+  if (state.view === "moments") { showMoments(e.target.value); return; }
   if (state.view !== "chats") return;
   if (state.searchMode) return;
   renderSessions(e.target.value);

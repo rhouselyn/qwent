@@ -125,9 +125,76 @@ def step_config(yes: bool) -> None:
         _mark(False, "API key 未填写 — 启动前请编辑 backend/config.json")
 
 
+def _stored_key_validates() -> bool:
+    """实测存量密钥是否仍能打开消息库（HMAC 校验，不看 24h 时间戳——密钥账号级稳定）。"""
+    try:
+        sys.path.insert(0, str(HERE.parent / "refs" / "ChatTrace" / "src"))
+        sys.path.insert(0, str(HERE.parent / "app"))
+        from chattrace.keyagent import keystore
+        from chattrace.keyagent.account import resolve_account
+        from chattrace.keyagent.verify import read_db_header, verify_hmac_sweep
+        account = resolve_account(Path(_account()[0]))
+        info = keystore.load_key(account.account_id)
+        ok, _ = verify_hmac_sweep(info.password, read_db_header(account.message_db))
+        return ok
+    except Exception:
+        return False
+
+
+def _memory_scan_key() -> bool:
+    """微信运行中直接扫进程内存取钥（免退出）；失败返回 False 走交互流程。"""
+    try:
+        sys.path.insert(0, str(HERE.parent / "app"))
+        import keyscan
+        acc, _ = _account()
+        r = keyscan.capture_and_store(Path(acc),
+                                      Path(acc) / "db_storage" / "message" / "message_0.db")
+        return bool(r.get("ok"))
+    except Exception:
+        return False
+
+
+def keyvault_manual_prompt() -> bool:
+    """非 Windows：交互读取用户粘贴的 hex 密钥并导入。"""
+    try:
+        sys.path.insert(0, str(HERE.parent / "app"))
+        import keyvault
+        acc, _ = _account()
+        k = input("  粘贴 64 位 hex 密钥后回车: ").strip()
+        if not k:
+            return False
+        r = keyvault.import_manual_key(Path(acc), k)
+        if r.get("ok"):
+            print(f"  {r['detail']}")
+            return True
+        print(f"  导入失败: {r['detail']}")
+        return False
+    except Exception as exc:
+        print(f"  导入异常: {exc}")
+        return False
+
+
 def _ensure_key() -> bool:
-    """确保 ChatTrace 密钥可用(过期则引导抓取一次)。"""
-    print("  数据库密钥不可用或已过期,需要抓取一次(24 小时有效):")
+    """确保数据库密钥可用：HMAC 实测通过直接用 → 失效先试内存扫描（免退出）→ 交互抓取。"""
+    if os.name != "nt":
+        print("  macOS/Linux：无自动抓钥方案，请手动导入一次密钥（密钥账号级稳定，导一次长期有效）：")
+        print("    python backend/app/keyvault.py --account-dir <微信账号目录> --import <64位hex密钥>")
+        print("  （密钥可用任意取钥工具获取；导入前会自动做 HMAC 校验）")
+        r = keyvault_manual_prompt()
+        if r:
+            _mark(True, "密钥导入成功（HMAC 校验通过）")
+            return True
+        _mark(False, "密钥未导入 — 可稍后手动执行上面的命令后重跑")
+        return False
+    print("  检查数据库密钥 ...")
+    if _stored_key_validates():
+        _mark(True, "存量密钥实测有效（HMAC 通过），无需重新抓取")
+        return True
+    print("  存量密钥无法打开消息库（或不存在），尝试从运行中的微信内存扫描（约 1-2 分钟）...")
+    if _memory_scan_key():
+        _mark(True, "已从运行中的微信内存取得新密钥，微信无需退出")
+        return True
+    print("  内存扫描未命中（微信未运行或库早已打开时会这样），回退交互式抓取：")
     input("  请先完全退出微信(托盘右键退出),然后回车继续 ...")
     print("  正在启动微信并捕获密钥,微信窗口会自动弹出,请勿操作 ...")
     if _chattrace(["keyagent", "run", "--account-dir",
@@ -271,6 +338,14 @@ def main() -> int:
         step_models(args.yes)
     except Exception as e:
         _mark(False, f"模型步骤异常: {e}")
+    try:
+        # 朋友圈 CDN 解密组件(可选,失败不影响其它功能)
+        r = subprocess.run([sys.executable, "setup_sns_wasm.py"], cwd=str(HERE),
+                           capture_output=True, text=True, timeout=180)
+        tail = (r.stdout or r.stderr or "").strip().splitlines()
+        _mark(r.returncode == 0, "朋友圈媒体组件 " + (tail[-1] if tail else ""))
+    except Exception as e:
+        _mark(False, f"朋友圈媒体组件: {e}")
     try:
         step_check()
     except Exception as e:

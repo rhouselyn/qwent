@@ -769,6 +769,46 @@ def t_recent_messages(args):
             "hours": hours, "messages": data, "count": len(data)}
 
 
+def t_search_moments(args):
+    """检索朋友圈（正文关键词 + OCR 图片文字 + 语义向量），支持作者/天数过滤。"""
+    import sns as sns_mod
+    query = str(args.get("query") or "")
+    if not query.strip():
+        return {"error": "query 不能为空"}
+    con = _db()
+    try:
+        items = sns_mod.search_moments(con, query,
+                                       author=str(args.get("author") or ""),
+                                       days=int(args.get("days") or 0),
+                                       limit=min(int(args.get("limit") or 10), 30))
+    finally:
+        con.close()
+    for it in items:
+        it["text"] = (it.get("text") or "")[:400]
+    return {"count": len(items), "moments": items}
+
+
+def t_get_moment(args):
+    """读取单条朋友圈全文，含图片/视频信息、图片 OCR 文字、评论与点赞。"""
+    import sns as sns_mod
+    tid = str(args.get("tid") or "")
+    if not tid:
+        return {"error": "需要 tid（来自 search_moments 结果）"}
+    con = _db()
+    try:
+        post = sns_mod.get_moment(con, tid)
+    finally:
+        con.close()
+    if post is None:
+        return {"error": f"朋友圈 {tid} 不存在（可能是尚未同步的新朋友圈）"}
+    post["media"] = [{"i": m.get("i", 0), "video": m.get("video", False),
+                      "dur": m.get("dur", 0), "desc": (m.get("desc") or "")[:200],
+                      "ocr": (m.get("ocr") or "")[:800], "local": m.get("local", False)}
+                     for m in post.get("media", [])]
+    post["who"] = post.get("author_name") or post.get("author") or "朋友圈"
+    return post
+
+
 # ---------------------------------------------------------------- 工具注册
 TOOLS = {
     "get_current_time": (t_now, "获取当前日期时间、星期，用于理解「今天/上周/上个月」等相对时间。",
@@ -868,6 +908,20 @@ TOOLS = {
                    "之后用 read_link(url) 取全文。",
                    {"type": "object", "properties": {
                        "query": {"type": "string"}, "limit": {"type": "integer"}}}),
+    "search_moments": (t_search_moments,
+                       "检索朋友圈（关键词匹配正文与图片 OCR 文字，弱结果时语义向量兜底），"
+                       "可按 author（名字/微信号）与 days（最近 N 天）过滤。"
+                       "回答「某人朋友圈发过什么/谁提到过某事」用它。",
+                       {"type": "object", "properties": {
+                           "query": {"type": "string"},
+                           "author": {"type": "string", "description": "作者名关键词，可省略"},
+                           "days": {"type": "integer", "description": "限定最近 N 天，可省略"},
+                           "limit": {"type": "integer"}}, "required": ["query"]}),
+    "get_moment": (t_get_moment,
+                   "读取单条朋友圈全文：正文、每张图的 OCR 文字、视频时长、评论与点赞数。"
+                   "tid 来自 search_moments。",
+                   {"type": "object", "properties": {
+                       "tid": {"type": "string"}}, "required": ["tid"]}),
 }
 
 SYSTEM_PROMPT = """你是用户的微信记录分析助手，可以调用工具主动检索本机历史数据。
@@ -877,6 +931,8 @@ SYSTEM_PROMPT = """你是用户的微信记录分析助手，可以调用工具�
    - 用户正在某个会话里提问 → 默认该会话。**若系统已给出【最近记录】且足以回答，
      直接作答，不要调用任何工具**（这是最快路径）。
    - 全局提问 → 自己决定检索什么：聊天记录、文件、公众号/网页，或全部。
+   - 涉及朋友圈（「某人发过什么朋友圈」「朋友圈里提到过…」）→ search_moments；
+     命中后用 get_moment 看单条全文（含图片 OCR 文字与评论）。
 2. **关键词由你自己生成**：把用户问题改写成 2~4 组互补的检索词
    （同义词、别名、相关概念、更具体的说法），一次性传给 rag_search。
    例：「上线时间」→ ["上线","发布日期","什么时候上线","排期"]。
@@ -1216,6 +1272,20 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
                     seen_msgs[url] = ent
                 item["ref"] = ent["n"]
 
+            def _reg_moment(item: dict) -> None:
+                tid = str(item.get("tid") or "")
+                if not tid:
+                    return
+                ent = seen_msgs.get("moment:" + tid)
+                if ent is None:
+                    ent = {"n": len(seen_msgs) + 1, "id": 0, "kind": "moment", "tid": tid,
+                           "chat": "", "chat_name": item.get("who")
+                           or item.get("author_name") or "朋友圈",
+                           "ts": item.get("ts", 0), "sender_name": "朋友圈",
+                           "snippet": (item.get("text") or "")[:160]}
+                    seen_msgs["moment:" + tid] = ent
+                item["ref"] = ent["n"]
+
             for key in ("messages", "files"):
                 items = result.get(key)
                 if not isinstance(items, list):
@@ -1227,6 +1297,12 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
                         _reg_file(item)
                     elif item.get("id"):
                         _reg_msg(item)
+            for item in (result.get("moments") if isinstance(result.get("moments"), list) else []):
+                if isinstance(item, dict):
+                    _reg_moment(item)
+            # get_moment 读过的朋友圈本身也是一条可点击引用
+            if name == "get_moment" and "error" not in result:
+                _reg_moment(result)
             links = result.get("links")
             for item in (links if isinstance(links, list) else []):
                 if isinstance(item, dict):
@@ -1331,6 +1407,12 @@ def _summarize(name: str, result: dict) -> str:
         return f"会话内链接 {result.get('count', 0)} 条"
     if name == "find_links":
         return f"文章命中 {result.get('count', 0)} 篇"
+    if name == "search_moments":
+        return f"命中 {result.get('count', 0)} 条朋友圈"
+    if name == "get_moment":
+        n_media = len(result.get("media") or [])
+        return (f"读取朋友圈（{result.get('who', '')}）：{n_media} 个媒体，"
+                f"{result.get('n_comments', 0)} 条评论 / {result.get('n_likes', 0)} 赞")
     if name == "list_files":
         return f"文件 {len(result.get('files') or [])} 个"
     if name == "read_file":

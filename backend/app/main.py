@@ -38,6 +38,7 @@ from chattrace.service.media import MediaService, decode_dat  # noqa: E402
 from textutil import display_text as clean_display, search_text as clean_search  # noqa: E402
 import vector  # noqa: E402
 import agent as agent_mod  # noqa: E402
+import sns as sns_mod  # noqa: E402
 
 _vec_local = threading.local()
 
@@ -66,6 +67,53 @@ _media: MediaService | None = None
 _media_lock = threading.Lock()
 _sync_state = {"running": False, "last": "", "log": "尚未运行"}
 _pin_ready = False
+
+# 朋友圈后台同步状态
+_sns_state = {"running": False, "last": "", "error": "", "booted": False}
+
+# 数据库主密钥的真实有效性（HMAC 实测，不信 24h 时间戳——密钥账号级稳定，可长期使用）
+_key_status = {"ts": 0.0, "ok": False, "detail": ""}
+
+
+def _stored_key_ok(max_age: float = 600) -> bool:
+    """存量密钥能否打开当前消息库（HMAC 实测，10 分钟缓存）。跨平台(keyvault)。"""
+    now = time.time()
+    if now - _key_status["ts"] < max_age:
+        return _key_status["ok"]
+    ok, detail = False, "no key"
+    try:
+        import keyvault
+        pw = keyvault.load_key(ACCOUNT_ID)
+        if pw:
+            ok, detail = keyvault.validate_key(pw, ACCOUNT_DIR / "db_storage" / "message" / "message_0.db")
+            detail = detail[:150]
+        else:
+            detail = "no stored key"
+    except Exception as exc:      # noqa: BLE001
+        detail = str(exc)[:150]
+    _key_status.update(ts=now, ok=ok, detail=detail)
+    return ok
+
+
+def _ensure_key_usable() -> bool:
+    """密钥失效时的自动恢复：Windows 扫运行中微信内存（免退出），mac 提示手动导入。"""
+    if _stored_key_ok():
+        return True
+    try:
+        if os.name != "nt":
+            _realtime["keynote"] = "密钥失效：mac 上请手动导入（keyvault.py --import）"
+            return False
+        import keyscan
+        result = keyscan.capture_and_store(ACCOUNT_DIR,
+                                           ACCOUNT_DIR / "db_storage" / "message" / "message_0.db")
+        _key_status["ts"] = 0.0        # 强制下次重新实测
+        if result.get("ok"):
+            _realtime["keynote"] = "内存扫描重新取得密钥"
+            return True
+        _realtime["keynote"] = f"内存扫描未命中: {result.get('detail', '')}"
+    except Exception as exc:           # noqa: BLE001
+        _realtime["keynote"] = f"内存扫描异常: {exc}"
+    return _stored_key_ok(0)
 
 
 def get_media() -> MediaService:
@@ -1272,6 +1320,58 @@ def _on_startup():
         t2 = threading.Thread(target=_realtime_loop, daemon=True)
         t2.start()
         _realtime["thread"] = t2
+    if not _sns_state["booted"]:
+        _sns_state["booted"] = True
+        threading.Thread(target=_sns_boot, daemon=True).start()
+        threading.Thread(target=_sns_loop, daemon=True).start()
+
+
+def _sns_boot():
+    """启动时朋友圈首次同步：sns.db 没解密过就补一次增量解密。"""
+    try:
+        sns_mod.ensure_schema(db())
+        st = sns_mod.sync_sns(db())
+        if not st.get("ok") and "不存在" in (st.get("detail") or ""):
+            _decrypt_quick()
+            st = sns_mod.sync_sns(db())
+        _sns_state["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            sns_mod.build_sns_vec()
+        except Exception:             # noqa: BLE001 向量失败不影响文字检索
+            pass
+        sns_mod.process_sns_ocr(db(), cap=120)
+        # 预热朋友圈 CDN 媒体的 ISAAC64 守护进程（首次加载 wasm 约 20 秒，
+        # 提前在后台完成，避免第一张图请求超时）
+        threading.Thread(target=sns_mod.warm_isaac, daemon=True).start()
+    except Exception as exc:          # noqa: BLE001
+        _sns_state["error"] = str(exc)[:150]
+
+
+def _sns_loop():
+    """朋友圈低频增量同步（微信朋友圈写入不会动 message_*.db，需独立轮询）。"""
+    while True:
+        try:
+            interval = max(60, int(load_conf().get("sync", {}).get("sns_interval_sec", 120)))
+        except Exception:             # noqa: BLE001
+            interval = 120
+        time.sleep(interval)
+        if _sns_state["running"]:
+            continue
+        _sns_state["running"] = True
+        try:
+            st = sns_mod.sync_sns(db())
+            if st.get("ok") and (st.get("new_posts") or st.get("upd_posts")):
+                try:
+                    sns_mod.build_sns_vec()
+                except Exception:     # noqa: BLE001
+                    pass
+            sns_mod.process_sns_ocr(db(), cap=6)
+            _sns_state["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _sns_state["error"] = ""
+        except Exception as exc:      # noqa: BLE001
+            _sns_state["error"] = str(exc)[:150]
+        finally:
+            _sns_state["running"] = False
 
 
 @app.post("/api/ask/stream")
@@ -2177,10 +2277,11 @@ def _ensure_src_unique(con) -> None:
         pass
 
 
-def _import_fast(decrypted_dir=None) -> int:
+def _import_fast(decrypted_dir=None, only: set[str] | None = None) -> int:
     """按时间窗轮询新消息（秒级）：只扫描 create_time >= 上次水位 - 30s 的行。
 
     (src_db,src_table,src_local_id) 唯一索引保证幂等；已入库的原始内容不会被撤回覆盖。
+    only: 只扫这些源库名（如 {"message_0.db"}），None=全扫。
     """
     import hashlib as _h
     from pathlib import Path as _P
@@ -2202,6 +2303,8 @@ def _import_fast(decrypted_dir=None) -> int:
     for i in range(8):
         p = d / "message" / ("message_%d.db" % i)
         if not p.exists():
+            continue
+        if only is not None and p.name not in only:
             continue
         src = sqlite3.connect("file:%s?mode=ro" % p, uri=True, check_same_thread=False)
         src.row_factory = sqlite3.Row
@@ -2701,7 +2804,24 @@ _realtime = {"thread": None, "last": "", "added": 0, "error": "", "tick": ""}
 
 
 def _decrypt_quick() -> str:
-    """调用 ChatTrace 增量解密（只重解有变化的库）。"""
+    """调用 ChatTrace 增量解密（只重解有变化的库）。
+
+    Windows 走子进程 CLI；mac/Linux 用进程内 DecryptService（其解密器是
+    纯 Python，跨平台；CLI 里的抓钥部分才是 Windows 专属）。
+    """
+    try:
+        _ensure_key_usable()
+    except Exception:                 # noqa: BLE001 自检失败不阻塞解密
+        pass
+    if os.name != "nt":
+        import keyvault
+        from chattrace.service.decryptor import DecryptService
+        pw = keyvault.load_key(ACCOUNT_ID)
+        if not pw:
+            return "no stored key (import via keyvault.py --import)"
+        svc = DecryptService(ACCOUNT_DIR / "db_storage", pw, DECRYPTED_DIR)
+        svc.run(incremental=True)
+        return "in-process decrypt done"
     import subprocess
     r = subprocess.run(
         [sys.executable, "-c",
@@ -2750,7 +2870,7 @@ def _realtime_loop():
             changed = _db_fingerprint() != last_fp and bool(last_fp)
             due = (now - last_sync) >= interval
             # 文件一有变化就 2 秒后同步（原来是 20 秒，用户反馈"等半天才出来"）
-            if (changed and now - last_sync >= 1) or due:
+            if (changed and now - last_sync >= 0.3) or due:
                 if changed:
                     _realtime["trigger"] = "文件变化"
                 elif due:
@@ -2761,8 +2881,26 @@ def _realtime_loop():
                 _sync_state["running"] = True
                 try:
                     _realtime["tick"] = time.strftime("%H:%M:%S")
-                    _decrypt_quick()
-                    n = _import_fast()
+                    # 快路径：进程内解密 + WAL 合并，只处理指纹变化的库
+                    #（微信新消息先进 -wal，原子进程解密不读 wal，要等微信自己
+                    #  checkpoint 才能看到——这是"实时不快"的最大来源）
+                    updated: list[str] = []
+                    if rt.get("fast_realtime", True):
+                        try:
+                            import fastsync
+                            from chattrace.keyagent import keystore
+                            info = keystore.load_key(ACCOUNT_ID)
+                            updated = fastsync.fast_sync_message_dbs(
+                                ACCOUNT_DIR, DECRYPTED_DIR, info.password)
+                        except Exception as exc:      # noqa: BLE001 快路径失败兜底
+                            _realtime["fast_err"] = str(exc)[:100]
+                            updated = []
+                    if updated:
+                        n = _import_fast(only={Path(r).name for r in updated
+                                               if r.startswith("message/")})
+                    else:
+                        _decrypt_quick()
+                        n = _import_fast()
                     _realtime["added"] += n
                     if rt.get("media_ocr", True) or rt.get("media_asr", True):
                         from auto_media import process_new_media
@@ -2791,7 +2929,7 @@ def _realtime_loop():
             # 首轮先记录指纹
             if not last_fp:
                 last_fp = _db_fingerprint()
-            time.sleep(0.8)
+            time.sleep(0.35)
         except Exception:
             time.sleep(30)
 
@@ -2830,7 +2968,7 @@ def api_messages_stream(chat: str, after_id: int = 0):
                 con.close()
             except Exception:
                 yield ": error\n\n"
-            time.sleep(1.5)
+            time.sleep(0.4)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -2984,6 +3122,151 @@ def api_job_stop(name: str):
         _jobs[name]["running"] = False
         return {"ok": True}
     return {"ok": False, "msg": "未在运行"}
+
+
+# ---------------------------------------------------------------- API: 朋友圈
+@app.get("/api/sns/posts")
+def api_sns_posts(offset: int = 0, limit: int = 50, q: str = "", author: str = ""):
+    con = db()
+    try:
+        data = sns_mod.list_posts(con, offset=offset, limit=min(limit, 200),
+                                  q=q, author=author)
+    finally:
+        con.close()
+    return data
+
+
+@app.get("/api/sns/post/{tid}")
+def api_sns_post(tid: str):
+    con = db()
+    try:
+        post = sns_mod.get_moment(con, tid)
+    finally:
+        con.close()
+    if post is None:
+        raise HTTPException(404, "朋友圈不存在")
+    return post
+
+
+@app.get("/api/sns/image")
+def api_sns_image(tid: str, idx: int = 0):
+    con = db()
+    try:
+        row = con.execute("SELECT xml_id, media_json FROM sns_post WHERE tid=?",
+                          (tid,)).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise HTTPException(404, "朋友圈不存在")
+    try:
+        media = json.loads(row["media_json"] or "[]")
+    except (TypeError, ValueError):
+        media = []
+    entry = next((m for m in media if int(m.get("i", -1)) == idx), None)
+    if entry is None:
+        raise HTTPException(404, "媒体不存在")
+    if sns_mod._media_is_video(entry):
+        raise HTTPException(404, "视频请用 /api/sns/video")
+    img = sns_mod.image_bytes(entry, row["xml_id"] or "")
+    if not img:
+        raise HTTPException(404, "图片不可得（本地无缓存且 CDN 拉取失败）")
+    blob, mime = img
+    return Response(content=blob, media_type=mime,
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/sns/video")
+def api_sns_video(tid: str, idx: int = 0):
+    """朋友圈/视频号视频：本地无缓存，按需从 CDN 拉取并解密（ISAAC64 前 128KB）。"""
+    con = db()
+    try:
+        row = con.execute("SELECT media_json FROM sns_post WHERE tid=?", (tid,)).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise HTTPException(404, "朋友圈不存在")
+    try:
+        media = json.loads(row["media_json"] or "[]")
+    except (TypeError, ValueError):
+        media = []
+    entry = next((m for m in media if int(m.get("i", -1)) == idx), None)
+    if entry is None:
+        raise HTTPException(404, "媒体不存在")
+    vid = sns_mod.video_bytes(entry)
+    if not vid:
+        raise HTTPException(404, "视频不可得（CDN 拉取失败或链接已过期）")
+    blob, mime = vid
+    return Response(content=blob, media_type=mime,
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/sns/status")
+def api_sns_status():
+    con = db()
+    try:
+        st = sns_mod.stats(con)
+    finally:
+        con.close()
+    st["sync_running"] = _sns_state["running"]
+    st["last_loop_sync"] = _sns_state["last"]
+    st["loop_error"] = _sns_state["error"]
+    return st
+
+
+@app.post("/api/sns/sync")
+def api_sns_sync():
+    if _sns_state["running"]:
+        return {"ok": False, "msg": "同步进行中"}
+    _sns_state["running"] = True
+
+    def _run():
+        try:
+            st = sns_mod.sync_sns(db())
+            if st.get("ok"):
+                try:
+                    sns_mod.build_sns_vec()
+                except Exception:     # noqa: BLE001
+                    pass
+                sns_mod.process_sns_ocr(db(), cap=60)
+            _sns_state["error"] = "" if st.get("ok") else (st.get("detail") or "")
+            _sns_state["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as exc:      # noqa: BLE001
+            _sns_state["error"] = str(exc)[:150]
+        finally:
+            _sns_state["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "msg": "同步已开始"}
+
+
+# ---------------------------------------------------------------- API: 数据库密钥
+@app.get("/api/key/status")
+def api_key_status():
+    ok = _stored_key_ok(0)
+    import keyscan
+    return {"hmac_ok": ok, "detail": _key_status["detail"],
+            "wechat_running": bool(keyscan.weixin_pids())}
+
+
+@app.post("/api/key/scan")
+def api_key_scan():
+    """对运行中的微信做内存扫钥（免退出）；微信刚启动时命中率最高。Windows 专属。"""
+    if os.name != "nt":
+        raise HTTPException(400, "内存扫钥仅支持 Windows；mac 请用 /api/key/import 手动导入")
+    import keyscan
+    result = keyscan.capture_and_store(
+        ACCOUNT_DIR, ACCOUNT_DIR / "db_storage" / "message" / "message_0.db")
+    _key_status["ts"] = 0.0
+    return result
+
+
+@app.post("/api/key/import")
+def api_key_import(payload: dict):
+    """手动导入 64 hex 主密钥（mac 主路径）：HMAC 实测通过后入库。"""
+    import keyvault
+    r = keyvault.import_manual_key(ACCOUNT_DIR, str(payload.get("key_hex") or ""))
+    _key_status["ts"] = 0.0
+    return r
 
 
 # ---------------------------------------------------------------- 静态前端

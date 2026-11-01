@@ -39,6 +39,7 @@
 | 🎙️ | **语音消息全文可搜** | 离线语音转文字,气泡下方直接显示 |
 | 🖼️ | **图片内容可搜** | OCR 提取截图/照片中的文字并建索引 |
 | 🔗 | **链接内容可搜可问** | 公众号、小红书、B 站内容自动解析入库 |
+| 🌄 | **朋友圈永久留存** | 自动同步朋友圈(正文/图片 OCR/评论/点赞)进知识库;作者删除或"三天可见"不影响本地留存,左侧栏浏览、可问 AI |
 | ⚡ | **实时同步** | 新消息约 1 秒自动入库,可检索、可问答 |
 | 🛡️ | **零封号风险** | 只读本地文件,不向微信发送任何消息 |
 | 📦 | **开箱即用** | 一个脚本完成依赖、配置、模型下载与自检,全程显示进度 |
@@ -48,7 +49,7 @@
 
 ## 🚀 快速开始
 
-**环境要求**:Windows 10/11(Mac/Linux 暂不支持) · Python 3.11+ · 微信 4.x(本机登录过、本地有聊天记录)
+**环境要求**:Windows 10/11(完整体验) · macOS(实验性,见下) · Python 3.11+ · 微信 4.x(本机登录过、本地有聊天记录)
 
 ### 方式一:纯双击(不碰命令行)
 
@@ -74,12 +75,32 @@ python backend/server.py 8721          # 启动,浏览器打开 http://127.0.0.1
 一键配置检测到没有知识库时会自动询问,二选一:**恢复旧电脑的备份包** 或 **从本机微信自动建库**
 (增量解密 → 解析导入,全程无需手动敲命令)。
 
-数据库密钥通过 ChatTrace 运行时捕获(24 小时有效,微信重启后需重新抓取);
-捕获时需要**先完全退出微信**(脚本会自动拉起微信,按提示重新登录即可),
-之后日常使用、解密与实时同步都不需要退出微信。
+数据库密钥通过 ChatTrace 运行时捕获,密钥账号级稳定(跨微信重启不变),
+服务会定期 HMAC 实测有效性,正常情况**永远不需要重抓**;
+万一实测失效,优先**扫描运行中的微信进程内存**重新取钥(约 34 秒,免退出),
+扫描未命中才需要退出微信重新登录抓取一次(仅首次建库或极端情况会遇到)。
 多账号可在 `backend/config.json` 的 `account.account_dir` 手动指定。
 
 </details>
+
+> 可选组件:朋友圈的**历史图片**来自微信 CDN,解密依赖 Node.js 运行时
+> (一键配置会自动下载解密组件;没有它朋友圈仍可用,只是图片仅限本地缓存过的部分)。
+
+### macOS(实验性)
+
+解密、导入、语义搜索、朋友圈、实时同步等核心全部跨平台;差异只在密钥获取:
+mac 上没有内存扫钥方案,需**一次性手动导入密钥**(密钥账号级稳定,导一次长期有效,
+服务端自动做 HMAC 自愈检测):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+# 密钥:用任意 mac 取钥工具拿到 64 位 hex 后导入(自动 HMAC 校验)
+python backend/app/keyvault.py --account-dir "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_xxx" --import <64hex>
+python backend/server.py 8721
+```
+
+找不到账号目录时在 `backend/config.json` 的 `account.account_dir` 手动指定。
 
 ## 📦 换新电脑
 
@@ -101,17 +122,20 @@ python backend/scripts/backup_data.py --restore D:\backup\wechat_data.zip
 
 ## 🏗️ 技术栈
 
-FastAPI · SQLite(FTS5 全文 + sqlite-vec 向量)· bge-small-zh 本地嵌入 · sherpa-onnx 离线语音识别 · RapidOCR 离线 OCR · [ChatTrace](https://github.com/qiaodogbear/ChatTrace) 解密(已内置)
+FastAPI · SQLite(FTS5 全文 + sqlite-vec 向量)· bge-small-zh 本地嵌入 · sherpa-onnx 离线语音识别 · RapidOCR 离线 OCR · [ChatTrace](https://github.com/qiaodogbear/ChatTrace) 解密(已内置)· 朋友圈媒体 ISA64 流解密(Node.js + [WeFlow](https://github.com/hicccc77/WeFlow) wasm,可选组件)
 
 ## 🗺️ 路线图
 
-- ✅ 全量历史解密入库、语义/全文搜索、带引用 RAG 问答、语音/图片/链接解析、实时同步
-- ⏳ 微信内小号查询入口(评估中)
-- ❌ 明确不做:发送消息、防撤回、朋友圈
+- ✅ 全量历史解密入库、语义/全文搜索、带引用 RAG 问答、语音/图片/链接解析、实时同步(~1 秒)
+- ✅ 朋友圈永久留存与检索(正文/图片 OCR/评论/点赞/分享文章,独立页面 + AI 问答工具)
+- ✅ 密钥自愈(HMAC 实测代替 24h 过期;失效时内存扫钥免退出重取,4.1.15 实测 34 秒)
+- ✅ macOS 实验性支持(一次性导入密钥,见上)
+- ⏳ 微信内小号查询入口(评估中) · mac 原生取钥(需真机调试)
+- ❌ 明确不做:发送消息、防撤回
 
 ## 🙏 致谢
 
-[ChatTrace](https://github.com/qiaodogbear/ChatTrace)(MIT,已内置)· [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) · [BGE (BAAI)](https://huggingface.co/BAAI/bge-small-zh-v1.5) · 调研参考 [WeFlow](https://github.com/hicccc77/WeFlow) / [chatlog](https://github.com/sjzar/chatlog) / [PyWxDump](https://github.com/xaoyaoo/PyWxDump)
+[ChatTrace](https://github.com/qiaodogbear/ChatTrace)(MIT,已内置)· [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) · [BGE (BAAI)](https://huggingface.co/BAAI/bge-small-zh-v1.5) · 调研参考 [WeFlow](https://github.com/hicccc77/WeFlow) / [chatlog](https://github.com/sjzar/chatlog) / [PyWxDump](https://github.com/xaoyaoo/PyWxDump) / [WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)(朋友圈媒体缓存命名规则与内存锚点取钥思路)
 
 ## ⚠️ 免责声明
 

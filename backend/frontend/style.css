@@ -673,3 +673,81 @@ body {
   opacity: 1; color: #075050; background: #d8f3ef; border-color: #07a150;
 }
 .explore-toggle input { width: auto; margin: 0; cursor: pointer; }
+
+/* ---------------- 朋友圈 ---------------- */
+.sns-local { color: #07a150; font-weight: 600; }
+.sns-text { white-space: pre-wrap; word-break: break-word; }
+.sns-img-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px; margin: 12px 0;
+}
+.sns-img-wrap {
+  aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: #e8eaee;
+  cursor: zoom-in; display: flex; align-items: center; justify-content: center;
+}
+.sns-img-wrap.missing { cursor: default; opacity: .6; }
+.sns-img {
+  width: 100%; height: 100%; object-fit: cover; transition: all .15s; cursor: zoom-in;
+}
+.sns-img.big {
+  position: fixed; inset: 0; width: auto; height: auto; max-width: 96vw; max-height: 96vh;
+  object-fit: contain; z-index: 999; background: rgba(0,0,0,.85); cursor: zoom-out;
+  margin: auto; padding: 12px; border-radius: 4px;
+}
+.sns-img-ph { font-size: 12px; color: #9a9aa0; }
+.sns-video-ph {
+  background: #f0f1f4; border: 1px solid #e0e1e6; border-radius: 8px;
+  padding: 14px 16px; margin: 10px 0; color: #6b6b70; font-size: 13.5px;
+}
+.sns-ocr-box { margin: 14px 0; border-top: 1px dashed #e0e1e6; padding-top: 10px; }
+.sns-ocr-toggle { font-size: 13px; color: #576b95; cursor: pointer; user-select: none; }
+.sns-ocr-body { margin-top: 8px; }
+.sns-ocr-item { margin-bottom: 10px; }
+.sns-ocr-item b { font-size: 12px; color: #6b6b70; }
+.sns-ocr-item pre {
+  background: #f7f8fa; border-radius: 6px; padding: 8px 10px; font-size: 12.5px;
+  white-space: pre-wrap; word-break: break-word; margin-top: 4px;
+}
+.sns-comments {
+  background: #f7f8fa; border-radius: 8px; padding: 10px 12px; margin: 12px 0;
+}
+.sns-c-head { font-size: 12.5px; color: #576b95; font-weight: 600; margin-bottom: 6px; }
+.sns-comment { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; font-size: 13.5px; }
+.sns-comment .who { color: #576b95; font-weight: 600; flex-shrink: 0; }
+.sns-comment .text { flex: 1; word-break: break-word; }
+.sns-comment .ts { font-size: 11px; color: #9a9aa0; flex-shrink: 0; }
+.sns-like-line { font-size: 12.5px; color: #6b6b70; padding: 2px 0; }
+.sns-hint { font-size: 11.5px; color: #9a9aa0; margin-top: 14px; }
+.load-more-sns { cursor: pointer; color: #576b95; }
+.load-more-sns:hover { text-decoration: underline; }
+.sns-video {
+  max-width: 100%; max-height: 70vh; display: block; margin: 12px auto;
+  border-radius: 8px; background: #000;
+}
+.sns-link {
+  display: flex; align-items: center; gap: 10px; margin: 8px 0; padding: 10px 12px;
+  background: #f7f8fa; border: 1px solid #e7e8ec; border-radius: 8px; cursor: pointer;
+}
+.sns-link:hover { background: #eef3ee; border-color: #07a150; }
+.sns-link-ico { font-size: 18px; flex-shrink: 0; }
+.sns-link-body { flex: 1; min-width: 0; }
+.sns-link-title {
+  display: block; font-size: 13.5px; font-weight: 600; color: #1d1d1f;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sns-link-url {
+  display: block; font-size: 11.5px; color: #9a9aa0; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sns-link-go { font-size: 12.5px; color: #576b95; flex-shrink: 0; }
+/* 朋友圈列表缩略图 + 详情加载占位 */
+.result-item.sns-item { display: flex; align-items: center; gap: 10px; }
+.result-item.sns-item .sns-item-main { flex: 1; min-width: 0; }
+.sns-thumb {
+  width: 52px; height: 52px; object-fit: cover; border-radius: 6px;
+  background: #e8eaee; flex-shrink: 0;
+}
+.sns-img-ph.loading {
+  color: #b6b8be; font-size: 18px; animation: sns-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sns-pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
