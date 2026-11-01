@@ -18,7 +18,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -161,6 +161,9 @@ def _refer_text(ref: str) -> str:
     字段一起倒出来，界面上就是一串乱码。content 本身还可能是内嵌 XML
     （引用了图片/语音/链接/另一条引用），按形状转成简短说明。
     """
+    # 部分消息的 refermsg 里带 <msgsource>（内层已转义、可能双重转义），
+    # 不剥掉的话兜底去标签时会把 sequence_id/pua 等字段倒出来
+    ref = re.sub(r"<msgsource>.*?</msgsource>", "", ref, flags=re.S)
     mt = XML_TITLE.search(ref)
     if mt and mt.group(1).strip():
         return _quote_oneline(_xml_unescape(mt.group(1)))
@@ -181,7 +184,11 @@ def _refer_text(ref: str) -> str:
         m = XML_QUOTE_MEDIA.search(c)
         if m:
             return _QUOTE_MEDIA_LABEL[m.group(1)]
-        return _quote_oneline(re.sub(r"<[^>]+>", " ", c))
+        # 彻底去标签后再压行：内层可能还有双重转义的标签，解不净就当未知消息
+        plain = _quote_oneline(re.sub(r"<[^>]+>", " ", _xml_unescape(c)))
+        if "<" in plain or "&lt;" in plain:
+            return "[消息]"
+        return plain
     return _quote_oneline(c)
 
 
@@ -237,7 +244,12 @@ def parse_message(m: sqlite3.Row) -> dict:
         out["kind"] = "voice"
         out["voice_ms"] = int(n.group(1)) if n else 0
     elif t == 43:
+        attrs = dict(XML_ATTR.findall(c[:4000]))
         out["kind"] = "video"
+        if attrs.get("playlength", "").isdigit():
+            out["duration_s"] = int(attrs["playlength"])
+        if attrs.get("md5"):
+            out["md5"] = attrs["md5"]
     elif t == 47:
         out["kind"] = "emoji"
     elif t == 62:                       # 拍一拍
@@ -315,23 +327,31 @@ def sender_name(con, chat_user, sender, is_sender):
     return (r[0] if r else chat_user) if not sender else (sender or "")
 
 
-def _asr_text(con, message_id: int) -> str:
+def _media_text(con, message_id: int, kind: str) -> str:
     try:
-        r = con.execute("SELECT text FROM media_text WHERE message_id=? AND kind='asr'",
-                        (message_id,)).fetchone()
+        r = con.execute("SELECT text FROM media_text WHERE message_id=? AND kind=?",
+                        (message_id, kind)).fetchone()
         return (r[0] or "") if r else ""
     except sqlite3.OperationalError:
         return ""
+
+
+def _asr_text(con, message_id: int) -> str:
+    return _media_text(con, message_id, "asr")
 
 
 def msg_row(m: sqlite3.Row, con) -> dict:
     disp = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) FROM chat "
                        "WHERE username=?", (m["chat_user"],)).fetchone()
     parsed = parse_message(m)
-    if m["type"] == 34:
-        asr = _asr_text(con, m["id"])
+    if m["type"] in (34, 43):       # 语音/视频消息带上转写文本
+        asr = _media_text(con, m["id"], "asr")
         if asr:
             parsed["asr_text"] = asr
+    elif m["type"] == 3:            # 图片消息带上 OCR 文本
+        ocr = _media_text(con, m["id"], "ocr")
+        if ocr:
+            parsed["ocr_text"] = ocr
     return {
         "id": m["id"], "ts": m["ts"], "type": m["type"],
         "is_sender": m["is_sender"], "sender": m["sender"],
@@ -1261,7 +1281,7 @@ def api_ask_stream(payload: dict):
     deps = {"conf": load_conf, "db": db,
             "quick_retrieve": quick_retrieve, "save_qa": save_qa,
             "locate_file": locate_file, "extract_text": extract_text,
-            "fetch_article": fetch_article}
+            "fetch_article": fetch_article, "file_text_cached": file_text_cached}
     return StreamingResponse(stream_qa.make_stream(payload, deps),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -1401,6 +1421,101 @@ def extract_text(path: Path, limit: int = 20000) -> str:
     return ""
 
 
+def _ensure_file_text(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS file_text(
+        key TEXT PRIMARY KEY, name TEXT DEFAULT '', text TEXT DEFAULT '',
+        ext TEXT DEFAULT '', ts INTEGER DEFAULT 0)""")
+
+
+def file_text_cached(con, chat: str, local_id: int, ts: int, name: str, limit: int = 24000):
+    """文件正文缓存（附件不可变，按「会话:src_local_id」只抽一次）。返回 (path, name, text)。
+
+    命中 → path 为 None（调用方用缓存里的 name 即可）；未命中且文件在本地 →
+    抽取并写缓存；文件不在本地/解析失败 → 尽量返回已提取的文本（不缓存失败结果）。
+    """
+    _ensure_file_text(con)
+    key = f"{chat}:{int(local_id or 0)}"
+    try:
+        r = con.execute("SELECT name, text FROM file_text WHERE key=?", (key,)).fetchone()
+        cached_name, cached_text = r[0], (r[1] or "")
+    except Exception:
+        cached_name, cached_text = None, ""
+    if cached_text.strip() and not cached_text.startswith("[解析失败"):
+        return None, (cached_name or name), cached_text[:limit]
+    p = locate_file(chat, local_id, ts, name)
+    if not p:
+        return None, name, cached_text[:limit]
+    text = extract_text(p, max(limit, 24000))
+    if text and not text.startswith("[解析失败"):
+        try:
+            con.execute("INSERT OR REPLACE INTO file_text(key,name,text,ext,ts) VALUES(?,?,?,?,?)",
+                        (key, p.name, text, p.suffix.lower(), int(time.time())))
+            con.commit()
+        except Exception:
+            pass
+    return p, p.name, text
+
+
+def warm_file_texts(con, cap: int = 3, days: int = 7):
+    """后台预热：把最近几天的文件消息正文提前抽进 file_text（收到即提取，对齐链接的
+    「收到即解析」）。文件未下载到本地/解析失败 → 写空文本标记，48 小时内每轮重试
+    （等微信下载），过后永久放弃，避免每轮重扫。"""
+    from textutil import appmsg_subtype
+    _ensure_file_text(con)
+    since = int(time.time()) - days * 86400
+    try:
+        rows = con.execute(
+            "SELECT chat_user, src_local_id, ts, content FROM message "
+            "WHERE ts>=? AND noise=0 AND (type & 0xFFFFFFFF)=49 AND src_local_id IS NOT NULL "
+            "ORDER BY ts DESC LIMIT 60", (since,)).fetchall()
+    except Exception:
+        return 0
+    now = int(time.time())
+    done = 0
+
+    def _mark(key, name, text):
+        con.execute("INSERT OR REPLACE INTO file_text(key,name,text,ext,ts) VALUES(?,?,?,?,?)",
+                    (key, name, text, "", now))
+
+    for r in rows:
+        if done >= cap:
+            break
+        try:
+            if appmsg_subtype(r["content"] or "") != "6":
+                continue
+            m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>",
+                          r["content"] or "", re.S)
+            name = m.group(1).strip() if m else ""
+            if not name:
+                continue
+            key = f"{r['chat_user']}:{r['src_local_id']}"
+            hit = con.execute("SELECT text, ts FROM file_text WHERE key=?", (key,)).fetchone()
+            if hit:
+                if (hit[0] or "").strip():
+                    continue                     # 已有正文
+                if (hit[1] or 0) and now - hit[1] > 48 * 3600:
+                    continue                     # 标记超过 48h，放弃
+            p = locate_file(r["chat_user"], r["src_local_id"], r["ts"], name)
+            if not p:
+                _mark(key, name, "")             # 还没下载，下轮再试
+                continue
+            text = extract_text(p, 24000)
+            if text and not text.startswith("[解析失败"):
+                con.execute("INSERT OR REPLACE INTO file_text(key,name,text,ext,ts) "
+                            "VALUES(?,?,?,?,?)",
+                            (key, p.name, text, p.suffix.lower(), now))
+                done += 1
+            else:
+                _mark(key, name, "")             # 解析失败也标记，避免每轮重抽
+        except Exception:
+            continue
+    try:
+        con.commit()
+    except Exception:
+        pass
+    return done
+
+
 @app.get("/api/file/meta")
 def api_file_meta(chat: str, local_id: int, ts: int, name: str):
     # 文件缺失时前端要能退回"跳转到这条文件消息"，所以无论如何都解析一次全局消息 id
@@ -1438,10 +1553,14 @@ def api_file_raw(chat: str, local_id: int, ts: int, name: str):
 
 @app.get("/api/file/text")
 def api_file_text(chat: str, local_id: int, ts: int, name: str, limit: int = 20000):
-    p = locate_file(chat, local_id, ts, name)
-    if not p:
+    con = db()
+    try:
+        p, fname, text = file_text_cached(con, chat, local_id, ts, name, max(limit, 24000))
+    finally:
+        con.close()
+    if not text:
         raise HTTPException(404, "文件不在本地（可能已被清理或未下载）")
-    return {"name": p.name, "text": extract_text(p, limit)}
+    return {"name": fname, "text": text[:limit]}
 
 
 # ---------------------------------------------------------------- API: 媒体
@@ -1491,6 +1610,40 @@ def chat_resource_id(con, chat_user: str) -> int | None:
         return None
     r = rdb.execute("SELECT rowid FROM ChatName2Id WHERE user_name=?", (chat_user,)).fetchone()
     return r[0] if r else None
+
+
+# 磁盘文件 md5（Img/Video 文件名）只存在源库 packed_info_data 里，与消息 XML 的 md5 属性不同
+_PACKED_MD5_CACHE: dict[tuple[str, str, int], str] = {}
+_SRC_TABLE_RE = re.compile(r"^Msg_[0-9A-Za-z]{32}$")
+
+
+def packed_md5(src_db: str, src_table: str, src_local_id) -> str:
+    """源库消息行的磁盘文件指纹：取不到返回空串。"""
+    if not (src_db and src_table and src_local_id):
+        return ""
+    if not _SRC_TABLE_RE.match(src_table) or not re.match(r"^message_\d+\.db$", src_db):
+        return ""
+    key = (src_db, src_table, int(src_local_id))
+    hit = _PACKED_MD5_CACHE.get(key)
+    if hit is not None:
+        return hit
+    md5 = ""
+    p = DECRYPTED_DIR / "message" / src_db
+    if p.exists():
+        try:
+            src = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
+            row = src.execute(f"SELECT packed_info_data FROM [{src_table}] WHERE local_id=?",
+                              (key[2],)).fetchone()
+            src.close()
+            if row and row[0]:
+                from chattrace.service.media import md5_hex32
+                md5 = md5_hex32(row[0]) or ""
+        except Exception:
+            md5 = ""
+    if len(_PACKED_MD5_CACHE) > 5000:
+        _PACKED_MD5_CACHE.clear()
+    _PACKED_MD5_CACHE[key] = md5
+    return md5
 
 
 def resource_sizes(chat_user: str, local_id: int) -> list[dict]:
@@ -1570,26 +1723,36 @@ def api_image(chat: str, id: int):
     if not m:
         raise HTTPException(404)
     p = parse_message(m)
-    full_sizes, thumb_sizes = [], []
-    try:
-        for r in resource_sizes(chat, m["src_local_id"]):
-            # 0x40001(262145)=缩略图，0x20001(131073)=全图
-            if r["type"] == 262145:
-                thumb_sizes.append(r["size"])
-            else:
-                full_sizes.append(r["size"])
-    except Exception:
-        pass
-    cands = image_candidates(chat, m["ts"] or 0, full_sizes, thumb_sizes)
-    # 旧版 md5 命名兜底
-    md5 = p.get("md5", "")
-    if md5:
+    cands: list[Path] = []
+    # 1) 源库 packed_info_data 的磁盘 md5：文件名精确匹配（4.1.15 的 Img 文件名
+    #    与 XML md5 不一致，按尺寸匹配会拿到别的图——"新图片显示成别的图"的根源）
+    disk_md5 = packed_md5(m["src_db"], m["src_table"], m["src_local_id"])
+    if disk_md5:
         try:
-            item = get_media().image_item(chat, md5, m["ts"] or 0)
+            cands = get_media().image_dat_candidates(chat, disk_md5, m["ts"] or 0)
+        except Exception:
+            cands = []
+    # 2) 旧版 md5 命名兜底（XML md5 与文件名一致的老账号）
+    if not cands and p.get("md5", ""):
+        try:
+            item = get_media().image_item(chat, p["md5"], m["ts"] or 0)
             if item and item.disk_path and item.disk_path.exists():
-                cands.insert(0, item.disk_path)
+                cands = [item.disk_path, *item.alternates]
         except Exception:
             pass
+    # 3) 最后才按字节尺寸模糊匹配
+    if not cands:
+        full_sizes, thumb_sizes = [], []
+        try:
+            for r in resource_sizes(chat, m["src_local_id"]):
+                # 0x40001(262145)=缩略图，0x20001(131073)=全图
+                if r["type"] == 262145:
+                    thumb_sizes.append(r["size"])
+                else:
+                    full_sizes.append(r["size"])
+        except Exception:
+            pass
+        cands = image_candidates(chat, m["ts"] or 0, full_sizes, thumb_sizes)
     if not cands:
         raise HTTPException(404, "图片文件不存在（可能已被微信清理）")
     keys = get_media().image_keys()
@@ -1602,7 +1765,8 @@ def api_image(chat: str, id: int):
             continue
         media_type = {"jpeg": "image/jpeg", "jpg": "image/jpeg", "png": "image/png", "gif": "image/gif"}.get(fmt)
         if media_type:
-            return Response(content=blob, media_type=media_type)
+            return Response(content=blob, media_type=media_type,
+                            headers={"Cache-Control": "private, max-age=86400"})
     raise HTTPException(415, f"图片无法解码（{last_err}）")
 
 
@@ -1619,6 +1783,78 @@ def api_voice(chat: str, id: int):
     except Exception as e:
         raise HTTPException(500, f"转码失败: {e}")
     raise HTTPException(404, "voice not found")
+
+
+def _video_files(chat_user: str, m: sqlite3.Row) -> tuple[Path | None, Path | None]:
+    """(mp4, 封面图)。md5 优先取源库 packed_info_data（磁盘文件名），XML md5 兜底。"""
+    md5 = packed_md5(m["src_db"], m["src_table"], m["src_local_id"])
+    if not md5:
+        md5 = (parse_message(m) or {}).get("md5", "")
+    if not md5:
+        return None, None
+    try:
+        return get_media().video_file(chat_user, md5, m["ts"] or 0)
+    except Exception:
+        return None, None
+
+
+@app.get("/api/media/video")
+def api_video(chat: str, id: int, request: Request):
+    """视频消息流式播放（支持 Range，浏览器才能拖进度条）。"""
+    con = db()
+    m = con.execute("SELECT * FROM message WHERE id=? AND chat_user=?", (id, chat)).fetchone()
+    con.close()
+    if not m:
+        raise HTTPException(404)
+    mp4, _thumb = _video_files(chat, m)
+    if not mp4:
+        raise HTTPException(404, "原视频不在本地（可能已被微信清理或未下载）")
+    size = mp4.stat().st_size
+    rng = (request.headers.get("range") or "").strip()
+    mt = re.match(r"bytes=(\d*)-(\d*)$", rng)
+    if mt:
+        start = int(mt.group(1)) if mt.group(1) else 0
+        if mt.group(2):
+            end = min(int(mt.group(2)), size - 1)
+        else:
+            end = min(size - 1, start + 4 * 1024 * 1024 - 1)   # 无尾值时分块返回
+        if start >= size or start > end:
+            return Response(status_code=416,
+                            headers={"Content-Range": f"bytes */{size}"})
+        with open(mp4, "rb") as f:
+            f.seek(start)
+            blob = f.read(end - start + 1)
+        return Response(content=blob, status_code=206, media_type="video/mp4",
+                        headers={"Content-Range": f"bytes {start}-{end}/{size}",
+                                 "Accept-Ranges": "bytes",
+                                 "Cache-Control": "private, max-age=86400"})
+    return FileResponse(str(mp4), media_type="video/mp4",
+                        headers={"Accept-Ranges": "bytes",
+                                 "Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/media/video/thumb")
+def api_video_thumb(chat: str, id: int):
+    con = db()
+    m = con.execute("SELECT * FROM message WHERE id=? AND chat_user=?", (id, chat)).fetchone()
+    con.close()
+    if not m:
+        raise HTTPException(404)
+    _mp4, thumb = _video_files(chat, m)
+    if not thumb or not thumb.exists():
+        raise HTTPException(404, "视频封面不存在")
+    return Response(content=thumb.read_bytes(), media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/media/asr")
+def api_media_asr(chat: str, id: int):
+    """单条媒体消息的转写文本（视频预览页用；实时转写是异步的，打开时再取一次）。"""
+    con = db()
+    try:
+        return {"text": _asr_text(con, id)}
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------- API: 文件中心
@@ -2530,10 +2766,18 @@ def _realtime_loop():
                     _realtime["added"] += n
                     if rt.get("media_ocr", True) or rt.get("media_asr", True):
                         from auto_media import process_new_media
+                        # 只处理最近 48h 的新消息：历史积压交给设置页批量任务，
+                        # 否则每轮全速 OCR/ASR 会吃满 CPU，拖慢整个程序
                         stats = process_new_media(
                             db(), ocr_cap=30 if rt.get("media_ocr", True) else 0,
-                            asr_cap=10 if rt.get("media_asr", True) else 0)
+                            asr_cap=10 if rt.get("media_asr", True) else 0,
+                            video_cap=2 if rt.get("media_asr", True) else 0,
+                            since=int(time.time()) - 48 * 3600)
                         _realtime["media"] = stats
+                    try:      # 文件正文预热：收到即提取进 file_text，快速回答可直接引用
+                        warm_file_texts(db(), cap=3)
+                    except Exception:
+                        pass
                     _realtime["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     _realtime["error"] = ""
                     last_fp = _db_fingerprint()

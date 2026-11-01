@@ -244,6 +244,8 @@ async function askStream(question) {
               : ev.mode === "retrieval" ? "检索结果" : "快速回答";
             setLive(turn, "");
             if (typeof stripRefFooter === "function") {
+              // 快速回答以后端完整答案为准：流式增量可能缺开头/短答案整段未发
+              if (ev.answer) answerText = ev.answer;
               if (typeof stripDsml === "function") answerText = stripDsml(answerText);
               answerText = stripRefFooter(answerText);
               if (!answerText && ev.mode === "agent") {

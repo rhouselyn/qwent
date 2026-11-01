@@ -57,6 +57,89 @@ def _need_tools(question: str, hits: int) -> bool:
     return any(k in q for k in TOOLISH_KEYWORDS)
 
 
+def _link_excerpts(con, chat: str, hours: int, start_n: int = 1,
+                   max_links: int = 2, max_chars: int = 1000):
+    """最近窗口内已解析的文章，返回 {"text": 带编号摘录行, "refs": 引用列表}，无则 None。
+
+    start_n：编号起点，必须接在最近记录的 [n] 之后，正文行与 refs 编号才一致。
+    只取 link_cache 已有正文的（纯缓存读，零抓取开销，不拖慢快速回答）；
+    文件/PDF 不塞——内容长、按题抽取慢，需要时由 Agent 的 read_file 读取。
+    """
+    try:
+        since = int(time.time()) - hours * 3600
+        rows = con.execute(
+            "SELECT l.url, l.title, c.text, l.msg_ts FROM chat_link l "
+            "JOIN link_cache c ON c.url = l.url "
+            "WHERE l.chat=? AND l.msg_ts>=? AND l.state=1 AND IFNULL(c.text,'')<>'' "
+            "ORDER BY l.msg_ts DESC LIMIT ?", (chat, since, max_links)).fetchall()
+    except Exception:
+        return None
+    out, refs = [], []
+    for url, title, text, ts in rows:
+        title = (title or url)[:80]
+        body = (text or "").strip().replace(chr(10), " ")[:max_chars]
+        if not body:
+            continue
+        n = start_n + len(refs)
+        out.append(f"[{n}] 《{title}》正文摘录：{body}…")
+        refs.append({"n": n, "id": 0, "kind": "link", "url": url,
+                     "chat": chat, "chat_name": title, "ts": int(ts or 0),
+                     "sender_name": "文章", "snippet": f"《{title}》", "ctx": []})
+    if not out:
+        return None
+    return {"text": chr(10).join(out), "refs": refs}
+
+
+def _file_excerpts(con, chat: str, hours: int, start_n: int, deps: dict,
+                   max_files: int = 2, max_chars: int = 1000):
+    """最近窗口内的文件（appmsg 附件），返回 {"text": 带编号摘录行, "refs": 引用列表}。
+
+    **只吃 file_text 预热缓存**（warm_file_texts 随实时同步"收到即提取"），
+    不现场抽取——PDF/Office 解析可能好几秒，会拖住"读取最近记录并作答"。
+    缓存没有的文件跳过，需要时由 Agent 的 read_file 按需读取。
+    """
+    from textutil import appmsg_subtype
+    try:
+        since = int(time.time()) - hours * 3600
+        rows = con.execute(
+            "SELECT id, src_local_id, ts, content FROM message "
+            "WHERE chat_user=? AND ts>=? AND noise=0 AND (type & 0xFFFFFFFF)=49 "
+            "AND src_local_id IS NOT NULL ORDER BY ts DESC LIMIT 40",
+            (chat, since)).fetchall()
+    except Exception:
+        return None
+    out, refs = [], []
+    for r in rows:
+        if len(refs) >= max_files:
+            break
+        try:
+            if appmsg_subtype(r["content"] or "") != "6":
+                continue
+            m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>",
+                          r["content"] or "", re.S)
+            name = (m.group(1).strip() if m else "") or "文件"
+            hit = con.execute("SELECT name, text FROM file_text WHERE key=?",
+                              (f"{chat}:{int(r['src_local_id'] or 0)}",)).fetchone()
+            if not hit:
+                continue
+            cname, text = (hit[0] or name), (hit[1] or "").strip()
+            if not text or text.startswith("[解析失败"):
+                continue
+        except Exception:
+            continue
+        n = start_n + len(refs)
+        out.append(f"[{n}] 文件《{cname}》内容摘录：{text[:max_chars]}…")
+        refs.append({"n": n, "id": r["id"], "kind": "file",
+                     "chat": chat, "chat_name": cname,
+                     "local_id": int(r["src_local_id"] or 0), "ts": int(r["ts"] or 0),
+                     "title": cname, "sender_name": "文件", "snippet": f"文件《{cname}》",
+                     "ctx": []})
+    if not out:
+        return None
+    return {"text": chr(10).join(out), "refs": refs}
+
+
+
 def make_stream(payload: dict, deps: dict):
     """deps 由 main.py 注入（避免循环 import）。"""
     q = (payload.get("question") or "").strip()
@@ -112,15 +195,22 @@ def make_stream(payload: dict, deps: dict):
                                        scope_name=scope_name)
                     return
 
-            # ---- 指定文件问答：直接读文件正文 ----
+            # ---- 指定文件问答：直接读文件正文（走 file_text 缓存，重复提问秒回） ----
             if fdoc:
-                path = deps["locate_file"](fdoc.get("chat", ""), int(fdoc.get("local_id", 0)),
-                                           int(fdoc.get("ts", 0)), fdoc.get("name", ""))
-                if not path:
+                getter = deps.get("file_text_cached")
+                if getter:
+                    p, fname, text = getter(con, fdoc.get("chat", ""),
+                                            int(fdoc.get("local_id", 0) or 0),
+                                            int(fdoc.get("ts", 0) or 0), fdoc.get("name", ""))
+                else:
+                    p = deps["locate_file"](fdoc.get("chat", ""), int(fdoc.get("local_id", 0) or 0),
+                                            int(fdoc.get("ts", 0) or 0), fdoc.get("name", ""))
+                    fname = p.name if p else (fdoc.get("name") or "文件")
+                    text = deps["extract_text"](p, 24000) if p else ""
+                if not (text or "").strip():
                     yield _sse({"type": "error", "message": "文件不在本地磁盘"})
                     return
                 yield _sse({"type": "status", "text": "正在读取文件正文…"})
-                text = deps["extract_text"](path, 24000)
                 crow = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) "
                                    "FROM chat WHERE username=?",
                                    (fdoc.get("chat", ""),)).fetchone()
@@ -129,10 +219,10 @@ def make_stream(payload: dict, deps: dict):
                          "chat": fdoc.get("chat", ""), "chat_name": cname,
                          "local_id": int(fdoc.get("local_id", 0) or 0),
                          "ts": int(fdoc.get("ts", 0) or 0),
-                         "title": path.name, "size": path.stat().st_size,
-                         "sender_name": "文件", "snippet": path.name, "ctx": []}]
+                         "title": fname, "size": (p.stat().st_size if p else 0),
+                         "sender_name": "文件", "snippet": fname, "ctx": []}]
                 yield _sse({"type": "refs", "refs": refs})
-                yield from _answer(conf, deps, q, "", [f"文件《{path.name}》正文：\n{text}"],
+                yield from _answer(conf, deps, q, "", [f"文件《{fname}》正文：\n{text}"],
                                   [], history, new_session, session_id, scope_key, "file",
                                   scope_name=scope_name)
                 return
@@ -162,26 +252,52 @@ def make_stream(payload: dict, deps: dict):
                     rc, rrefs = agent_mod._recent_block_numbered(chat, hours=hours, limit=60)
                 except Exception:
                     rc, rrefs = None, []
+                # 最近窗口里已解析的文章 + 文件：正文摘录一并给模型（各 ≤2 份 × 1000 字），
+                # 编号接在最近记录之后，点击 [n] 打开文章/文件预览。
+                # 起点必须取现有最大编号+1（_recent_block_numbered 先编号后切片，最大 n 可能大于条数）
+                next_n = max((r["n"] for r in rrefs), default=0) + 1
+                lblock = _link_excerpts(con, chat, hours, start_n=next_n)
+                if lblock:
+                    rrefs = rrefs + lblock["refs"]
+                    next_n += len(lblock["refs"])
+                try:
+                    fblock = _file_excerpts(con, chat, hours, next_n, deps)
+                except Exception:
+                    fblock = None
+                if fblock:
+                    rrefs = rrefs + fblock["refs"]
                 if rc:
                     yield _sse({"type": "refs", "refs": rrefs})   # 先发引用，流式期间即可点击
-                    yield _sse({"type": "status", "text": "读取最近记录并作答…"})
+                    # 最近记录（毫秒级）此时已读完；这一阶段实际是等模型首字，
+                    # 慢在 LLM API 的排队/网络，不是本地读取
+                    yield _sse({"type": "status", "text": "正在生成回答…"})
                     cname = (con.execute("SELECT COALESCE(NULLIF(display_name,''), username) "
                                          "FROM chat WHERE username=?", (chat,)).fetchone()
                              or [chat])[0]
+                    extra = ""
+                    if lblock:
+                        extra += (chr(10) + chr(10) + "最近分享的文章（已解析，正文摘录）："
+                                 + chr(10) + lblock["text"])
+                    if fblock:
+                        extra += (chr(10) + chr(10) + "最近分享的文件（内容摘录）："
+                                 + chr(10) + fblock["text"])
                     msgs = [
                         {"role": "system", "content":
-                         "你是微信记录助手。系统会给出该会话最近的真实发言，每行行首 [n] 是引用编号。"
-                         "如果这些记录足以回答：用简洁 Markdown 作答，提到具体消息时标注对应的 [n]；"
+                         "你是微信记录助手。系统会给出该会话最近的真实发言，每行行首 [n] 是引用编号"
+                         "（可能还附有已解析文章/文件的内容摘录，同样有编号，可引用）。"
+                         "如果这些材料足以回答：用简洁 Markdown 作答，提到具体消息/文章/文件时标注对应的 [n]；"
                          "**不要输出「引用来源」清单**（界面会自动把 [n] 渲染成可点击引用）。"
-                         "如果不足（例如问题是关于更早的时间、需要统计、需要文件或文章），"
+                         "**文章/文件的摘录只有开头约 1000 字**：读完已够就直接回答；"
+                         "如果需要完整内容、后半部分，或更早的记录、统计，"
                          "只输出一行 `__NEED_TOOLS__`，不要编造答案。"},
                         {"role": "system", "content": f"当前时间：{_now_text()}；"
                                                       f"会话：{cname}"},
                         {"role": "user", "content":
-                         "最近记录：" + chr(10) + rc + chr(10) + chr(10) + "问题：" + q},
+                         "最近记录：" + chr(10) + rc + extra + chr(10) + chr(10) + "问题：" + q},
                     ]
                     acc = []
                     need_tools = False
+                    started = False
                     for kind, val in agent_mod._stream_llm(conf, msgs):
                         if kind != "delta":
                             continue
@@ -191,12 +307,16 @@ def make_stream(payload: dict, deps: dict):
                             need_tools = True
                             break
                         if len(head) > 30:      # 已明确在作答，直接流式输出
-                            yield _sse({"type": "delta", "text": val})
+                            # 首段必须补发全部已累积文本：否则前 30 字从未下发，客户端开头缺失
+                            yield _sse({"type": "delta", "text": head if not started else val})
+                            started = True
                     if not need_tools:
                         answer = strip_ref_footer(agent_mod.strip_dsml("".join(acc)))
                         sid = deps["save_qa"](con, scope_key, q, answer, rrefs, "fast",
                                               None, session_id, new_session, scope_name)
-                        yield _sse({"type": "done", "session_id": sid, "mode": "fast"})
+                        # done 带完整答案：客户端以其为准，短答案/丢增量也保证显示完整
+                        yield _sse({"type": "done", "session_id": sid, "mode": "fast",
+                                    "answer": answer})
                         return
                     yield _sse({"type": "reset"})     # 丢弃试探性输出
                     yield _sse({"type": "status", "text": "最近记录不足，开始检索…"})

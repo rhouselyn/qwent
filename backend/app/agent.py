@@ -128,11 +128,21 @@ def _fmt(ts) -> str:
 
 def _msg_brief(con, row) -> dict:
     from textutil import display_text
+    text = (display_text(row["type"], row["content"]) or "")[:600]
+    # 媒体消息附上 OCR/转写文本：工具检索到图片/语音/视频时模型才能看到其内容
+    try:
+        t = con.execute("SELECT kind, text FROM media_text WHERE message_id=?",
+                        (row["id"],)).fetchone()
+        if t and t[1]:
+            tag = "图片文字" if t[0] == "ocr" else "转写"
+            text = (text or "[媒体消息]") + f"（{tag}: {t[1][:300]}）"
+    except sqlite3.OperationalError:
+        pass
     return {
         "id": row["id"], "chat": row["chat_user"], "chat_name": _chat_name(con, row["chat_user"]),
         "ts": row["ts"], "time": _fmt(row["ts"]),
         "who": _sender(con, row["chat_user"], row["sender"], row["is_sender"]),
-        "text": (display_text(row["type"], row["content"]) or "")[:600],
+        "text": text,
     }
 
 
@@ -855,6 +865,11 @@ SYSTEM_PROMPT = """你是用户的微信记录分析助手，可以调用工具�
 
 
 
+def _recent_line_budget(text: str) -> int:
+    """媒体消息带 OCR/转写内容，行预算放宽，模型才能读到完整转写。"""
+    return 400 if text.startswith(("[图片]", "[语音]", "[视频]")) else 220
+
+
 def _recent_block(chat: str, hours: int = 24, limit: int = 60) -> str:
     """取会话最近记录，拼成文本（供 Agent 系统提示预注入；无编号，避免干扰顺序引用）。"""
     con = _db()
@@ -868,7 +883,7 @@ def _recent_block(chat: str, hours: int = 24, limit: int = 60) -> str:
     out = []
     for r in rows:
         b = _msg_brief(con, r)
-        txt = b["text"].replace(chr(10), " ")[:220]
+        txt = b["text"].replace(chr(10), " ")[:_recent_line_budget(b["text"])]
         if not txt:
             continue
         out.append(f"{_fmt(r['ts'])} {b['who']}: {txt}")
@@ -892,7 +907,7 @@ def _recent_block_numbered(chat: str, hours: int = 24, limit: int = 60):
     out, refs = [], []
     for r in rows:
         b = _msg_brief(con, r)
-        txt = b["text"].replace(chr(10), " ")[:220]
+        txt = b["text"].replace(chr(10), " ")[:_recent_line_budget(b["text"])]
         if not txt:
             continue
         n = len(refs) + 1

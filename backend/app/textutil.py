@@ -56,6 +56,9 @@ def strip_xml(content: str) -> str:
 _BASE64ISH = re.compile(r"^[A-Za-z0-9+/=]{60,}$")
 _B64_JSON = re.compile(r"^eyJ[A-Za-z0-9+/=_-]{40,}")
 
+# 富媒体消息（正文全是 XML 属性，剥完是空的）：给界面/引用一个统一可读标签
+_MEDIA_LABEL = {3: "[图片]", 34: "[语音]", 43: "[视频]"}
+
 
 def is_payload_dump(content: str) -> bool:
     """部分消息体是 base64(JSON/protobuf) 载荷，既不可读也无检索价值。"""
@@ -72,6 +75,8 @@ def display_text(type_id: int, content: str) -> str:
     content = normalize(content)
     if is_payload_dump(content):
         return "[数据载荷]"
+    if type_id in _MEDIA_LABEL and has_xml(content):
+        return _MEDIA_LABEL[type_id]
     if type_id == 62:
         t = _TITLE.search(content)
         return _CDATA.sub(r"\1", t.group(1)).strip() if t else strip_xml(content)

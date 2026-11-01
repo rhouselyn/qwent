@@ -542,6 +542,12 @@ function renderBubbleContent(m, p) {
       img.onerror = () => { img.className = "fail"; img.removeAttribute("src"); img.textContent = "🖼 图片已过期或未下载"; };
       img.onclick = () => openImageViewer(m, img.src);
       el.appendChild(img);
+      if (p.ocr_text) {
+        const t = document.createElement("div");
+        t.className = "voice-text";
+        t.textContent = p.ocr_text;
+        el.appendChild(t);
+      }
       return el;
     }
     case "voice": {
@@ -564,7 +570,39 @@ function renderBubbleContent(m, p) {
       }
       return wrap;
     }
-    case "video": el.innerHTML = `🎬 <b>[视频]</b>`; return el;
+    case "video": {
+      const wrap = document.createElement("div");
+      wrap.className = "video-wrap";
+      const box = document.createElement("div");
+      box.className = "video-box";
+      const img = document.createElement("img");
+      img.className = "video-thumb";
+      img.loading = "lazy";
+      img.alt = "[视频]";
+      img.src = `/api/media/video/thumb?chat=${encodeURIComponent(m.chat)}&id=${m.id}`;
+      img.onerror = () => { box.className = "video-box video-miss"; box.textContent = "🎬 [视频]（未下载或已被清理）"; };
+      const play = document.createElement("span");
+      play.className = "video-play";
+      play.textContent = "▶";
+      box.appendChild(img);
+      box.appendChild(play);
+      if (p.duration_s) {
+        const dur = document.createElement("span");
+        dur.className = "video-dur";
+        dur.textContent = `${p.duration_s}″`;
+        box.appendChild(dur);
+      }
+      box.onclick = () => openVideoViewer(m, p);
+      wrap.appendChild(box);
+      if (p.asr_text) {
+        const t = document.createElement("div");
+        t.className = "voice-text";
+        t.textContent = p.asr_text;
+        wrap.appendChild(t);
+      }
+      el.appendChild(wrap);
+      return el;
+    }
     case "emoji": el.innerHTML = `😊 <span style="color:#8a8a90">[动画表情]</span>`; return el;
     case "card": el.innerHTML = `👤 <b>[名片]</b>`; return el;
     case "voip": el.innerHTML = `📞 <span style="color:#8a8a90">[通话]</span>`; return el;
@@ -1282,10 +1320,42 @@ function openImageViewer(m, src) {
   $("#chatTitle").textContent = "图片查看";
   $("#chatMeta").textContent = m.chat_name + " · " + fmtTime(m.ts);
   updateScopeBar();
+  const ocr = m.parsed && m.parsed.ocr_text
+    ? `<div class="pv-seg"><div class="pv-seg-title">图片文字（OCR）</div>` +
+      `<pre class="pv-text">${esc(m.parsed.ocr_text)}</pre></div>` : "";
   $("#pvBody").innerHTML =
     '<div class="pv-head"><span class="pv-name">点击空白处或 ← 返回聊天</span></div>' +
-    '<img src="' + src + '" class="pv-img" style="max-height:70vh;cursor:zoom-out" ' +
-    'onclick="document.querySelector(&#39;#backToChat&#39;).click()">';
+    '<img src="' + src + '" class="pv-img" style="max-height:60vh;cursor:zoom-out" ' +
+    'onclick="document.querySelector(&#39;#backToChat&#39;).click()">' + ocr;
+}
+
+/* ---------------- 视频预览（播放器 + 语音转写文字） ---------------- */
+async function openVideoViewer(m, p) {
+  showChatPane();
+  $("#msgList").style.display = "none";
+  $("#previewPane").style.display = "flex";
+  $("#previewPane").style.flexDirection = "column";
+  $("#backToChat").style.display = "inline";
+  $("#chatTitle").textContent = "视频播放";
+  $("#chatMeta").textContent = (m.chat_name || "") + " · " + fmtTime(m.ts) +
+    (p.duration_s ? ` · ${p.duration_s}秒` : "");
+  updateScopeBar();
+  const qs = `chat=${encodeURIComponent(m.chat)}&id=${m.id}`;
+  $("#pvBody").innerHTML =
+    `<video class="pv-video" controls autoplay src="/api/media/video?${qs}"></video>` +
+    `<div class="pv-seg"><div class="pv-seg-title">语音转文字</div>` +
+    `<pre class="pv-text" id="pvAsr">${esc(p.asr_text || "")}</pre></div>`;
+  if (!p.asr_text) {
+    // 转写是异步后台任务，打开时再取一次；没有就说明无可转写内容或还没轮到
+    try {
+      const d = await api(`/api/media/asr?${qs}`);
+      const el = $("#pvAsr");
+      if (el) el.textContent = d.text || "（这段视频没有语音内容，或尚未转写完成）";
+    } catch {
+      const el = $("#pvAsr");
+      if (el) el.textContent = "（转写暂不可用）";
+    }
+  }
 }
 
 /* ---------------- 网页/公众号文章预览 ---------------- */
@@ -1405,6 +1475,7 @@ async function openLinkPreview(url, title) {
 let previewFile = null;
 
 function exitPreview() {
+  $("#pvBody").innerHTML = "";      // 停掉预览里的视频/音频播放
   $("#previewPane").style.display = "none";
   $("#msgList").style.display = "block";
   $("#backToChat").style.display = "none";

@@ -123,9 +123,15 @@ def main():
     q += " ORDER BY ts DESC"
     ids = [r[0] for r in con.execute(q)]
     todo = [i for i in ids if i not in done]
+    # 视频消息排在语音之后（历史视频量大，避免挤掉语音）
+    qv = "SELECT id FROM message WHERE type=43"
+    if args.recent_days:
+        qv += f" AND ts >= {int(time.time()) - args.recent_days * 86400}"
+    qv += " ORDER BY ts DESC"
+    vids = [r[0] for r in con.execute(qv) if r[0] not in done]
     if args.limit:
-        todo = todo[:args.limit]
-    print(f"[*] 语音消息 {len(ids)} 条，待转写 {len(todo)} 条", flush=True)
+        vids = vids[:max(0, args.limit - len(todo))] if len(todo) < args.limit else []
+    print(f"[*] 语音消息 {len(ids)} 条，待转写 {len(todo)} 条；视频 {len(vids)} 条", flush=True)
 
     kind = args.engine
     if kind in ("auto", "sherpa"):
@@ -143,27 +149,55 @@ def main():
 
     ok = empty = 0
     t0 = time.time()
+
+    def _save(mid: int, text: str) -> None:
+        nonlocal ok, empty
+        con.execute("INSERT OR REPLACE INTO media_text(message_id,kind,text,ts) "
+                    "VALUES(?,?,?,?)", (mid, "asr", text[:4000], int(time.time())))
+        con.execute("DELETE FROM media_fts WHERE message_id=?", (mid,))
+        if text:
+            con.execute("INSERT INTO media_fts(text, message_id) VALUES(?,?)",
+                        (text[:4000], mid))
+            con.execute("UPDATE message SET noise=0 WHERE id=? AND IFNULL(noise,0)<>0", (mid,))
+            ok += 1
+        else:
+            empty += 1
+
     for n, mid in enumerate(todo, 1):
         try:
             wav = media_lookup.voice_wav(con, mid)
             if not wav:
                 continue
-            text = transcribe(engine, kind, wav)
-            con.execute("INSERT OR REPLACE INTO media_text(message_id,kind,text,ts) "
-                        "VALUES(?,?,?,?)", (mid, "asr", text[:4000], int(time.time())))
-            con.execute("DELETE FROM media_fts WHERE message_id=?", (mid,))
-            if text:
-                con.execute("INSERT INTO media_fts(text, message_id) VALUES(?,?)",
-                            (text[:4000], mid))
-                ok += 1
-            else:
-                empty += 1
+            _save(mid, transcribe(engine, kind, wav))
         except Exception as e:
             print(f"  [!] msg {mid}: {e}")
         if n % 10 == 0:
             con.commit()
             rate = n / max(1e-6, time.time() - t0)
             print(f"  [进度] {n}/{len(todo)}  有文字 {ok} / 空白 {empty}  {rate:.2f} 条/秒",
+                  flush=True)
+    con.commit()
+
+    for n, mid in enumerate(vids, 1):
+        try:
+            mp4 = media_lookup.video_mp4(con, mid)
+            samples = media_lookup.audio_samples_16k(mp4) if mp4 else None
+            if samples is None or not len(samples):
+                _save(mid, "")
+                continue
+            if kind == "sherpa":
+                stream = engine.create_stream()
+                stream.accept_waveform(16000, samples)
+                engine.decode_stream(stream)
+                _save(mid, (stream.result.text or "").strip())
+            else:
+                _save(mid, "")
+        except Exception as e:
+            print(f"  [!] video {mid}: {e}")
+        if n % 10 == 0:
+            con.commit()
+            rate = n / max(1e-6, time.time() - t0)
+            print(f"  [视频进度] {n}/{len(vids)}  有文字 {ok} / 空白 {empty}  {rate:.2f} 条/秒",
                   flush=True)
     con.commit()
     con.close()
