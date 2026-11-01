@@ -2277,13 +2277,93 @@ def _ensure_src_unique(con) -> None:
         pass
 
 
+def _name2id_maps(src):
+    """Name2Id → (sender_map, name2id)；src 是任意可 .execute 的连接/游标。"""
+    import hashlib as _h
+    sender_map, name2id = {}, {}
+    try:
+        for rid, uname in src.execute("SELECT rowid, user_name FROM Name2Id"):
+            name2id["Msg_" + _h.md5((uname or "").encode()).hexdigest()] = uname
+            sender_map[rid] = uname or ""
+    except sqlite3.OperationalError:
+        pass
+    return sender_map, name2id
+
+
+def _flush_rows(con, own, db_label: str, t: str, chat_user: str,
+                sender_map: dict, rows) -> tuple[int, int]:
+    """处理一批源消息行(五元组 local_id,local_type,create_time,message_content,
+    real_sender_id)，写入知识库 + 重建 FTS + 登记链接。返回 (新增数, 最大时间戳)。"""
+    total = 0
+    max_ts = 0
+    batch = []
+    for local_id, local_type, create_time, message_content, real_sender_id in rows:
+        max_ts = max(max_ts, create_time or 0)
+        try:
+            from m0_import import decode_content
+            content = decode_content(message_content)
+        except Exception:
+            content = message_content if isinstance(message_content, str) else ""
+        if not content:
+            continue
+        sender = (sender_map.get(real_sender_id) or "").split(",")[0].strip()
+        is_sender = 1 if sender == own else 0
+        if "@chatroom" in chat_user and local_type == 1:
+            mm = SENDER_PREFIX.match(content)
+            if mm:
+                prefix = mm.group(1).strip()
+                if prefix.startswith("wxid_") or len(prefix) > 12:
+                    if not is_sender:
+                        sender = sender or prefix
+                    content = content[mm.end():]
+        batch.append((chat_user, is_sender, "" if is_sender else sender,
+                      create_time, local_type, content[:20000],
+                      db_label, t, local_id))
+    if not batch:
+        return 0, max_ts
+    prev = con.total_changes
+    con.executemany(
+        "INSERT OR IGNORE INTO message(chat_user,is_sender,sender,ts,type,content,"
+        "src_db,src_table,src_local_id) VALUES(?,?,?,?,?,?,?,?,?)", batch)
+    added = con.total_changes - prev     # 仅消息插入（此刻还没动 FTS）
+    total += added
+    if added:
+        # 只重建"本次新插入"的这几条：撤回后微信会改写源库内容，
+        # 已入库的 message.content 不会被覆盖（历史照旧显示原文），
+        # 也不能让 FTS 被撤回提示覆盖。
+        lids = [b[8] for b in batch]
+        ph = ",".join("?" * len(lids))
+        rows2 = con.execute(
+            "SELECT id, content, chat_user, ts FROM message WHERE src_db=? "
+            "AND src_table=? AND src_local_id IN (%s)" % ph,
+            [db_label, t] + lids).fetchall()
+        for mid, cnt, cu, mts in rows2:
+            st = clean_search(1, cnt)
+            if len(st.strip()) < 2:
+                continue
+            con.execute("DELETE FROM message_fts WHERE rowid=?", (mid,))
+            con.execute("INSERT INTO message_fts(rowid, content, chat_user, is_group) "
+                        "VALUES(?,?,?,?)",
+                        (mid, st[:20000], cu, int("@chatroom" in cu)))
+            # 收到消息即登记链接并排队解析（下次打开直接有正文）
+            if "http" in (cnt or ""):
+                _ensure_link_tables(con)
+                for _u, _t in _extract_links(cnt):
+                    con.execute(
+                        "INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,"
+                        "title,platform) VALUES(?,?,?,?,?,?)",
+                        (_u, cu, mid, mts or 0, (_t or "")[:120],
+                         _refresh_platform(_u)))
+                    _LINK_QUEUE.put(_u)
+    return total, max_ts
+
+
 def _import_fast(decrypted_dir=None, only: set[str] | None = None) -> int:
     """按时间窗轮询新消息（秒级）：只扫描 create_time >= 上次水位 - 30s 的行。
 
     (src_db,src_table,src_local_id) 唯一索引保证幂等；已入库的原始内容不会被撤回覆盖。
     only: 只扫这些源库名（如 {"message_0.db"}），None=全扫。
     """
-    import hashlib as _h
     from pathlib import Path as _P
     d = _P(decrypted_dir) if decrypted_dir else DECRYPTED_DIR
     con = db()
@@ -2308,13 +2388,7 @@ def _import_fast(decrypted_dir=None, only: set[str] | None = None) -> int:
             continue
         src = sqlite3.connect("file:%s?mode=ro" % p, uri=True, check_same_thread=False)
         src.row_factory = sqlite3.Row
-        sender_map, name2id = {}, {}
-        try:
-            for rid, uname in src.execute("SELECT rowid, user_name FROM Name2Id"):
-                name2id["Msg_" + _h.md5((uname or "").encode()).hexdigest()] = uname
-                sender_map[rid] = uname or ""
-        except sqlite3.OperationalError:
-            pass
+        sender_map, name2id = _name2id_maps(src)
         tables = [x[0] for x in src.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")]
         for t in tables:
@@ -2334,71 +2408,178 @@ def _import_fast(decrypted_dir=None, only: set[str] | None = None) -> int:
                 continue
             if not rows:
                 continue
-            batch = []
-            for row in rows:
-                newest = max(newest, row["create_time"] or 0)
-                raw = row["message_content"]
-                try:
-                    from m0_import import decode_content
-                    content = decode_content(raw)
-                except Exception:
-                    content = raw if isinstance(raw, str) else ""
-                if not content:
-                    continue
-                sender = (sender_map.get(row["real_sender_id"]) or "").split(",")[0].strip()
-                is_sender = 1 if sender == own else 0
-                if "@chatroom" in chat_user and row["local_type"] == 1:
-                    mm = SENDER_PREFIX.match(content)
-                    if mm:
-                        prefix = mm.group(1).strip()
-                        if prefix.startswith("wxid_") or len(prefix) > 12:
-                            if not is_sender:
-                                sender = sender or prefix
-                            content = content[mm.end():]
-                batch.append((chat_user, is_sender, "" if is_sender else sender,
-                              row["create_time"], row["local_type"], content[:20000],
-                              "message_%d.db" % i, t, row["local_id"]))
-            if not batch:
-                continue
-            prev = con.total_changes
-            con.executemany(
-                "INSERT OR IGNORE INTO message(chat_user,is_sender,sender,ts,type,content,"
-                "src_db,src_table,src_local_id) VALUES(?,?,?,?,?,?,?,?,?)", batch)
-            added = con.total_changes - prev     # 仅消息插入（此刻还没动 FTS）
+            added, mts = _flush_rows(con, own, "message_%d.db" % i, t, chat_user,
+                                     sender_map,
+                                     [(r["local_id"], r["local_type"], r["create_time"],
+                                       r["message_content"], r["real_sender_id"])
+                                      for r in rows])
             total += added
-            if added:
-                # 只重建"本次新插入"的这几条：撤回后微信会改写源库内容，
-                # 已入库的 message.content 不会被覆盖（历史照旧显示原文），
-                # 也不能让 FTS 被撤回提示覆盖。
-                lids = [b[8] for b in batch]
-                if lids:
-                    ph = ",".join("?" * len(lids))
-                    rows2 = con.execute(
-                        "SELECT id, content, chat_user, ts FROM message WHERE src_db=? "
-                        "AND src_table=? AND src_local_id IN (%s)" % ph,
-                        ["message_%d.db" % i, t] + lids).fetchall()
-                    for mid, cnt, cu, mts in rows2:
-                        st = clean_search(1, cnt)
-                        if len(st.strip()) < 2:
-                            continue
-                        con.execute("DELETE FROM message_fts WHERE rowid=?", (mid,))
-                        con.execute("INSERT INTO message_fts(rowid, content, chat_user, is_group) "
-                                    "VALUES(?,?,?,?)",
-                                    (mid, st[:20000], cu, int("@chatroom" in cu)))
-                        # 收到消息即登记链接并排队解析（下次打开直接有正文）
-                        if "http" in (cnt or ""):
-                            _ensure_link_tables(con)
-                            for _u, _t in _extract_links(cnt):
-                                con.execute(
-                                    "INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,"
-                                    "title,platform) VALUES(?,?,?,?,?,?)",
-                                    (_u, cu, mid, mts or 0, (_t or "")[:120],
-                                     _refresh_platform(_u)))
-                                _LINK_QUEUE.put(_u)
+            newest = max(newest, mts)
         src.close()
     con.execute("INSERT OR REPLACE INTO meta VALUES('sync_watermark', ?)",
                 (str(max(watermark, newest)),))
     # 更新会话 last_ts（保证列表按最新消息排序）
+    con.execute("""UPDATE chat SET last_ts =
+        (SELECT MAX(ts) FROM message m WHERE m.chat_user = chat.username)
+        WHERE EXISTS (SELECT 1 FROM message m WHERE m.chat_user = chat.username
+                      AND m.ts > chat.last_ts)""")
+    con.commit()
+    con.close()
+    return total
+
+
+_live_enc_keys: dict[str, tuple] = {}
+_live_conns: dict[str, object] = {}
+_live_schema: dict[str, tuple] = {}   # db path -> (Msg表数量, [(t,chat_user,rs_col)], sender_map)
+_live_cursors: dict[str, int] = {}    # "db:table" -> rowid 游标(内存),写 meta 仅在变化时
+_live_dirty: dict[str, tuple] = {}    # db path -> (mtime,size,wal_mtime,wal_size) 上次 sweep 指纹
+
+
+def _live_conn(p: Path, enc_key: str):
+    """打开(并缓存)一个加密库的只读 SQLCipher 连接——跨 tick 复用，
+    只读连接会自动看到 WAL 里的新提交。"""
+    import sqlcipher3
+    key = str(p)
+    con = _live_conns.get(key)
+    if con is not None:
+        try:
+            con.execute("SELECT 1").fetchone()
+            return con
+        except Exception:          # noqa: BLE001 连接失效,重建
+            try:
+                con.close()
+            except Exception:      # noqa: BLE001
+                pass
+            _live_conns.pop(key, None)
+    con = sqlcipher3.connect(f"file:{p.as_posix()}?mode=ro", uri=True,
+                             check_same_thread=False, timeout=3)
+    cur = con.cursor()
+    cur.execute("PRAGMA key = \"x'%s'\"" % enc_key)
+    _live_conns[key] = con
+    return con
+
+
+def _import_live() -> int:
+    """WeFlow 式实时导入：sqlcipher3 直接打开**加密中的** message_*.db（原生读
+    WAL，新消息无需等 checkpoint、无需先解密成文件），按 rowid 游标增量导入。
+
+    返回新增条数；sqlcipher3 不可用返回 -1（调用方回退 fastsync 路径）。
+    游标存 knowledge.db 的 meta（live_rid:<db>:<table>），首次运行初始化为
+    当前 MAX(rowid) 并兼做一次时间窗补漏（幂等，不漏不重）。
+    """
+    try:
+        import sqlcipher3
+    except ImportError:
+        return -1
+    import hashlib
+    import keyvault
+    con = db()
+    con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5("
+                "content, chat_user UNINDEXED, is_group UNINDEXED, tokenize='trigram')")
+    _ensure_src_unique(con)
+    r = con.execute("SELECT value FROM meta WHERE key='sync_watermark'").fetchone()
+    watermark = int(r[0]) if r and str(r[0]).isdigit() else 0
+    own = ACCOUNT_ID.rsplit("_", 1)[0]
+    total = 0
+    newest = watermark
+    try:
+        master = keyvault.load_key(ACCOUNT_ID)
+        if not master:
+            con.close()
+            raise RuntimeError("live: no stored key")
+    except Exception as exc:      # noqa: BLE001
+        con.close()
+        raise RuntimeError(f"live: no key ({exc})")
+    for i in range(8):
+        p = ACCOUNT_DIR / "db_storage" / "message" / ("message_%d.db" % i)
+        if not p.exists():
+            continue
+        try:
+            stat = p.stat()
+            wal_p = Path(str(p) + "-wal")
+            try:
+                wstat = wal_p.stat() if wal_p.exists() else None
+            except OSError:
+                wstat = None
+            fp = (stat.st_mtime, stat.st_size,
+                  wstat.st_mtime if wstat else 0, wstat.st_size if wstat else 0)
+            first_run = str(p) not in _live_schema
+            if not first_run and _live_dirty.get(str(p)) == fp:
+                continue                     # 该库自上次 sweep 无变化
+            _live_dirty[str(p)] = fp
+        except OSError:
+            continue
+        try:
+            ck = _live_enc_keys.get(str(p))
+            salt = p.read_bytes()[:16]
+            if not ck or ck[0] != salt:
+                enc_key = hashlib.pbkdf2_hmac("sha512", master, salt, 256000, dklen=32).hex()
+                _live_enc_keys[str(p)] = (salt, enc_key)
+            else:
+                enc_key = ck[1]
+            src = _live_conn(p, enc_key)
+            cur = src.cursor()
+            cur.row_factory = None
+            cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                        "AND name LIKE 'Msg_%'")
+            tcnt = cur.fetchone()[0]
+            cached = _live_schema.get(str(p))
+            if cached and cached[0] == tcnt:
+                table_infos, sender_map = cached[1], cached[2]
+            else:
+                sender_map, name2id = _name2id_maps(cur)
+                table_infos = []
+                for t in [x[0] for x in cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name LIKE 'Msg_%'")]:
+                    chat_user = name2id.get(t, "")
+                    if not chat_user:
+                        continue
+                    cols = {x[1] for x in cur.execute("PRAGMA table_info('%s')" % t)}
+                    if "create_time" not in cols:
+                        continue
+                    rs_col = ("real_sender_id" if "real_sender_id" in cols
+                              else "NULL AS real_sender_id")
+                    table_infos.append((t, chat_user, rs_col))
+                _live_schema[str(p)] = (tcnt, table_infos, sender_map)
+            for t, chat_user, rs_col in table_infos:
+                rkey = "live_rid:%s:%s" % (p.name, t)
+                ckey = "%s:%s" % (p.name, t)
+                rrow = _live_cursors.get(ckey)
+                if rrow is None:
+                    dbrow = con.execute("SELECT value FROM meta WHERE key=?",
+                                        (rkey,)).fetchone()
+                    rrow = int(dbrow[0]) if dbrow else None
+                    _live_cursors[ckey] = rrow
+                cur.execute("SELECT MAX(rowid) FROM [%s]" % t)
+                mx = cur.fetchone()[0] or 0
+                if rrow is None:
+                    # 首次:初始化游标 + 时间窗补漏(幂等)
+                    _live_cursors[ckey] = mx
+                    con.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (rkey, str(mx)))
+                    rows = cur.execute(
+                        "SELECT local_id, local_type, create_time, message_content, %s "
+                        "FROM [%s] WHERE create_time >= ? ORDER BY rowid"
+                        % (rs_col, t), (watermark - 30,)).fetchall()
+                    added, mts = _flush_rows(con, own, p.name, t, chat_user, sender_map, rows)
+                    total += added
+                    newest = max(newest, mts)
+                elif mx > rrow:
+                    rows = cur.execute(
+                        "SELECT local_id, local_type, create_time, message_content, %s "
+                        "FROM [%s] WHERE rowid > ? ORDER BY rowid" % (rs_col, t),
+                        (rrow,)).fetchall()
+                    added, mts = _flush_rows(con, own, p.name, t, chat_user, sender_map, rows)
+                    _live_cursors[ckey] = mx
+                    con.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (rkey, str(mx)))
+                    total += added
+                    newest = max(newest, mts)
+            # 连接缓存复用，不 close
+        except Exception as exc:  # noqa: BLE001 单库失败不影响其它库
+            _realtime["live_err"] = f"{p.name}: {exc}"[:120]
+            continue
+    con.execute("INSERT OR REPLACE INTO meta VALUES('sync_watermark', ?)",
+                (str(max(watermark, newest)),))
     con.execute("""UPDATE chat SET last_ts =
         (SELECT MAX(ts) FROM message m WHERE m.chat_user = chat.username)
         WHERE EXISTS (SELECT 1 FROM message m WHERE m.chat_user = chat.username
@@ -2881,27 +3062,47 @@ def _realtime_loop():
                 _sync_state["running"] = True
                 try:
                     _realtime["tick"] = time.strftime("%H:%M:%S")
-                    # 快路径：进程内解密 + WAL 合并，只处理指纹变化的库
-                    #（微信新消息先进 -wal，原子进程解密不读 wal，要等微信自己
-                    #  checkpoint 才能看到——这是"实时不快"的最大来源）
-                    updated: list[str] = []
+                    # 最快路径：sqlcipher3 直连加密库(原生读 WAL,免 checkpoint、
+                    # 免解密成文件)按 rowid 游标增量导入——WeFlow 同款思路
+                    n = -1
                     if rt.get("fast_realtime", True):
                         try:
+                            n = _import_live()
+                        except Exception as exc:      # noqa: BLE001
+                            _realtime["live_err"] = str(exc)[:120]
+                            n = -1
+                    if n < 0:
+                        # 回退：进程内页级增量解密(fastsync)+按需导入，再不行子进程
+                        updated: list[str] = []
+                        try:
                             import fastsync
-                            from chattrace.keyagent import keystore
-                            info = keystore.load_key(ACCOUNT_ID)
-                            updated = fastsync.fast_sync_message_dbs(
-                                ACCOUNT_DIR, DECRYPTED_DIR, info.password)
+                            import keyvault
+                            info = keyvault.load_key(ACCOUNT_ID)
+                            if info:
+                                updated = fastsync.fast_sync_message_dbs(
+                                    ACCOUNT_DIR, DECRYPTED_DIR, info)
                         except Exception as exc:      # noqa: BLE001 快路径失败兜底
                             _realtime["fast_err"] = str(exc)[:100]
                             updated = []
-                    if updated:
-                        n = _import_fast(only={Path(r).name for r in updated
-                                               if r.startswith("message/")})
-                    else:
-                        _decrypt_quick()
-                        n = _import_fast()
+                        if updated:
+                            n = _import_fast(only={Path(r).name for r in updated
+                                                   if r.startswith("message/")})
+                        else:
+                            _decrypt_quick()
+                            n = _import_fast()
                     _realtime["added"] += n
+                    if n > 0 and rt.get("fast_realtime", True):
+                        # live 路径导入极快但不产出解密文件——媒体定位/OCR 需要，
+                        # 顺手刷新 dirty 库（页级增量，仅变化页），不阻塞消息可见
+                        try:
+                            import fastsync
+                            import keyvault
+                            info = keyvault.load_key(ACCOUNT_ID)
+                            if info:
+                                fastsync.fast_sync_message_dbs(
+                                    ACCOUNT_DIR, DECRYPTED_DIR, info)
+                        except Exception:     # noqa: BLE001
+                            pass
                     if rt.get("media_ocr", True) or rt.get("media_asr", True):
                         from auto_media import process_new_media
                         # 只处理最近 48h 的新消息：历史积压交给设置页批量任务，

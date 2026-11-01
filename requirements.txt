@@ -20,3 +20,4 @@ python-docx
 openpyxl
 # 仅 m0_frida_hook.py(扫描微信进程密钥)需要;其余功能可不装
 frida==17.24.3
+sqlcipher3==0.6.4; sys_platform == 'win32'
