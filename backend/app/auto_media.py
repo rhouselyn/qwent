@@ -92,6 +92,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
             if not img:
                 con.execute("INSERT OR REPLACE INTO media_text VALUES(?,?,?,?)",
                             (mid, "ocr", "", int(time.time())))
+                con.commit()      # 逐条提交:OCR 一张数秒,不得持写锁跨过下一次处理
                 continue
             res, _ = _ocr(img)
             text = "\n".join(x[1] for x in res) if res else ""
@@ -102,6 +103,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                 con.execute("INSERT INTO media_fts(text, message_id) VALUES(?,?)",
                             (text[:4000], mid))
                 stats["ocr"] += 1
+            con.commit()      # 单张 OCR 数秒,攒批会让写锁被持几十秒,全局卡死
         except Exception as exc:
             _note_err(exc)
             continue
@@ -118,6 +120,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
             if not wav:
                 con.execute("INSERT OR REPLACE INTO media_text VALUES(?,?,?,?)",
                             (mid, "asr", "", int(time.time())))
+                con.commit()
                 continue
             engine, kind = _asr
             if kind == "sherpa":
@@ -147,6 +150,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                 con.execute("UPDATE message SET noise=0 WHERE id=? AND IFNULL(noise,0)<>0",
                             (mid,))
                 stats["asr"] += 1
+            con.commit()      # 转写一条可达数十秒,逐条提交
         except Exception as exc:
             _note_err(exc)
             continue
@@ -166,6 +170,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                 if samples is None or not len(samples):
                     con.execute("INSERT OR REPLACE INTO media_text VALUES(?,?,?,?)",
                                 (mid, "asr", "", int(time.time())))
+                    con.commit()
                     continue
                 engine, kind = _asr
                 text = _asr_samples(engine, kind, 16000, samples)
@@ -179,8 +184,9 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                     con.execute("UPDATE message SET noise=0 WHERE id=? AND IFNULL(noise,0)<>0",
                                 (mid,))
                     stats["asr"] += 1
+                con.commit()      # 视频转写更长,逐条提交
             except Exception as exc:
                 _note_err(exc)
                 continue
-    con.commit()        # 调用方（实时同步循环）不替我们提交，不 commit 等于白做
+    con.commit()        # 兜底(正常应已在循环内逐条提交)
     return stats

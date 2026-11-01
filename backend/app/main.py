@@ -1656,6 +1656,10 @@ def warm_file_texts(con, cap: int = 3, days: int = 7):
                 done += 1
             else:
                 _mark(key, name, "")             # 解析失败也标记，避免每轮重抽
+            try:
+                con.commit()      # PDF/Office 抽取可达数十秒,逐条提交防写锁长持
+            except Exception:
+                pass
         except Exception:
             continue
     try:
@@ -2624,6 +2628,11 @@ def _import_live() -> int:
                     con.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (rkey, str(mx)))
                     total += added
                     newest = max(newest, mts)
+                    if added:
+                        try:
+                            con.commit()   # 尽早落库:SSE 立即可见,也缩短写锁持有
+                        except Exception:  # noqa: BLE001
+                            pass
             # 连接缓存复用，不 close
         except Exception as exc:  # noqa: BLE001 单库失败不影响其它库
             _realtime["live_err"] = f"{p.name}: {exc}"[:120]

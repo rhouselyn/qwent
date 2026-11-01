@@ -606,7 +606,7 @@ def process_sns_ocr(con, cap: int = 8) -> int:
                 con.execute("DELETE FROM sns_media_fts WHERE tid=?", (tid,))
                 con.execute("INSERT INTO sns_media_fts(text, tid) VALUES(?,?)",
                             (text, tid))
-    con.commit()
+            con.commit()      # 单张(下载+解密+OCR)数秒,逐条提交防写锁长持
     return done
 
 
