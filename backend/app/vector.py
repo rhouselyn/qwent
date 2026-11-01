@@ -108,6 +108,69 @@ def _has_partition(con: sqlite3.Connection) -> bool:
         return False
 
 
+_vec_done_ready = False
+
+
+def _ensure_vec_done(con: sqlite3.Connection):
+    """已尝试向量化标记表(普通表):无可检索文本的消息记一次,避免每轮重扫堵队列。"""
+    global _vec_done_ready
+    if not _vec_done_ready:
+        con.execute("CREATE TABLE IF NOT EXISTS vec_done("
+                    "message_id INTEGER PRIMARY KEY)")
+        con.commit()
+        _vec_done_ready = True
+
+
+def backfill_new(con, cap: int = 30) -> int:
+    """给尚未向量化且有可检索文本的新消息补 embedding(实时同步每轮调用)。
+
+    con 必须是 vector.connect() 的连接(vec0 虚表查询需要扩展)。
+    无可检索文本的消息记入 vec_done 跳过;媒体消息的文字在其 OCR/ASR 落库后,
+    由设置页批量任务或全量重建覆盖。
+    """
+    if not available():
+        return 0
+    from textutil import search_text
+    _ensure_vec_done(con)
+    tbl = "msg_vec_p" if _has_partition(con) else "msg_vec"
+    rows = con.execute(
+        f"SELECT m.id, m.type, m.content, m.chat_user FROM message m WHERE m.noise=0 "
+        f"AND NOT EXISTS (SELECT 1 FROM {tbl} v WHERE v.message_id = m.id) "
+        f"AND NOT EXISTS (SELECT 1 FROM vec_done d WHERE d.message_id = m.id) "
+        f"ORDER BY m.id DESC LIMIT ?", (cap * 3,)).fetchall()
+    if not rows:
+        return 0
+    todo, skipped = [], []
+    for mid, typ, content, chat_user in rows:
+        if len(search_text(typ, content).strip()) >= 4:
+            todo.append((mid, typ, content, chat_user))
+            if len(todo) >= cap:
+                break
+        else:
+            skipped.append((mid,))
+    if not todo and not skipped:
+        return 0
+    if skipped:
+        con.executemany("INSERT OR IGNORE INTO vec_done(message_id) VALUES(?)", skipped)
+    n = 0
+    for i in range(0, len(todo), 16):
+        chunk = todo[i:i + 16]
+        vecs = embed([search_text(typ, content) for _, typ, content, _ in chunk])
+        if tbl == "msg_vec_p":
+            con.executemany(
+                "INSERT OR REPLACE INTO msg_vec_p(message_id, embedding, chat_user) "
+                "VALUES(?,?,?)",
+                [(mid, vecs[j].tobytes(), chat_user)
+                 for j, (mid, _, _, chat_user) in enumerate(chunk)])
+        else:
+            con.executemany(
+                "INSERT OR REPLACE INTO msg_vec(message_id, embedding) VALUES(?,?)",
+                [(mid, vecs[j].tobytes()) for j, (mid, _, _, _) in enumerate(chunk)])
+        n += len(chunk)
+    con.commit()
+    return n
+
+
 def search(con: sqlite3.Connection, query: str, k: int = 60,
            chat: str | None = None) -> list[tuple[int, float]]:
     """向量检索，返回 [(message_id, similarity)]。

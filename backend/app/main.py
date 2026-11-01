@@ -1414,11 +1414,7 @@ def _sns_loop():
         _sns_state["running"] = True
         try:
             st = sns_mod.sync_sns(db())
-            if st.get("ok") and (st.get("new_posts") or st.get("upd_posts")):
-                try:
-                    sns_mod.build_sns_vec()
-                except Exception:     # noqa: BLE001
-                    pass
+            sns_mod.build_sns_vec()          # 无待嵌入时是廉价空查询,每轮跑保证收敛
             if st.get("ok"):
                 try:
                     _register_sns_links(db())
@@ -3220,6 +3216,14 @@ def _realtime_loop():
                             _decrypt_quick()
                             n = _import_fast()
                     _realtime["added"] += n
+                    # 新消息语义向量实时补齐(每轮限量,不然 rag 语义检索要等批量任务)
+                    try:
+                        import vector as _vec
+                        n_vec = _vec.backfill_new(vconn(), cap=30)
+                        if n_vec:
+                            _realtime["vec"] = n_vec
+                    except Exception as exc:      # noqa: BLE001
+                        _realtime["vec_err"] = str(exc)[:100]
                     if n > 0 and rt.get("fast_realtime", True):
                         # live 路径导入极快但不产出解密文件——媒体定位/OCR 需要，
                         # 顺手刷新 dirty 库（页级增量，仅变化页），不阻塞消息可见
@@ -3234,13 +3238,14 @@ def _realtime_loop():
                             pass
                     if rt.get("media_ocr", True) or rt.get("media_asr", True):
                         from auto_media import process_new_media
-                        # 只处理最近 48h 的新消息：历史积压交给设置页批量任务，
-                        # 否则每轮全速 OCR/ASR 会吃满 CPU，拖慢整个程序
+                        # 只处理最近 7 天的新消息：实时同步只管近期(离线几天再
+                        # 上线的消息 ts 也在窗口内)，更早的历史积压交给设置页
+                        # 批量任务，否则每轮全速 OCR/ASR 会吃满 CPU 拖慢整个程序
                         stats = process_new_media(
                             db(), ocr_cap=30 if rt.get("media_ocr", True) else 0,
                             asr_cap=10 if rt.get("media_asr", True) else 0,
                             video_cap=2 if rt.get("media_asr", True) else 0,
-                            since=int(time.time()) - 48 * 3600)
+                            since=int(time.time()) - 7 * 86400)
                         _realtime["media"] = stats
                     try:      # 文件正文预热：收到即提取进 file_text，快速回答可直接引用
                         warm_file_texts(db(), cap=3)
