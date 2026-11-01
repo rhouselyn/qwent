@@ -1326,6 +1326,45 @@ def _on_startup():
         threading.Thread(target=_sns_loop, daemon=True).start()
 
 
+def _register_sns_links(con) -> int:
+    """朋友圈分享链接与消息链接同等待遇：登记 chat_link + 入解析队列。
+
+    同步后调用：新出现的链接自动进后台解析（正文/图片 OCR/视频转写入
+    link_cache），链接中心可见（来源显示"朋友圈"），AI 可 read_link。
+    INSERT OR IGNORE 以 url 为键——聊天里已登记过的同一链接不会重复解析。
+    """
+    _ensure_link_tables(con)
+    n = 0
+    try:
+        rows = con.execute("SELECT tid, ts, links_json FROM sns_post "
+                           "WHERE links_json IS NOT NULL AND links_json != '[]'").fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    for tid, ts, lj in rows:
+        try:
+            links = json.loads(lj or "[]")
+        except (TypeError, ValueError):
+            continue
+        for l in links:
+            u = (l.get("url") or "").strip()
+            if not u:
+                continue
+            try:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,title,platform) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (u, "sns", 0, int(ts or 0), (l.get("title") or "")[:120],
+                     _refresh_platform(u)))
+            except sqlite3.OperationalError:
+                continue
+            if cur.rowcount:
+                n += 1
+                _LINK_QUEUE.put(u)
+    if n:
+        con.commit()
+    return n
+
+
 def _sns_boot():
     """启动时朋友圈首次同步：sns.db 没解密过就补一次增量解密。"""
     try:
@@ -1336,6 +1375,10 @@ def _sns_boot():
             st = sns_mod.sync_sns(db())
         _sns_state["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
         sns_mod.warm_isaac()          # 必须先于 OCR：daemon 冷启动 ~20s
+        try:
+            _register_sns_links(db())  # 分享链接自动归档解析(与消息同款)
+        except Exception:             # noqa: BLE001
+            pass
         try:
             sns_mod.build_sns_vec()
         except Exception:             # noqa: BLE001 向量失败不影响文字检索
@@ -1363,6 +1406,11 @@ def _sns_loop():
             if st.get("ok") and (st.get("new_posts") or st.get("upd_posts")):
                 try:
                     sns_mod.build_sns_vec()
+                except Exception:     # noqa: BLE001
+                    pass
+            if st.get("ok"):
+                try:
+                    _register_sns_links(db())
                 except Exception:     # noqa: BLE001
                     pass
             sns_mod.process_sns_ocr(db(), cap=12)
@@ -2179,8 +2227,9 @@ def api_links(n: int = 200, q: str = ""):
     rows = con.execute("""
         SELECT l.url, l.chat, l.msg_id, l.msg_ts, l.title, l.platform, l.state,
                c.title AS c_title, c.kind AS c_kind, LENGTH(IFNULL(c.text,'')) AS c_len,
-               (SELECT COALESCE(NULLIF(display_name,''), username) FROM chat
-                 WHERE username=l.chat) AS chat_name
+               CASE WHEN l.chat = 'sns' THEN '朋友圈'
+                    ELSE (SELECT COALESCE(NULLIF(display_name,''), username) FROM chat
+                          WHERE username = l.chat) END AS chat_name
         FROM chat_link l LEFT JOIN link_cache c ON c.url=l.url
         ORDER BY l.msg_ts DESC LIMIT ?""", (max(50, min(n, 500)),)).fetchall()
     out = []
@@ -3427,6 +3476,10 @@ def api_sns_sync():
             if st.get("ok"):
                 try:
                     sns_mod.build_sns_vec()
+                except Exception:     # noqa: BLE001
+                    pass
+                try:
+                    _register_sns_links(db())
                 except Exception:     # noqa: BLE001
                     pass
                 sns_mod.process_sns_ocr(db(), cap=60)
