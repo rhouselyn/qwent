@@ -557,19 +557,29 @@ def api_session_pin(payload: dict):
 
 @app.get("/api/messages")
 def api_messages(chat: str, before: int = 0, limit: int = 40):
+    # 按真实时间排序(ts,id 决胜),不能按 id:补漏重扫会把旧消息以新 id 入库,
+    # 按 id 排会让它们占住列表尾部、把真正最新的消息挤出第一屏。
     con = db()
     if before:
+        b = con.execute("SELECT ts FROM message WHERE id=?", (before,)).fetchone()
+        bts = b["ts"] if b else 0
         rows = con.execute(
-            "SELECT * FROM message WHERE chat_user=? AND id < ? ORDER BY id DESC LIMIT ?",
-            (chat, before, limit)).fetchall()
+            "SELECT * FROM message WHERE chat_user=? "
+            "AND (ts < ? OR (ts = ? AND id < ?)) ORDER BY ts DESC, id DESC LIMIT ?",
+            (chat, bts, bts, before, limit)).fetchall()
     else:
         rows = con.execute(
-            "SELECT * FROM message WHERE chat_user=? ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM message WHERE chat_user=? ORDER BY ts DESC, id DESC LIMIT ?",
             (chat, limit)).fetchall()
     rows = _recall_pass(list(reversed(rows)), con, drop_noise=False)
-    has_more = 1 if rows and con.execute(
-        "SELECT 1 FROM message WHERE chat_user=? AND id < ? LIMIT 1",
-        (chat, rows[0]["id"])).fetchone() else 0
+    if rows:
+        r0 = rows[0]
+        has_more = 1 if con.execute(
+            "SELECT 1 FROM message WHERE chat_user=? "
+            "AND (ts < ? OR (ts = ? AND id < ?)) LIMIT 1",
+            (chat, r0["ts"], r0["ts"], r0["id"])).fetchone() else 0
+    else:
+        has_more = 0
     return {"messages": rows, "has_more": has_more}
 
 
