@@ -190,6 +190,7 @@ async function askStream(question) {
         scope_name: sc ? sc.name : "",
         session_id: aiState.currentSession,
         thinking: $("#thinkToggle") ? $("#thinkToggle").checked : undefined,
+        explorer: $("#exploreToggle") ? $("#exploreToggle").checked : false,
         quoted: (fileCtx || linkCtx) ? [] : state.quoted.map(q => q.id),
         history: state.qaHistory.slice(-3).map(t => ({ q: t.question, a: t.answer })),
       }),

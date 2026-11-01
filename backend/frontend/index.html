@@ -77,6 +77,11 @@
             </div>
             <span id="quoteClear" class="quote-clear" title="取消引用">✕</span>
           </div>
+          <div class="explore-bar">
+            <label class="explore-toggle" title="探索模式：跳过快速回答，直接多轮深度检索；工具调用步数翻倍（会话内 8 步 / 全局 12 步），适合统计、枚举、跨时段排查">
+              <input type="checkbox" id="exploreToggle"> 🔎 探索模式
+            </label>
+          </div>
           <div class="composer">
             <textarea id="input" rows="1" placeholder="问 AI（Enter 发送，Shift+Enter 换行；可在消息上点「引用」）"></textarea>
             <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
@@ -133,7 +138,7 @@
   </section>
 </div>
 <div id="toast" class="toast"></div>
-<script src="app.js?v=63"></script>
-<script src="stream_qa.js?v=15"></script>
+<script src="app.js?v=66"></script>
+<script src="stream_qa.js?v=16"></script>
 </body>
 </html>

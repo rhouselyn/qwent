@@ -26,7 +26,10 @@ import time
 TOOLISH_KEYWORDS = ("一共", "总共", "多少", "统计", "排行", "排第", "谁最", "最活跃",
                     "文件", "文档", "pdf", "excel", "word", "公众号", "文章", "链接",
                     "推文", "群成员", "拉群", "加群", "多少个", "几号", "哪天",
-                    "第一", "最多", "最少", "对比", "归纳", "整理", "总结", "时间线")
+                    "第一", "最多", "最少", "对比", "归纳", "整理", "总结", "时间线",
+                    # 列举/查找类：最近 24h 记录根本答不了，必须靠全库检索
+                    "哪些", "有哪些", "提到", "说过什么", "找出", "找一下", "找找",
+                    "搜索", "查一下", "查查", "列举", "清单")
 
 # 模型在答案末尾自带的「引用来源：[1]…」清单——正文 [n] 本身就是可点击链接，直接剥掉
 _REF_FOOTER_RE = re.compile(
@@ -50,10 +53,10 @@ def _sse(event: dict) -> bytes:
     return ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
-def _need_tools(question: str, hits: int) -> bool:
-    q = question.lower()
-    if hits < 2:
-        return True
+def _need_tools(question: str) -> bool:
+    """列举/查找/统计类问题必须走 Agent 全库检索：最近记录试都不用试，
+    否则模型会拿 24h 窗口回答「没有提到」这种错误结论。"""
+    q = (question or "").lower()
     return any(k in q for k in TOOLISH_KEYWORDS)
 
 
@@ -153,6 +156,7 @@ def make_stream(payload: dict, deps: dict):
     fdoc = payload.get("file") or None
     ldoc = payload.get("link") or None
     quoted = payload.get("quoted") or []
+    explorer = bool(payload.get("explorer"))   # 探索模式：跳过快速回答，工具步数翻倍
     # 作用域键：不同群聊 / 文件 / 链接各自独立会话，绝不与其他上下文混用
     #   assistant / <chat username> / file:<chat>:<local_id> / link:<hash>
     scope_key = payload.get("scope") or chat or "assistant"
@@ -244,7 +248,10 @@ def make_stream(payload: dict, deps: dict):
                 return
 
             # ---- 阶段一：会话内先用「最近记录」做一次快速流式作答 ----
-            if chat and conf["llm"].get("api_key"):
+            # 列举/查找/统计类问题（_need_tools）跳过快速路径：最近记录不足以回答，
+            # 试探只会得到「没有提到」的错误答案，直接让 Agent 全库检索。
+            # 探索模式（explorer）同样跳过：用户明确要多轮深挖
+            if chat and conf["llm"].get("api_key") and not _need_tools(q) and not explorer:
                 import agent as agent_mod
                 rrefs: list = []
                 rc = None
@@ -283,13 +290,19 @@ def make_stream(payload: dict, deps: dict):
                                  + chr(10) + fblock["text"])
                     msgs = [
                         {"role": "system", "content":
-                         "你是微信记录助手。系统会给出该会话最近的真实发言，每行行首 [n] 是引用编号"
+                         "你是微信记录助手。系统会给出该会话最近的真实发言（含图片OCR/语音视频转写），"
+                         "每行行首 [n] 是引用编号"
                          "（可能还附有已解析文章/文件的内容摘录，同样有编号，可引用）。"
                          "如果这些材料足以回答：用简洁 Markdown 作答，提到具体消息/文章/文件时标注对应的 [n]；"
                          "**不要输出「引用来源」清单**（界面会自动把 [n] 渲染成可点击引用）。"
                          "**文章/文件的摘录只有开头约 1000 字**：读完已够就直接回答；"
-                         "如果需要完整内容、后半部分，或更早的记录、统计，"
-                         "只输出一行 `__NEED_TOOLS__`，不要编造答案。"},
+                         "如果材料不足以回答——最近记录里没出现问的东西、问的事发生在更早、"
+                         "需要按关键词搜索、需要统计——"
+                         "**必须只输出一行 `__NEED_TOOLS__`，由检索工具去全库（含更早记录和媒体文字）找。"
+                         "绝对不要凭最近记录回答「没有提到/没有找到」——你没有检索过全库，"
+                         "那不是你能下的结论**。"
+                         "列举类问题（问有哪些）只能基于最近记录作答时，"
+                         "注明「基于最近记录，更早内容未检索」。"},
                         {"role": "system", "content": f"当前时间：{_now_text()}；"
                                                       f"会话：{cname}"},
                         {"role": "user", "content":
@@ -298,18 +311,23 @@ def make_stream(payload: dict, deps: dict):
                     acc = []
                     need_tools = False
                     started = False
-                    for kind, val in agent_mod._stream_llm(conf, msgs):
-                        if kind != "delta":
-                            continue
-                        acc.append(val)
-                        head = "".join(acc)
-                        if "__NEED_TOOLS__" in head:
-                            need_tools = True
-                            break
-                        if len(head) > 30:      # 已明确在作答，直接流式输出
-                            # 首段必须补发全部已累积文本：否则前 30 字从未下发，客户端开头缺失
-                            yield _sse({"type": "delta", "text": head if not started else val})
-                            started = True
+                    try:
+                        for kind, val in agent_mod._stream_llm(conf, msgs):
+                            if kind != "delta":
+                                continue
+                            acc.append(val)
+                            head = "".join(acc)
+                            if "__NEED_TOOLS__" in head:
+                                need_tools = True
+                                break
+                            if len(head) > 30:      # 已明确在作答，直接流式输出
+                                # 首段必须补发全部已累积文本：否则前 30 字从未下发，客户端开头缺失
+                                yield _sse({"type": "delta", "text": head if not started else val})
+                                started = True
+                    except Exception as exc:      # noqa: BLE001
+                        yield _sse({"type": "error",
+                                    "message": agent_mod.friendly_err(exc)})
+                        return
                     if not need_tools:
                         answer = strip_ref_footer(agent_mod.strip_dsml("".join(acc)))
                         sid = deps["save_qa"](con, scope_key, q, answer, rrefs, "fast",
@@ -347,7 +365,8 @@ def make_stream(payload: dict, deps: dict):
                 try:
                     result_holder.update(agent_mod.run(
                         q, conf, chat_ctx=chat, chat_name=qname,
-                        quoted=qn, history=history, on_event=on_event))
+                        quoted=qn, history=history, on_event=on_event,
+                        explorer=explorer))
                 except Exception as exc:      # noqa: BLE001
                     result_holder["error"] = str(exc)
 
@@ -367,7 +386,8 @@ def make_stream(payload: dict, deps: dict):
                 time.sleep(0.05)
 
             if result_holder.get("error"):
-                yield _sse({"type": "error", "message": result_holder["error"]})
+                yield _sse({"type": "error",
+                            "message": agent_mod.friendly_err(result_holder["error"])})
                 return
             answer = strip_ref_footer(result_holder.get("answer") or "")
             trefs = result_holder.get("refs") or []

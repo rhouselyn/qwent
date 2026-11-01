@@ -359,6 +359,15 @@ async function openChat(username, name, isGroup, sessionId) {
   state.msgs[username] = [];
   state.pinBottom = true;
   await loadMessages(username, { initial: true });
+  // 从通讯录点进来还没有聊天记录：显示空会话提示，提问范围默认全局
+  if (!(state.msgs[username] || []).length) {
+    const hint = document.createElement("div");
+    hint.className = "sys empty-hint";
+    hint.textContent = `还没有和「${name}」的聊天记录 · 可在右侧向 AI 提问`;
+    $("#msgs").appendChild(hint);
+    $("#scopeToggle").checked = false;
+    updateDrawerScope();
+  }
   startLiveStream(username);          // 新消息秒级推送（SSE）
   // 问答抽屉默认打开，默认范围＝本会话
   $("#scopeToggle").checked = true;
@@ -404,6 +413,8 @@ function startLiveStream(chat) {
       && $("#previewPane").style.display === "none" && !isAssistant();
     if (viewingChat) {
       const msgsBox = $("#msgs");
+      const eh = msgsBox.querySelector(".empty-hint");
+      if (eh) eh.remove();              // 空会话提示有了真消息就撤掉
       const frag = document.createDocumentFragment();
       fresh.forEach(m => frag.appendChild(renderMsg(m)));
       msgsBox.appendChild(frag);
@@ -617,8 +628,8 @@ function renderBubbleContent(m, p) {
     }
     case "file": {
       el.className = "card";
-      el.innerHTML = `📄 <span class="t">${esc(p.title || "[文件]")}</span>
-        <div class="d">${p.size ? fmtSize(p.size) : ""} · 点击预览</div>`;
+      el.innerHTML = `📄 <span class="t">${esc(p.title || "[文件]")}</span>` +
+        `<div class="d">${p.size ? fmtSize(p.size) : ""} · 点击预览</div>`;
       el.style.cursor = "pointer";
       el.onclick = () => openFilePreview({
         chat: m.chat, id: m.src_local_id || m.id, ts: m.ts,
@@ -628,10 +639,10 @@ function renderBubbleContent(m, p) {
     }
     case "link": {
       el.className = "card";
-      el.innerHTML = `🔗 <span class="t">${esc(p.title || "[链接]")}</span>
-        ${p.des ? `<div class="d">${esc(p.des)}</div>` : ""}
-        ${p.url ? `<div class="u">${esc(p.url)}</div>` : ""}
-        ${p.url ? '<div class="d" style="color:#07a150">点击阅读正文</div>' : ""}`;
+      el.innerHTML = `🔗 <span class="t">${esc(p.title || "[链接]")}</span>` +
+        (p.des ? `<div class="d">${esc(p.des)}</div>` : "") +
+        (p.url ? `<div class="u">${esc(p.url)}</div>` : "") +
+        (p.url ? '<div class="go">点击阅读正文 ↗</div>' : "");
       if (p.url) {
         el.style.cursor = "pointer";
         el.onclick = () => openLinkPreview(p.url, p.title || "网页");
@@ -1036,7 +1047,7 @@ async function showContacts(q = "") {
     d.onclick = () => {
       const s = state.sessions.find(x => x.username === c.username);
       if (s) openChat(s.username, s.name, s.is_group);
-      else { toast("该联系人没有会话记录"); }
+      else openChat(c.username, c.name, c.is_group);   // 没有聊天记录也开一个空会话
     };
     box.appendChild(d);
   }
@@ -1610,6 +1621,9 @@ $("#drawerFab").onclick = () => {
 };
 $("#scopeToggle").onchange = updateDrawerScope;
 $("#sendBtn").onclick = () => { const v = $("#input").value; $("#input").value = ""; ask(v); };
+// ＋新会话：在当前上下文（群/私聊/文件/链接/全局助手）新建一个 AI 会话
+// （此前只绑定在未被加载的 ai_sessions.js 里，按钮一直是死的）
+$("#newSessionBtn").onclick = () => newAiSession();
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const v = $("#input").value; $("#input").value = ""; ask(v); }
 });

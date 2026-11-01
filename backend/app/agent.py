@@ -684,7 +684,6 @@ def t_rag_search(args):
                     files.append({**f, "chat_name": _chat_name(con, f["chat"])})
                     if len(files) >= k:
                         break
-    con.close()
     # 聚合上限：消息按相关度(RRF)排序取前 2k（最多 20）；文章/文件按时间新→旧
     max_msg = min(k * 2, 20)
     max_links = min(k, 6)
@@ -695,12 +694,57 @@ def t_rag_search(args):
     link_list = sorted(links.values(), key=lambda x: x.get("received") or "",
                        reverse=True)[:max_links]
     file_list = sorted(files, key=lambda f: -(f.get("ts") or 0))[:max_files]
+    # ② 命中消息附带前后各 4 条上下文：连发簇命中任意一条即可让模型看到整簇。
+    #   短句常缺类目词（如「先用安提普拉明」全句不含"药"），靠邻句补上词面缺口。
+    #   预算：命中 ≤12 条、总条目 ≤34、ctx 文本压到 120 字，配合 agent 循环里
+    #   rag 类工具 12000 字符的结果上限。
+    if msgs and scope_ in ("messages", "all"):
+        ranked_ids = [m for m in ids if m in msgs][:12]
+        hit_set = set(ranked_ids)
+        PER_CTX, MAX_TOTAL = 4, 40
+        by_chat: dict[str, list[int]] = {}
+        for mid in ranked_ids:
+            by_chat.setdefault(msgs[mid]["chat"], []).append(mid)
+        ctx_rows: dict[int, Any] = {}
+        for chat, mids in by_chat.items():
+            try:
+                rows = con.execute(
+                    "SELECT * FROM message WHERE chat_user=? AND id BETWEEN ? AND ? "
+                    "AND noise=0 AND type NOT IN (10000, 10002) ORDER BY id",
+                    (chat, min(mids) - PER_CTX, max(mids) + PER_CTX)).fetchall()
+            except sqlite3.OperationalError:
+                continue
+            for r in rows:
+                if r["id"] not in msgs:
+                    ctx_rows[r["id"]] = r
+        entries: list[dict] = []
+        emitted: set[int] = set()
+        for mid in ranked_ids:
+            chat = msgs[mid]["chat"]
+            block = [mid] + [x["id"] for x in ctx_rows.values()
+                             if x["chat_user"] == chat and abs(x["id"] - mid) <= PER_CTX]
+            for bid in sorted(set(block)):
+                if bid in emitted or len(entries) >= MAX_TOTAL:
+                    continue
+                emitted.add(bid)
+                b = dict(msgs.get(bid) or _msg_brief(con, ctx_rows[bid]))
+                b["hit"] = bid in hit_set
+                if not b["hit"]:
+                    b["text"] = b["text"][:120]
+                entries.append(b)
+        if entries:
+            msg_ranked = entries
+
+
+    con.close()
     return {"scope": scope_, "queries_used": qs, "per_query": per_query,
             "messages": msg_ranked, "links": link_list, "files": file_list,
             "counts": {"messages": len(msg_ranked), "links": len(link_list),
                        "files": len(file_list)},
             "limits": {"messages": max_msg, "links": max_links, "files": max_files},
-            "ranking": "messages 按相关度(RRF)降序、同分取新的；links/files 按时间降序"}
+            "note": "messages 按簇给出并带 hit/ctx 标记：hit=检索命中，ctx=该命中前后文"
+                    "（连发短句会整段出现）；受篇幅限制只展示一部分，枚举/统计类问题"
+                    "如有遗漏请换关键词再检索或用 read_chat 通读"}
 
 
 def t_recent_messages(args):
@@ -857,10 +901,14 @@ SYSTEM_PROMPT = """你是用户的微信记录分析助手，可以调用工具�
    文件（PDF/Word/Excel/图片等）同样用它的 ref 编号标注。
 10. **禁止在答案末尾输出「引用来源 / 参考资料」清单**：正文里的 [n] 在界面上
     本身就是可点击链接（点击跳原文/打开源文件），末尾清单是多余的，不要写。
-11. 步数感知：工具结果前会标注 [第X/4步]。信息足够就立刻作答；
+11. 步数感知：工具结果前会标注 [第X/N轮]（N=本问题允许的总步数，探索模式下更大）。信息足够就立刻作答；
     不足就继续检索（换关键词/换语料范围/加时间过滤）。[最后一步] 时必须直接给出最终答案。
     判断标准是「信息是否足够回答用户的问题」，而不是命中条数——3 条高质量命中
-    足以回答简单问题；复杂问题（统计、跨群对比）命中再多也可能需要再查。"""
+    足以回答简单问题；复杂问题（统计、跨群对比）命中再多也可能需要再查。
+12. **列举/统计类问题**（"有哪些/哪些/统计一下所有X"）：你的清单只能来自检索命中的样本，
+    而检索永远可能漏（消息措辞不含检索词的情况很常见）。即使已多轮检索，
+    也必须在清单末尾用一句话注明「以上基于检索到的消息，可能有遗漏」；
+    不要宣称"全部/完整/一共就这些"。只有检索后确实零命中才能说"没有"。"""
 
 
 
@@ -926,6 +974,13 @@ def _pick_model(conf):
     return llm.get("model")
 
 
+def friendly_err(exc) -> str:
+    """把模型接口的原始报错转成用户能看懂、知道该干嘛的提示。"""
+    s = str(exc).replace("urlopen error ", "").replace("<", "").replace(">", "")
+    return ("模型接口连不上：" + s[:120] +
+            " —— 多半是本机代理节点掉了（已自动重试仍失败），换个节点或稍后再问")
+
+
 def _call_llm(conf, messages, tools):
     llm = conf["llm"]
     payload = {"model": _pick_model(conf), "messages": messages,
@@ -933,13 +988,20 @@ def _call_llm(conf, messages, tools):
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    req = urllib.request.Request(
-        llm["base_url"].rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {llm['api_key']}"})
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        return json.loads(resp.read())["choices"][0]["message"]
+    last_err = None
+    for attempt in range(3):        # Agent 每步都会调它，网络抖一下不能直接废掉整轮
+        req = urllib.request.Request(
+            llm["base_url"].rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {llm['api_key']}"})
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                return json.loads(resp.read())["choices"][0]["message"]
+        except Exception as exc:      # noqa: BLE001
+            last_err = exc
+            time.sleep(1.0 * (attempt + 1))
+    raise last_err
 
 
 def _stream_llm(conf, messages, tools=None):
@@ -959,7 +1021,7 @@ def _stream_llm(conf, messages, tools=None):
                  "Accept": "text/event-stream"})
     full = []
     last_err = None
-    for attempt in range(3):
+    for attempt in range(4):        # 1/2/4 秒退避：网络抖一下能扛过去，节点挂了也不会秒失败
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 for raw in resp:
@@ -984,7 +1046,7 @@ def _stream_llm(conf, messages, tools=None):
             last_err = exc
             if full:                  # 已经输出了一部分就不再重试，避免重复
                 break
-            time.sleep(0.6 * (attempt + 1))
+            time.sleep(1.0 * (attempt + 1))
     if last_err is not None and not full:
         # 流式失败 → 退回非流式一次性调用
         try:
@@ -1006,10 +1068,13 @@ def _tool_schemas():
 
 def run(question: str, conf: dict, chat_ctx: str | None = None,
         chat_name: str | None = None, quoted: list[dict] | None = None,
-        history: list[dict] | None = None, on_event=None) -> dict:
+        history: list[dict] | None = None, on_event=None,
+        explorer: bool = False) -> dict:
     """执行 agent 循环，返回 {answer, trace, refs}。
 
     on_event(dict) 可选，用于实时推送进度（tool_call / tool_result / refs / status）。
+    explorer：探索模式——工具步数翻倍（会话内 4→8、全局 6→12），适合统计/枚举/
+    跨时段排查这类需要多轮检索的问题。
     """
     def emit(payload):
         if on_event:
@@ -1022,6 +1087,14 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
     week = "一二三四五六日"[now.weekday()]
     time_line = (f"当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')} 星期{week}"
                  f"（时区本地）。本月 1 号是 {now.replace(day=1).strftime('%Y-%m-%d')}。")
+    if explorer:
+        budget = 12 if not chat_ctx else 8
+        time_line += (
+            f"\n【探索模式已开启】本问题工具调用上限提升到 {budget} 轮（普通为"
+            f"{'6' if not chat_ctx else '4'}）。枚举/统计/排查类问题请多轮深挖："
+            "换 2~4 组互补关键词、对命中密集的日期用 read_chat(since, until) 按天补读、"
+            "发现新实体名就追查一轮；宁可多查一步，不要早停。"
+            "普通聊天问题该快还是要快，探索模式不是让你每问必查满。")
     messages = [{"role": "system", "content": SYSTEM_PROMPT + chr(10) + time_line}]
     ctx_bits = []
     if chat_ctx:
@@ -1060,7 +1133,10 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
     if chat_ctx:
         # 会话已确定：不需要"再找会话"这个工具
         schemas = [x for x in schemas if x["function"]["name"] != "find_sessions"]
-    max_steps = MAX_STEPS_GLOBAL if not chat_ctx else MAX_STEPS_CHAT
+    if explorer:
+        max_steps = 12 if not chat_ctx else 8
+    else:
+        max_steps = MAX_STEPS_GLOBAL if not chat_ctx else MAX_STEPS_CHAT
     for step in range(max_steps):
         last_step = step >= max_steps - 1
         msg = _call_llm(conf, messages, None if last_step else schemas)
@@ -1207,10 +1283,13 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
             trace.append({"tool": name, "args": args, "summary": summary})
             emit({"type": "tool_result", "tool": name, "summary": summary,
                   "refs": len(seen_msgs)})
+            # rag/通读类工具结果自带上下文、体量大，放宽截断（默认 6000 会把附带的
+            # 前后文整段切掉，模型反而看不到簇）
+            tool_cap = 12000 if name in ("rag_search", "read_chat", "recent_messages") else 6000
             messages.append({"role": "tool", "tool_call_id": call["id"],
                              "content": "[第" + str(step + 1) + "/" + str(max_steps)
                                         + "轮] "
-                                        + json.dumps(result, ensure_ascii=False)[:6000]})
+                                        + json.dumps(result, ensure_ascii=False)[:tool_cap]})
     # 步数用尽：禁用工具，要求模型基于已有信息给出最终答案
     try:
         messages.append({"role": "user", "content":
