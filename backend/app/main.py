@@ -3390,6 +3390,40 @@ def _count_or_zero(con, sql: str) -> int:
         return 0
 
 
+_job_totals_cache = {"ts": 0.0, "data": {}}
+
+
+def _job_totals(con) -> dict:
+    """批量任务的总数提示（文件/朋友圈总数需要 Python 侧解析内容，300s 缓存）。"""
+    now = time.time()
+    if now - _job_totals_cache["ts"] < 300:
+        return _job_totals_cache["data"]
+    data: dict[str, int] = {}
+    try:
+        data["asr"] = con.execute(
+            "SELECT COUNT(*) FROM message WHERE type IN (34, 43)").fetchone()[0]
+        try:
+            from textutil import appmsg_subtype
+            data["files"] = sum(
+                1 for (content,) in con.execute("SELECT content FROM message WHERE type=49")
+                if appmsg_subtype(content or "") == "6")
+        except Exception:      # noqa: BLE001
+            data["files"] = 0
+        try:
+            import json as _json
+            import sns as sns_mod
+            data["snsocr"] = sum(
+                1 for (mj,) in con.execute("SELECT media_json FROM sns_post")
+                for m in _json.loads(mj or "[]")
+                if sns_mod._media_is_real(m) and not sns_mod._media_is_video(m))
+        except Exception:      # noqa: BLE001
+            data["snsocr"] = 0
+    except Exception:          # noqa: BLE001
+        return _job_totals_cache.get("data") or {}
+    _job_totals_cache.update(ts=now, data=data)
+    return data
+
+
 @app.get("/api/jobs")
 def api_jobs():
     con = db()
@@ -3405,20 +3439,22 @@ def api_jobs():
         asr_done = con.execute("SELECT COUNT(*) FROM media_text WHERE kind='asr'").fetchone()[0]
     except sqlite3.OperationalError:
         ocr_done = asr_done = 0
+    jt = _job_totals(con)
     return {"vector": {**_jobs["vectors"], "done": vec_count, "total": total,
                        "model": vector.available()},
             "ocr": {**_jobs["ocr"], "done": ocr_done, "total": ocr_total},
-            "asr": {**_jobs["asr"], "done": asr_done},
+            "asr": {**_jobs["asr"], "done": asr_done, "total": jt.get("asr", 0)},
             "links": {**_jobs["links"],
                       "done": _count_or_zero(con, "SELECT COUNT(*) FROM link_cache "
                                                   "WHERE length(text)>50"),
                       "total": _count_or_zero(con, "SELECT COUNT(*) FROM link_cache")},
             "files": {**_jobs["files"],
                       "done": _count_or_zero(con, "SELECT COUNT(*) FROM file_text "
-                                                  "WHERE length(text)>50")},
+                                                  "WHERE length(text)>50"),
+                      "total": jt.get("files", 0)},
             "snsocr": {**_jobs["snsocr"],
-                       "done": _count_or_zero(con, "SELECT COUNT(*) FROM sns_media_ocr "
-                                                   "WHERE kind='ocr' AND text!=''")},
+                       "done": _count_or_zero(con, "SELECT COUNT(*) FROM sns_media_ocr"),
+                       "total": jt.get("snsocr", 0)},
             "rescan": {**_jobs["rescan"], "done": _jobs["rescan"].get("count", 0)},
             "context_around": int(load_conf().get("qa", {}).get("context_around", 3))}
 
