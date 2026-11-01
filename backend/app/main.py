@@ -3063,6 +3063,14 @@ def _auto_backlog_boot():
     for name, script, extra in _BACKLOG_JOBS:
         if _jobs[name]["running"]:
             continue
+        try:
+            con = db()
+            r2 = con.execute("SELECT value FROM meta WHERE key='auto_backlog'").fetchone()
+            con.close()
+        except Exception:
+            r2 = None
+        if not r2 or str(r2[0]) != "started":
+            return          # 用户在设置页停止过 → 取消剩余自动序列
         _run_job(name, script, extra)      # 顺序执行,避免多任务互相抢 CPU
 
 
@@ -3416,6 +3424,15 @@ def api_job_stop(name: str):
         except Exception:
             pass
         _jobs[name]["running"] = False
+        # 停掉自动解析序列中的任一任务 = 取消剩余自动序列(之后可在设置页手动逐个开)
+        if any(name == b[0] for b in _BACKLOG_JOBS):
+            try:
+                con = db()
+                con.execute("INSERT OR REPLACE INTO meta VALUES('auto_backlog', 'stopped')")
+                con.commit()
+                con.close()
+            except Exception:
+                pass
         return {"ok": True}
     return {"ok": False, "msg": "未在运行"}
 

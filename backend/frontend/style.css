@@ -757,3 +757,15 @@ body {
 .sns-video { margin: 8px auto 10px; }
 .sns-link { margin: 6px 0; }
 .sns-ocr-box { margin: 10px 0; }
+
+/* 设置页:目录已移至中栏,内容区占满右侧 */
+#settingsFull .sf-nav { display: none; }
+.sf-body .card { max-width: none; }
+
+/* 朋友圈正文:去掉 .pv-text 的整页预览样式(padding+min-height:100% 曾把
+   文字块撑到整屏高,造成文字与图片间隔一大截) */
+pre.sns-text.pv-text {
+  padding: 8px 4px 2px; margin: 0; min-height: 0; background: transparent;
+  border-bottom: none; font-family: "Microsoft YaHei", sans-serif; font-size: 13.5px;
+}
+.sns-img-grid { margin: 8px 0 10px; }

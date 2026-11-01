@@ -231,7 +231,8 @@ async function api(path, opts) {
 }
 
 const PANES = ["#sessionList", "#resultList", "#contactList", "#fileList",
-               "#linkList", "#settingsPane", "#aiSessionList", "#snsList"];
+               "#linkList", "#settingsPane", "#aiSessionList", "#snsList",
+               "#settingsNav"];
 function showPane(id) {
   PANES.forEach(p => { const el = $(p); if (el) el.style.display = "none"; });
   if (id) { const el = $(id); if (el) el.style.display = "block"; }
@@ -1344,8 +1345,8 @@ let settingsSection = "model";
 
 async function showSettings(section) {
   settingsSection = section || settingsSection || "model";
-  // 设置占满中间+右侧；左边的图标栏就是入口
-  showPane(null);
+  // 设置目录放中栏(与会话列表同列),右侧内容区占满
+  showPane("#settingsNav");
   $("#chatEmpty").style.display = "none";
   $("#chatMain").style.display = "flex";
   document.querySelector(".chat-column").style.display = "none";
@@ -1355,7 +1356,7 @@ async function showSettings(section) {
   $("#previewPane").style.display = "none";
   document.querySelector("#settingsFull").style.display = "flex";
   const status = await api("/api/status").catch(() => null);
-  const nav = document.querySelector("#sfNav");
+  const nav = document.querySelector("#settingsNav");
   nav.innerHTML = SETTING_SECTIONS.map(x =>
     `<div class="sf-item ${x.id === settingsSection ? "active" : ""}" data-sec="${x.id}">${esc(x.label)}</div>`
   ).join("");
