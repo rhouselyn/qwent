@@ -239,6 +239,17 @@ def _build_from_wechat() -> bool:
         _mark(False, "导入失败 — 重跑本脚本可断点续传")
         return False
     _mark(True, "建库完成(向量索引在下一步处理)")
+    # 新人首批自动解析开关:服务启动后按顺序后台执行
+    # (文字/语音/文件=全量历史,图片/公众号/朋友圈=最近一年;其余设置页续跑)
+    try:
+        kdb = sqlite3.connect(str(PROJECT / "data" / "knowledge.db"))
+        kdb.execute("INSERT OR REPLACE INTO meta VALUES('auto_backlog', '1')")
+        kdb.commit()
+        kdb.close()
+        print("  已登记自动后台解析:语音/文件(全量) + 图片/公众号/朋友圈(最近一年),"
+              "启动服务后自动进行;其余可在设置页随时继续")
+    except Exception:
+        pass
     return True
 
 

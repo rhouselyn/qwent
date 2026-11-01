@@ -1324,6 +1324,7 @@ def _on_startup():
         _sns_state["booted"] = True
         threading.Thread(target=_sns_boot, daemon=True).start()
         threading.Thread(target=_sns_loop, daemon=True).start()
+    threading.Thread(target=_auto_backlog_boot, daemon=True).start()
 
 
 def _register_sns_links(con) -> int:
@@ -2999,8 +3000,20 @@ _jobs: dict[str, dict] = {
     "ocr": {"running": False, "log": "", "count": 0},
     "asr": {"running": False, "log": "", "count": 0},
     "links": {"running": False, "log": "", "count": 0},
+    "snsocr": {"running": False, "log": "", "count": 0},
+    "files": {"running": False, "log": "", "count": 0},
 }
 _job_procs: dict[str, object] = {}
+
+# 新人首次配置后的自动后台解析清单（setup 写 meta 开关，服务启动时按顺序执行；
+# 文字/语音/文件=全量历史，图片/公众号/朋友圈=最近一年，其余在设置页手动续跑）
+_BACKLOG_JOBS: list[tuple[str, str, list[str]]] = [
+    ("asr", "run_asr.py", []),
+    ("files", "run_files.py", []),
+    ("ocr", "run_ocr.py", ["--recent-days", "365"]),
+    ("links", "index_links.py", ["--recent-days", "365"]),
+    ("snsocr", "run_sns_ocr.py", []),
+]
 
 
 def _run_job(name: str, script: str, extra: list[str] | None = None):
@@ -3024,9 +3037,33 @@ def _run_job(name: str, script: str, extra: list[str] | None = None):
                 st["count"] = int(m.group(1))
         proc.wait()
         st["log"] = (st["log"] + chr(10) + "完成（退出码 " + str(proc.returncode) + "）")[-2000:]
+    except Exception as e:  # noqa: BLE001
         st["log"] = (st["log"] + chr(10) + "失败: " + str(e))[-2000:]
     finally:
         st["running"] = False
+
+
+def _auto_backlog_boot():
+    """meta['auto_backlog']='1' 时（setup 建库后写入），按顺序自动跑首批解析任务。"""
+    try:
+        con = db()
+        r = con.execute("SELECT value FROM meta WHERE key='auto_backlog'").fetchone()
+        con.close()
+    except Exception:
+        return
+    if not r or str(r[0]) != "1":
+        return
+    try:
+        con = db()
+        con.execute("INSERT OR REPLACE INTO meta VALUES('auto_backlog', 'started')")
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+    for name, script, extra in _BACKLOG_JOBS:
+        if _jobs[name]["running"]:
+            continue
+        _run_job(name, script, extra)      # 顺序执行,避免多任务互相抢 CPU
 
 
 _auto_sync = {"thread": None, "last": "", "next": ""}
@@ -3343,6 +3380,12 @@ def api_jobs():
                       "done": _count_or_zero(con, "SELECT COUNT(*) FROM link_cache "
                                                   "WHERE length(text)>50"),
                       "total": _count_or_zero(con, "SELECT COUNT(*) FROM link_cache")},
+            "files": {**_jobs["files"],
+                      "done": _count_or_zero(con, "SELECT COUNT(*) FROM file_text "
+                                                  "WHERE length(text)>50")},
+            "snsocr": {**_jobs["snsocr"],
+                       "done": _count_or_zero(con, "SELECT COUNT(*) FROM sns_media_ocr "
+                                                   "WHERE kind='ocr' AND text!=''")},
             "context_around": int(load_conf().get("qa", {}).get("context_around", 3))}
 
 
@@ -3354,10 +3397,12 @@ def api_job_start(name: str, payload: dict | None = None):
         return {"ok": False, "msg": "任务进行中"}
     script = {"vectors": "build_vectors.py", "ocr": "run_ocr.py",
               "asr": "run_asr.py", "links": "index_links.py",
-              "snsocr": "run_sns_ocr.py"}[name]
+              "snsocr": "run_sns_ocr.py", "files": "run_files.py"}[name]
     extra = []
     if payload and payload.get("limit"):
         extra = ["--limit", str(int(payload["limit"]))]
+    if payload and payload.get("days"):
+        extra = ["--recent-days", str(int(payload["days"]))]
     threading.Thread(target=_run_job, args=(name, script, extra), daemon=True).start()
     return {"ok": True}
 

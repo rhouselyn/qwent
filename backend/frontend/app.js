@@ -1317,7 +1317,9 @@ async function refreshJobs() {
   box.innerHTML = row("vectors", "向量索引", j.vector, j.vector.model)
     + row("ocr", "图片 OCR", j.ocr, true)
     + row("asr", "语音转写", j.asr, true)
-    + row("links", "公众号正文", j.links, true);
+    + row("links", "公众号正文", j.links, true)
+    + row("files", "文件正文", j.files, true)
+    + row("snsocr", "朋友圈 OCR", j.snsocr, true);
   box.querySelectorAll("[data-job]").forEach(b => b.onclick = async () => {
     await api(`/api/jobs/${b.dataset.job}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     toast("任务已启动"); setTimeout(refreshJobs, 1500);
