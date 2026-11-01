@@ -1214,6 +1214,7 @@ async function openMomentDetail(tid) {
       return `<div class="sns-img-wrap" title="${tip}">
           <div class="sns-img-ph loading">…</div>
           <img class="sns-img" loading="lazy" decoding="async" alt="图 ${m.i + 1}"
+             data-idx="${m.i}"
              src="/api/sns/image?tid=${encodeURIComponent(tid)}&idx=${m.i}"
              onload="const ph=this.parentNode.querySelector('.sns-img-ph'); if(ph) ph.remove();"
              onerror="const w=this.parentNode; const ph=w && w.querySelector('.sns-img-ph'); if(ph){ ph.textContent='拉取失败'; ph.classList.remove('loading'); } if(this.parentNode) this.remove();">
@@ -1255,12 +1256,34 @@ async function openMomentDetail(tid) {
     og.textContent = `图片文字（OCR，${ocrAll.length} 张） ${open ? "▸" : "▾"}`;
   };
   $("#pvBody").querySelectorAll(".sns-img-wrap img").forEach(el => {
-    el.onclick = () => el.classList.toggle("big");
+    el.onclick = () => {
+      const idx = +el.dataset.idx;
+      const m = (p.media || []).find(x => x.i === idx);
+      openMomentImage(tid, idx, m ? (m.ocr || "") : "", name, p.ts);
+    };
   });
   $("#pvBody").querySelectorAll(".sns-link").forEach(el => {
     el.onclick = () => openLinkPreview(el.dataset.url, el.querySelector(".sns-link-title").textContent);
   });
   $("#input").focus();
+}
+
+/* 朋友圈单图查看：与聊天消息的图片查看器同款（预览面板内展示，点击返回朋友圈） */
+function openMomentImage(tid, idx, ocr, author, ts) {
+  $("#chatTitle").textContent = "朋友圈图片";
+  $("#chatMeta").textContent = `${author || ""}${ts ? " · " + fmtTime(ts) : ""}`;
+  $("#pvBody").innerHTML =
+    `<div class="pv-head"><span class="pv-name" id="snsImgBack"
+        style="cursor:pointer">← 返回朋友圈</span></div>
+     <img src="/api/sns/image?tid=${encodeURIComponent(tid)}&idx=${idx}"
+          class="pv-img" style="max-height:62vh">
+     ${ocr && ocr.trim()
+       ? `<div class="pv-seg"><div class="pv-seg-title">图片文字（OCR）</div>
+            <pre class="pv-text">${esc(ocr)}</pre></div>`
+       : ""}`;
+  $("#snsImgBack").onclick = () => openMomentDetail(tid);
+  const img = $("#pvBody .pv-img");
+  if (img) img.onclick = () => openMomentDetail(tid);
 }
 
 function openMomentByTid(tid) { openMomentDetail(String(tid)); }

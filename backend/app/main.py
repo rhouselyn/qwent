@@ -1335,14 +1335,14 @@ def _sns_boot():
             _decrypt_quick()
             st = sns_mod.sync_sns(db())
         _sns_state["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        sns_mod.warm_isaac()          # 必须先于 OCR：daemon 冷启动 ~20s
         try:
             sns_mod.build_sns_vec()
         except Exception:             # noqa: BLE001 向量失败不影响文字检索
             pass
         sns_mod.process_sns_ocr(db(), cap=120)
-        # 预热朋友圈 CDN 媒体的 ISAAC64 守护进程（首次加载 wasm 约 20 秒，
-        # 提前在后台完成，避免第一张图请求超时）
-        threading.Thread(target=sns_mod.warm_isaac, daemon=True).start()
+    except Exception as exc:          # noqa: BLE001
+        _sns_state["error"] = str(exc)[:150]
     except Exception as exc:          # noqa: BLE001
         _sns_state["error"] = str(exc)[:150]
 
@@ -1365,7 +1365,7 @@ def _sns_loop():
                     sns_mod.build_sns_vec()
                 except Exception:     # noqa: BLE001
                     pass
-            sns_mod.process_sns_ocr(db(), cap=6)
+            sns_mod.process_sns_ocr(db(), cap=12)
             _sns_state["last"] = time.strftime("%Y-%m-%d %H:%M:%S")
             _sns_state["error"] = ""
         except Exception as exc:      # noqa: BLE001
@@ -3304,7 +3304,8 @@ def api_job_start(name: str, payload: dict | None = None):
     if _jobs[name]["running"]:
         return {"ok": False, "msg": "任务进行中"}
     script = {"vectors": "build_vectors.py", "ocr": "run_ocr.py",
-              "asr": "run_asr.py", "links": "index_links.py"}[name]
+              "asr": "run_asr.py", "links": "index_links.py",
+              "snsocr": "run_sns_ocr.py"}[name]
     extra = []
     if payload and payload.get("limit"):
         extra = ["--limit", str(int(payload["limit"]))]

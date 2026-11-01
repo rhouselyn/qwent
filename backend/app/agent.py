@@ -684,6 +684,28 @@ def t_rag_search(args):
                     files.append({**f, "chat_name": _chat_name(con, f["chat"])})
                     if len(files) >= k:
                         break
+    # 4) 朋友圈（正文 + 图片 OCR 文字；FTS + 语义兜底）
+    moments: list[dict] = []
+    if scope_ in ("moments", "all"):
+        import sns as sns_mod
+        seen_tids: set[str] = set()
+        for q in qs:
+            try:
+                hits = sns_mod.search_moments(con, q, limit=max(2, k // 2))
+            except Exception:
+                hits = []
+            for h in hits:
+                if h["tid"] in seen_tids:
+                    continue
+                seen_tids.add(h["tid"])
+                moments.append({"tid": h["tid"],
+                                "who": h.get("who") or h.get("author_name") or h.get("author") or "朋友圈",
+                                "ts": h.get("ts", 0),
+                                "ts_str": _fmt(h.get("ts") or 0) if h.get("ts") else "",
+                                "text": (h.get("text") or "")[:400],
+                                "n_img": h.get("n_img", 0), "kind": "moment"})
+        moments.sort(key=lambda m: -(m.get("ts") or 0))
+        moments = moments[:max_links]
     # 聚合上限：消息按相关度(RRF)排序取前 2k（最多 20）；文章/文件按时间新→旧
     max_msg = min(k * 2, 20)
     max_links = min(k, 6)
@@ -739,8 +761,9 @@ def t_rag_search(args):
     con.close()
     return {"scope": scope_, "queries_used": qs, "per_query": per_query,
             "messages": msg_ranked, "links": link_list, "files": file_list,
+            "moments": moments,
             "counts": {"messages": len(msg_ranked), "links": len(link_list),
-                       "files": len(file_list)},
+                       "files": len(file_list), "moments": len(moments)},
             "limits": {"messages": max_msg, "links": max_links, "files": max_files},
             "note": "messages 按簇给出并带 hit/ctx 标记：hit=检索命中，ctx=该命中前后文"
                     "（连发短句会整段出现）；受篇幅限制只展示一部分，枚举/统计类问题"
@@ -880,13 +903,13 @@ TOOLS = {
                       "required": []}),
     "rag_search": (t_rag_search,
                    "主动 RAG：自选语料范围（messages=聊天记录 / files=文件 / links=公众号网页 / "
-                   "all=全部），并传入你自行生成的 2~4 组关键词做多路检索后聚合。"
-                   "可加 chat/since/until 限定时段与会话。找不到再换关键词重试。",
+                   "moments=朋友圈(含图片OCR文字) / all=全部），并传入你自行生成的 2~4 组关键词"
+                   "做多路检索后聚合。可加 chat/since/until 限定时段与会话。找不到再换关键词重试。",
                    {"type": "object", "properties": {
                        "queries": {"type": "array", "items": {"type": "string"},
                                    "description": "2~4 组检索词（同义/近义/相关）"},
                        "scope": {"type": "string",
-                                 "enum": ["messages", "files", "links", "all"]},
+                                 "enum": ["messages", "files", "links", "moments", "all"]},
                        "chat": {"type": "string"}, "since": {"type": "string"},
                        "until": {"type": "string"}, "k": {"type": "integer"}},
                     "required": ["queries"]}),
@@ -1400,7 +1423,8 @@ def _summarize(name: str, result: dict) -> str:
     if name == "rag_search":
         c = result.get("counts") or {}
         return (f"检索{result.get('scope')}：消息 {c.get('messages',0)} 条 / "
-                f"文章 {c.get('links',0)} 篇 / 文件 {c.get('files',0)} 个")
+                f"文章 {c.get('links',0)} 篇 / 文件 {c.get('files',0)} 个 / "
+                f"朋友圈 {c.get('moments',0)} 条")
     if name == "recent_messages":
         return f"最近 {result.get('count', 0)} 条消息"
     if name == "list_chat_links":

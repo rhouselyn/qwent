@@ -550,12 +550,17 @@ def _get_ocr():
 
 
 def process_sns_ocr(con, cap: int = 8) -> int:
-    """给有本地缓存的朋友圈图片补 OCR（每轮限量，供后台循环调用）。返回处理张数。"""
+    """给有本地缓存或可 CDN 拉取的朋友圈图片补 OCR（每轮限量，供后台循环调用）。
+
+    空文本占位行 6 小时后允许重试（早期失败可能是暂时的：组件未就绪/网络抖动）。
+    行的 ts 记录的是**尝试时间**而非发帖时间。
+    """
     ocr = _get_ocr()
     if ocr is None:
         return 0
     ensure_schema(con)
     done = 0
+    now = time.time()
     rows = con.execute(
         "SELECT tid, xml_id, media_json, ts FROM sns_post"
         " WHERE media_json LIKE '%\"t\": \"2\"%' OR media_json LIKE '%\"t\":\"2\"%'"
@@ -567,14 +572,23 @@ def process_sns_ocr(con, cap: int = 8) -> int:
             media = json.loads(media_json or "[]")
         except (TypeError, ValueError):
             continue
-        have = {r[0] for r in con.execute(
-            "SELECT media_idx FROM sns_media_ocr WHERE tid=? AND kind='ocr'", (tid,))}
+        have = {r[0]: (r[1], r[2], r[3]) for r in con.execute(
+            "SELECT media_idx, text, kind, ts FROM sns_media_ocr WHERE tid=?", (tid,))}
         for m in media:
             if done >= cap:
                 break
-            if m.get("i", 0) in have or _media_is_video(m):
+            if _media_is_video(m):
                 continue
-            done += 1          # 无论成败都占额度，避免坏图反复重试
+            prev = have.get(m.get("i", 0))
+            if prev:
+                kind0, ts0 = prev[1], prev[2]
+                if kind0 == "ocr0" or (prev[0] or "").strip():
+                    continue                    # 已处理:有文字 / 确认无文字(风景图)
+                if now - (ts0 or 0) < 6 * 3600:
+                    continue                    # 拉取失败 6h 内,暂不重试
+                con.execute("DELETE FROM sns_media_ocr WHERE tid=? AND media_idx=?",
+                            (tid, m.get("i", 0)))
+            done += 1          # 无论成败都占额度,避免坏图反复重试
             img = image_bytes(m, xml_id or "")
             text = ""
             if img:
@@ -583,8 +597,11 @@ def process_sns_ocr(con, cap: int = 8) -> int:
                     text = "\n".join(x[1] for x in res if x and len(x) > 1)[:4000]
                 except Exception:
                     text = ""
+            # kind 语义: 'ocr'=有文字; 'ocr0'=已抓到图但无文字(风景图,终态不重试);
+            # 'ocr'+空文本=拉取失败占位(6h 后可重试)
+            kind = "ocr" if text.strip() else ("ocr0" if img else "ocr")
             con.execute("INSERT OR REPLACE INTO sns_media_ocr VALUES(?,?,?,?,?)",
-                        (tid, m.get("i", 0), "ocr", text, int(ts or 0)))
+                        (tid, m.get("i", 0), kind, text, int(now)))
             if text.strip():
                 con.execute("DELETE FROM sns_media_fts WHERE tid=?", (tid,))
                 con.execute("INSERT INTO sns_media_fts(text, tid) VALUES(?,?)",
@@ -613,12 +630,19 @@ def build_sns_vec(batch: int = 128) -> int:
         vcon.execute(VEC_SCHEMA)
         while total < 2000:
             rows = vcon.execute(
-                "SELECT p.rowid, p.content_desc FROM sns_post p"
-                " WHERE p.content_desc != '' AND p.rowid NOT IN"
-                " (SELECT post_rowid FROM sns_vec) LIMIT ?", (batch,)).fetchall()
+                """SELECT p.rowid, p.content_desc,
+                          (SELECT group_concat(o.text, char(10)) FROM sns_media_ocr o
+                            WHERE o.tid = p.tid AND o.text != '') AS ocr
+                   FROM sns_post p
+                   WHERE p.rowid NOT IN (SELECT post_rowid FROM sns_vec)
+                     AND (p.content_desc != '' OR EXISTS(
+                          SELECT 1 FROM sns_media_ocr o2
+                          WHERE o2.tid = p.tid AND o2.text != ''))
+                   LIMIT ?""", (batch,)).fetchall()
             if not rows:
                 break
-            texts = [(r[1] or "").strip() for r in rows]
+            texts = [((r[1] or "").strip() + "\n" + (r[2] or "").strip()).strip()
+                     for r in rows]
             vecs = embed(texts)
             vcon.execute("BEGIN")
             vcon.executemany(
@@ -629,6 +653,20 @@ def build_sns_vec(batch: int = 128) -> int:
     finally:
         vcon.close()
     return total
+
+
+def rebuild_sns_vec(batch: int = 128) -> int:
+    """清空朋友圈向量后按最新数据(含图片 OCR 文字)重建。"""
+    import main as _m
+    from vector import connect
+    vcon = connect(str(_m.DATA / "knowledge.db"))
+    try:
+        vcon.execute(VEC_SCHEMA)
+        vcon.execute("DELETE FROM sns_vec")
+        vcon.commit()
+    finally:
+        vcon.close()
+    return build_sns_vec(batch)
 
 
 # ---------------------------------------------------------------- 查询
@@ -760,19 +798,22 @@ def search_moments(con, query: str, author: str = "", days: int = 0,
         terms, short = _fts_terms(query)
         if terms:
             match = " OR ".join(f'"{t}"' for t in terms)
-            try:
-                fts_rows = con.execute(
-                    "SELECT p.*, bm25(sns_fts) rank FROM sns_fts f"
-                    " JOIN sns_post p ON p.rowid=f.rowid"
-                    " WHERE sns_fts MATCH ?" + where +
-                    " ORDER BY rank LIMIT ?",
-                    (match, *params, limit)).fetchall()
-            except Exception:
-                fts_rows = []
-            for r in fts_rows:
-                d = _post_brief(con, r)
-                d["via"] = "fts"
-                out[r["tid"]] = d
+            # 正文(sns_fts) + 图片 OCR 文字(sns_media_fts) 双路
+            for tab, join in (("sns_fts", "p.rowid=f.rowid"),
+                              ("sns_media_fts", "p.tid=f.tid")):
+                try:
+                    fts_rows = con.execute(
+                        f"SELECT p.* FROM {tab} f JOIN sns_post p ON {join}"
+                        f" WHERE {tab} MATCH ?" + where +
+                        " LIMIT ?", (match, *params, limit)).fetchall()
+                except Exception:
+                    fts_rows = []
+                for r in fts_rows:
+                    if r["tid"] in out:
+                        continue
+                    d = _post_brief(con, r)
+                    d["via"] = "ocr" if tab == "sns_media_fts" else "fts"
+                    out[r["tid"]] = d
         if short:
             lconds = " AND ".join("p.content_desc LIKE ?" for _ in short)
             rows = con.execute(

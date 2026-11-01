@@ -751,3 +751,9 @@ body {
   color: #b6b8be; font-size: 18px; animation: sns-pulse 1.2s ease-in-out infinite;
 }
 @keyframes sns-pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+/* 朋友圈排版收紧:正文与图片间距、网格间距 */
+.sns-text { margin: 8px 0 4px; }
+.sns-img-grid { margin: 6px 0 10px; gap: 6px; }
+.sns-video { margin: 8px auto 10px; }
+.sns-link { margin: 6px 0; }
+.sns-ocr-box { margin: 10px 0; }
