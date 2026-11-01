@@ -2412,11 +2412,13 @@ def _flush_rows(con, own, db_label: str, t: str, chat_user: str,
     return total, max_ts
 
 
-def _import_fast(decrypted_dir=None, only: set[str] | None = None) -> int:
+def _import_fast(decrypted_dir=None, only: set[str] | None = None,
+                 watermark_override: int | None = None) -> int:
     """按时间窗轮询新消息（秒级）：只扫描 create_time >= 上次水位 - 30s 的行。
 
     (src_db,src_table,src_local_id) 唯一索引保证幂等；已入库的原始内容不会被撤回覆盖。
     only: 只扫这些源库名（如 {"message_0.db"}），None=全扫。
+    watermark_override: 临时把扫描窗口起点前移（补漏重扫用），不回写水位。
     """
     from pathlib import Path as _P
     d = _P(decrypted_dir) if decrypted_dir else DECRYPTED_DIR
@@ -2426,7 +2428,9 @@ def _import_fast(decrypted_dir=None, only: set[str] | None = None) -> int:
     _ensure_src_unique(con)
     r = con.execute("SELECT value FROM meta WHERE key='sync_watermark'").fetchone()
     watermark = int(r[0]) if r and str(r[0]).isdigit() else 0
-    if not watermark:
+    if watermark_override is not None:
+        watermark = min(watermark, int(watermark_override)) if watermark else int(watermark_override)
+    elif not watermark:
         r2 = con.execute("SELECT MAX(ts) FROM message").fetchone()
         watermark = int(r2[0] or 0) - 120
         con.execute("INSERT OR REPLACE INTO meta VALUES('sync_watermark', ?)", (str(watermark),))
@@ -3011,6 +3015,7 @@ _jobs: dict[str, dict] = {
     "links": {"running": False, "log": "", "count": 0},
     "snsocr": {"running": False, "log": "", "count": 0},
     "files": {"running": False, "log": "", "count": 0},
+    "rescan": {"running": False, "log": "", "count": 0},
 }
 _job_procs: dict[str, object] = {}
 
@@ -3159,21 +3164,32 @@ def _realtime_loop():
                     _realtime["trigger"] = "文件变化"
                 elif due:
                     _realtime["trigger"] = "定时兜底"
+                    _realtime["due_n"] = _realtime.get("due_n", 0) + 1
                 if _sync_state["running"]:
                     time.sleep(5)
                     continue
                 _sync_state["running"] = True
                 try:
                     _realtime["tick"] = time.strftime("%H:%M:%S")
-                    # 最快路径：sqlcipher3 直连加密库(原生读 WAL,免 checkpoint、
-                    # 免解密成文件)按 rowid 游标增量导入——WeFlow 同款思路
                     n = -1
-                    if rt.get("fast_realtime", True):
+                    # 自愈：每 10 次定时兜底做一次 24h 窗口重扫（幂等），防漏消息
+                    if not changed and _realtime.get("due_n", 0) % 10 == 0:
                         try:
-                            n = _import_live()
+                            n = _import_fast(
+                                watermark_override=int(time.time()) - 86400)
+                            _realtime["selfheal"] = f"{n} 条 @ " + time.strftime("%H:%M")
                         except Exception as exc:      # noqa: BLE001
                             _realtime["live_err"] = str(exc)[:120]
                             n = -1
+                    if n < 0:
+                        # 最快路径：sqlcipher3 直连加密库(原生读 WAL,免 checkpoint、
+                        # 免解密成文件)按 rowid 游标增量导入——WeFlow 同款思路
+                        if rt.get("fast_realtime", True):
+                            try:
+                                n = _import_live()
+                            except Exception as exc:      # noqa: BLE001
+                                _realtime["live_err"] = str(exc)[:120]
+                                n = -1
                     if n < 0:
                         # 回退：进程内页级增量解密(fastsync)+按需导入，再不行子进程
                         updated: list[str] = []
@@ -3403,6 +3419,7 @@ def api_jobs():
             "snsocr": {**_jobs["snsocr"],
                        "done": _count_or_zero(con, "SELECT COUNT(*) FROM sns_media_ocr "
                                                    "WHERE kind='ocr' AND text!=''")},
+            "rescan": {**_jobs["rescan"], "done": _jobs["rescan"].get("count", 0)},
             "context_around": int(load_conf().get("qa", {}).get("context_around", 3))}
 
 
@@ -3414,12 +3431,14 @@ def api_job_start(name: str, payload: dict | None = None):
         return {"ok": False, "msg": "任务进行中"}
     script = {"vectors": "build_vectors.py", "ocr": "run_ocr.py",
               "asr": "run_asr.py", "links": "index_links.py",
-              "snsocr": "run_sns_ocr.py", "files": "run_files.py"}[name]
+              "snsocr": "run_sns_ocr.py", "files": "run_files.py",
+              "rescan": "rescan.py"}[name]
     extra = []
     if payload and payload.get("limit"):
         extra = ["--limit", str(int(payload["limit"]))]
     if payload and payload.get("days"):
-        extra = ["--recent-days", str(int(payload["days"]))]
+        flag = "--days" if name == "rescan" else "--recent-days"
+        extra = [flag, str(int(payload["days"]))]
     threading.Thread(target=_run_job, args=(name, script, extra), daemon=True).start()
     return {"ok": True}
 

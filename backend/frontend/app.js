@@ -1336,10 +1336,10 @@ async function refreshJobs() {
 }
 
 const SETTING_SECTIONS = [
-  { id: "model", label: "🤖 AI 模型" },
-  { id: "data", label: "🗃 数据与同步" },
-  { id: "index", label: "🧮 索引任务" },
-  { id: "about", label: "ℹ️ 关于" },
+  { id: "model", label: "AI 模型" },
+  { id: "data", label: "数据与同步" },
+  { id: "index", label: "索引任务" },
+  { id: "about", label: "关于" },
 ];
 let settingsSection = "model";
 
@@ -1373,7 +1373,7 @@ async function showSettings(section) {
 async function renderSettingsModel(body) {
   const c = await api("/api/config");
   body.innerHTML = `
-    <h3>🤖 AI 模型</h3>
+    <h3>AI 模型</h3>
     <div class="card">
       <div class="form-row"><label>接口地址</label>
         <input id="cfgBase" value="${esc(c.base_url)}"></div>
@@ -1421,7 +1421,7 @@ async function renderSettingsData(body) {
       api("/api/status"), api("/api/sync/auto"), api("/api/sync/realtime")]);
   } catch (e) { body.innerHTML = `<div class="qa-empty">加载失败: ${esc(e.message)}</div>`; return; }
   body.innerHTML = `
-    <h3>🗃 数据与同步</h3>
+    <h3>数据与同步</h3>
     <div class="card">
       <b>实时同步</b>
       <div class="form-row"><label>开关</label>
@@ -1483,16 +1483,28 @@ async function renderSettingsIndex(body) {
       <button class="mini ghost" data-stop="${key}" ${state.running ? "" : "disabled"}>停止</button></span>
     </div>`;
   body.innerHTML = `
-    <h3>🧮 索引任务</h3>
+    <h3>索引任务</h3>
     <div class="card"><div class="jobs" id="jobsBox">
       ${row("vectors", "向量索引（语义检索）", j.vector, j.vector.model)}
       ${row("ocr", "图片 OCR（历史图片）", j.ocr, true)}
       ${row("asr", "语音转写（历史语音）", j.asr, true)}
       ${row("links", "公众号正文（历史链接）", j.links, true)}
+      ${row("files", "文件正文（历史文件）", j.files, true)}
+      ${row("snsocr", "朋友圈 OCR", j.snsocr, true)}
     </div></div>
     <div class="card">
-      <div class="hint-sm">新消息的图片/语音会在实时同步时自动处理，无需手动；
+      <div class="hint-sm">新消息的图片/语音/朋友圈链接会在实时同步时自动处理，无需手动；
         这里的任务用于补跑历史存量，均可断点续跑。建议一次只跑一个。</div>
+    </div>
+    <div class="card">
+      <h3>补漏重扫</h3>
+      <div class="hint-sm">怀疑有消息没显示出来时用：按时间窗重新扫描全部消息库补导入
+        （幂等，不会重复），并顺带补该窗口内的图片/语音解析。</div>
+      <div style="display:flex; gap:8px; margin-top:8px">
+        <button class="mini" data-rescan="1">最近 24 小时</button>
+        <button class="mini" data-rescan="7">最近 7 天</button>
+        <button class="mini" data-rescan="30">最近 30 天</button>
+      </div>
     </div>`;
   body.querySelectorAll("[data-job]").forEach(b => b.onclick = async () => {
     await api(`/api/jobs/${b.dataset.job}/start`, { method: "POST",
@@ -1503,11 +1515,18 @@ async function renderSettingsIndex(body) {
     await api(`/api/jobs/${b.dataset.job}/stop`, { method: "POST" });
     setTimeout(() => showSettings("index"), 800);
   });
+  body.querySelectorAll("[data-rescan]").forEach(b => b.onclick = async () => {
+    await api("/api/jobs/rescan/start", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ days: +b.dataset.rescan }) });
+    toast(`已开始重扫最近 ${b.dataset.rescan} 天`);
+    setTimeout(() => showSettings("index"), 1200);
+  });
 }
 
 function renderSettingsAbout(body, status) {
   body.innerHTML = `
-    <h3>ℹ️ 关于</h3>
+    <h3>关于</h3>
     <div class="card">
       <div><span class="k">知识库</span>${status.messages.toLocaleString()} 条消息 ·
         ${status.chats} 个会话 · ${status.contacts} 个联系人</div>

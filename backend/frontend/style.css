@@ -769,3 +769,14 @@ pre.sns-text.pv-text {
   border-bottom: none; font-family: "Microsoft YaHei", sans-serif; font-size: 13.5px;
 }
 .sns-img-grid { margin: 8px 0 10px; }
+
+/* 设置目录:与会话/联系人列表同款行式条目 */
+#settingsNav .sf-item {
+  padding: 10px 16px; border-radius: 0; font-size: 14px; color: #1f2329;
+  border-bottom: 1px solid #f2f3f5; cursor: pointer;
+}
+#settingsNav .sf-item:hover { background: #f0f1f4; }
+#settingsNav .sf-item.active {
+  background: #e4e6ea; font-weight: 600; box-shadow: inset 3px 0 0 #07c160;
+}
+#settingsNav { overflow-y: auto; }
