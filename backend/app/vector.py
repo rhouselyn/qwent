@@ -109,16 +109,80 @@ def _has_partition(con: sqlite3.Connection) -> bool:
 
 
 _vec_done_ready = False
+_media_synced_ready = False
 
 
 def _ensure_vec_done(con: sqlite3.Connection):
     """已尝试向量化标记表(普通表):无可检索文本的消息记一次,避免每轮重扫堵队列。"""
-    global _vec_done_ready
+    global _vec_done_ready, _media_synced_ready
     if not _vec_done_ready:
         con.execute("CREATE TABLE IF NOT EXISTS vec_done("
                     "message_id INTEGER PRIMARY KEY)")
         con.commit()
         _vec_done_ready = True
+    if not _media_synced_ready:
+        con.execute("CREATE TABLE IF NOT EXISTS vec_media_synced("
+                    "message_id INTEGER PRIMARY KEY)")
+        con.commit()
+        _media_synced_ready = True
+
+
+def refresh_media_vectors(con, cap: int = 40) -> int:
+    """作废"用占位符嵌过、后来才拿到 OCR/转写文字"的媒体消息向量。
+
+    早期嵌入媒体消息时只用了内容占位 XML，向量没有语义价值；这些记录已经在
+    向量表里，普通补嵌永远挑不到。这里逐条删掉向量，随后 backfill_new 会用
+    媒体文字重嵌，并记入 vec_media_synced 不再重复作废。返回作废条数。
+    """
+    if not available():
+        return 0
+    _ensure_vec_done(con)
+    tbl = "msg_vec_p" if _has_partition(con) else "msg_vec"
+    ids = [r[0] for r in con.execute(
+        f"""SELECT m.id FROM message m
+            JOIN media_text x ON x.message_id = m.id AND x.text != ''
+            JOIN {tbl} v ON v.message_id = m.id
+            WHERE m.noise = 0
+              AND (m.type & 0xFFFFFFFF) IN (3, 34, 43)
+              AND NOT EXISTS (SELECT 1 FROM vec_media_synced s
+                              WHERE s.message_id = m.id)
+            LIMIT ?""", (cap,)).fetchall()]
+    if not ids:
+        return 0
+    con.executemany(f"DELETE FROM {tbl} WHERE message_id=?", [(i,) for i in ids])
+    con.commit()
+    return len(ids)
+
+
+def message_text(con, mid: int, type_id: int, content: str) -> str:
+    """消息的可检索文本 = 自身文本 + 其图片 OCR / 语音视频转写文字。
+
+    媒体消息（图/语音/视频）的 content 只是占位 XML，真正的内容在 media_text 表里；
+    不合并进来，这些消息的向量就是无意义的占位符，语义检索永远搜不到。
+    """
+    from textutil import search_text
+    base = search_text(type_id, content).strip()
+    try:
+        r = con.execute("SELECT text FROM media_text WHERE message_id=? AND text!=''",
+                        (mid,)).fetchone()
+        extra = (r[0] or "").strip() if r else ""
+    except sqlite3.OperationalError:
+        extra = ""
+    return (base + "\n" + extra).strip() if extra else base
+
+
+def drop_vector(con, mid: int):
+    """删掉某条消息的向量（OCR/转写完成后调用，下一轮 backfill 会用新文字重嵌）。"""
+    for tbl in ("msg_vec_p", "msg_vec"):
+        try:
+            con.execute(f"DELETE FROM {tbl} WHERE message_id=?", (mid,))
+        except sqlite3.OperationalError:
+            continue
+    try:
+        con.execute("DELETE FROM vec_done WHERE message_id=?", (mid,))
+    except sqlite3.OperationalError:
+        pass
+    con.commit()
 
 
 def backfill_new(con, cap: int = 30) -> int:
@@ -136,14 +200,17 @@ def backfill_new(con, cap: int = 30) -> int:
     rows = con.execute(
         f"SELECT m.id, m.type, m.content, m.chat_user FROM message m WHERE m.noise=0 "
         f"AND NOT EXISTS (SELECT 1 FROM {tbl} v WHERE v.message_id = m.id) "
-        f"AND NOT EXISTS (SELECT 1 FROM vec_done d WHERE d.message_id = m.id) "
+        f"AND (NOT EXISTS (SELECT 1 FROM vec_done d WHERE d.message_id = m.id) "
+        f"     OR EXISTS (SELECT 1 FROM media_text x WHERE x.message_id = m.id "
+        f"                AND x.text != '')) "
         f"ORDER BY m.id DESC LIMIT ?", (cap * 3,)).fetchall()
     if not rows:
         return 0
     todo, skipped = [], []
     for mid, typ, content, chat_user in rows:
-        if len(search_text(typ, content).strip()) >= 4:
-            todo.append((mid, typ, content, chat_user))
+        text = message_text(con, mid, typ, content)
+        if len(text) >= 4:
+            todo.append((mid, text, chat_user))
             if len(todo) >= cap:
                 break
         else:
@@ -155,17 +222,29 @@ def backfill_new(con, cap: int = 30) -> int:
     n = 0
     for i in range(0, len(todo), 16):
         chunk = todo[i:i + 16]
-        vecs = embed([search_text(typ, content) for _, typ, content, _ in chunk])
+        vecs = embed([text for _, text, _ in chunk])
         if tbl == "msg_vec_p":
             con.executemany(
                 "INSERT OR REPLACE INTO msg_vec_p(message_id, embedding, chat_user) "
                 "VALUES(?,?,?)",
                 [(mid, vecs[j].tobytes(), chat_user)
-                 for j, (mid, _, _, chat_user) in enumerate(chunk)])
+                 for j, (mid, _, chat_user) in enumerate(chunk)])
         else:
             con.executemany(
                 "INSERT OR REPLACE INTO msg_vec(message_id, embedding) VALUES(?,?)",
-                [(mid, vecs[j].tobytes()) for j, (mid, _, _, _) in enumerate(chunk)])
+                [(mid, vecs[j].tobytes()) for j, (mid, _, _) in enumerate(chunk)])
+        # 含媒体文字的消息记入 vec_media_synced,避免 refresh_media_vectors 重复作废
+        mids = [c[0] for c in chunk]
+        ph = ",".join("?" * len(mids))
+        try:
+            has_media = [r[0] for r in con.execute(
+                f"SELECT DISTINCT message_id FROM media_text WHERE text != '' "
+                f"AND message_id IN ({ph})", mids)]
+            if has_media:
+                con.executemany("INSERT OR IGNORE INTO vec_media_synced(message_id) "
+                                "VALUES(?)", [(i,) for i in has_media])
+        except sqlite3.OperationalError:
+            pass
         n += len(chunk)
     con.commit()
     return n

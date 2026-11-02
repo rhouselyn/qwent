@@ -1334,6 +1334,7 @@ def _on_startup():
         _sns_state["booted"] = True
         threading.Thread(target=_sns_boot, daemon=True).start()
         threading.Thread(target=_sns_loop, daemon=True).start()
+    threading.Thread(target=_vec_loop, daemon=True).start()
     threading.Thread(target=_auto_backlog_boot, daemon=True).start()
 
 
@@ -1374,6 +1375,39 @@ def _register_sns_links(con) -> int:
     if n:
         con.commit()
     return n
+
+
+def _vec_loop():
+    """新消息语义向量补嵌（独立线程，慢活不阻塞实时同步）。
+
+    每 20 秒补一批（8 条）；嵌入 8 条约 2-3 秒。带 sqlite busy 重试。
+    """
+    con = None
+    while True:
+        try:
+            conf = load_conf()
+            if not conf.get("sync", {}).get("vec_realtime", True):
+                time.sleep(30)
+                continue
+            if not vector.available():
+                time.sleep(120)
+                continue
+            if con is None:
+                con = vector.connect(str(KNOWLEDGE_DB))
+            n = vector.refresh_media_vectors(con, cap=40)   # 先作废占位向量
+            n += vector.backfill_new(con, cap=8)             # 再用媒体文字重嵌
+            _realtime["vec"] = n
+            _realtime["vec_err"] = ""
+            time.sleep(2 if n else 20)
+        except Exception as exc:          # noqa: BLE001
+            _realtime["vec_err"] = str(exc)[:100]
+            try:
+                if con is not None:
+                    con.close()
+            except Exception:
+                pass
+            con = None
+            time.sleep(20)
 
 
 def _sns_boot():
@@ -3216,14 +3250,8 @@ def _realtime_loop():
                             _decrypt_quick()
                             n = _import_fast()
                     _realtime["added"] += n
-                    # 新消息语义向量实时补齐(每轮限量,不然 rag 语义检索要等批量任务)
-                    try:
-                        import vector as _vec
-                        n_vec = _vec.backfill_new(vconn(), cap=30)
-                        if n_vec:
-                            _realtime["vec"] = n_vec
-                    except Exception as exc:      # noqa: BLE001
-                        _realtime["vec_err"] = str(exc)[:100]
+                    # 向量补嵌已移到独立线程 _vec_loop(嵌入 30 条约 10 秒,
+                    # 放在这里会把实时同步拖慢十几秒)
                     if n > 0 and rt.get("fast_realtime", True):
                         # live 路径导入极快但不产出解密文件——媒体定位/OCR 需要，
                         # 顺手刷新 dirty 库（页级增量，仅变化页），不阻塞消息可见
@@ -3405,14 +3433,36 @@ def _count_or_zero(con, sql: str) -> int:
         return 0
 
 
-_job_totals_cache = {"ts": 0.0, "data": {}}
+_job_totals_cache = {"ts": 0.0, "data": {}, "computing": False}
+
+
+def _job_totals_bg():
+    """后台算总数：文件/朋友圈要逐条解析内容，可能耗时数秒，不能堵住接口。"""
+    _job_totals_cache["computing"] = True
+    con = None
+    try:
+        con = db()
+        _job_totals_compute(con)
+    except Exception:      # noqa: BLE001
+        pass
+    finally:
+        _job_totals_cache["computing"] = False
+        try:
+            if con is not None:
+                con.close()
+        except Exception:
+            pass
 
 
 def _job_totals(con) -> dict:
-    """批量任务的总数提示（文件/朋友圈总数需要 Python 侧解析内容，300s 缓存）。"""
+    """返回缓存的总数；过期则后台重算（不阻塞请求），暂无数据时返回空。"""
     now = time.time()
-    if now - _job_totals_cache["ts"] < 300:
-        return _job_totals_cache["data"]
+    if now - _job_totals_cache["ts"] >= 3600 and not _job_totals_cache["computing"]:
+        threading.Thread(target=_job_totals_bg, daemon=True).start()
+    return _job_totals_cache["data"]
+
+
+def _job_totals_compute(con) -> dict:
     data: dict[str, int] = {}
     try:
         data["asr"] = con.execute(
@@ -3435,7 +3485,7 @@ def _job_totals(con) -> dict:
             data["snsocr"] = 0
     except Exception:          # noqa: BLE001
         return _job_totals_cache.get("data") or {}
-    _job_totals_cache.update(ts=now, data=data)
+    _job_totals_cache.update(ts=time.time(), data=data)
     return data
 
 

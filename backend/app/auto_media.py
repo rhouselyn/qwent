@@ -15,6 +15,19 @@ _asr = None
 _last_err = ""      # 最近一次被跳过的媒体处理异常（留痕便于诊断，裸 except 会把问题藏起来）
 
 
+def _invalidate_vector(con, message_id: int) -> None:
+    """删掉该消息的旧向量:媒体文字刚落库,下一轮 vector.backfill_new 会用新文字重嵌。"""
+    for tbl in ("msg_vec_p", "msg_vec"):
+        try:
+            con.execute(f"DELETE FROM {tbl} WHERE message_id=?", (message_id,))
+        except Exception:      # noqa: BLE001 表不存在/无扩展
+            continue
+    try:
+        con.execute("DELETE FROM vec_done WHERE message_id=?", (message_id,))
+    except Exception:          # noqa: BLE001
+        pass
+
+
 def _note_err(exc):
     global _last_err
     _last_err = f"{type(exc).__name__}: {exc}"[:300]
@@ -102,6 +115,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                 con.execute("DELETE FROM media_fts WHERE message_id=?", (mid,))
                 con.execute("INSERT INTO media_fts(text, message_id) VALUES(?,?)",
                             (text[:4000], mid))
+                _invalidate_vector(con, mid)   # 图片文字进向量后可语义检索
                 stats["ocr"] += 1
             con.commit()      # 单张 OCR 数秒,攒批会让写锁被持几十秒,全局卡死
         except Exception as exc:
@@ -149,6 +163,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                             (text[:4000], mid))
                 con.execute("UPDATE message SET noise=0 WHERE id=? AND IFNULL(noise,0)<>0",
                             (mid,))
+                _invalidate_vector(con, mid)   # 转写文字进向量后可语义检索
                 stats["asr"] += 1
             con.commit()      # 转写一条可达数十秒,逐条提交
         except Exception as exc:
@@ -183,6 +198,7 @@ def process_new_media(con, ocr_cap: int = 30, asr_cap: int = 10, video_cap: int 
                     # 转写成功的视频才从"未处理媒体"里放出来，检索（retrieve 过滤 noise）可见
                     con.execute("UPDATE message SET noise=0 WHERE id=? AND IFNULL(noise,0)<>0",
                                 (mid,))
+                    _invalidate_vector(con, mid)   # 转写文字进向量后可语义检索
                     stats["asr"] += 1
                 con.commit()      # 视频转写更长,逐条提交
             except Exception as exc:
