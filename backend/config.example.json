@@ -23,5 +23,14 @@
   "sync": {
     "realtime": true,
     "realtime_sec": 60
+  },
+  "qqbot": {
+    "enabled": false,
+    "app_id": "",
+    "app_secret": "",
+    "group_reply": false,
+    "citations": false,
+    "default_explorer": false,
+    "default_thinking": false
   }
 }

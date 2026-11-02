@@ -1611,9 +1611,11 @@ async function renderSettingsQQBot(body) {
           <div class="settings-switch-card">
             <label class="switch-row"><input type="checkbox" id="qqEnabled" ${c.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用 QQ 机器人</b><small>开启后本机直连 QQ 网关收发消息。</small></span></label>
             <label class="switch-row"><input type="checkbox" id="qqGroup" ${c.group_reply ? "checked" : ""}><span class="switch-track"></span><span><b>允许群聊响应</b><small>默认关闭：群成员可以查你的微信记录，谨慎开启。</small></span></label>
+            <label class="switch-row"><input type="checkbox" id="qqExplorer" ${c.default_explorer ? "checked" : ""}><span class="switch-track"></span><span><b>新用户默认探索模式</b><small>同网页端"探索模式"；QQ 里可随时发指令或点菜单切换。</small></span></label>
+            <label class="switch-row"><input type="checkbox" id="qqThinking" ${c.default_thinking ? "checked" : ""}><span class="switch-track"></span><span><b>新用户默认深度思考</b><small>同网页端"深度思考"，使用推理模型，更准更慢。</small></span></label>
           </div>
         </div>
-        <div class="settings-actions"><button id="qqSave">保存并应用</button><span id="qqMsg" class="msg" aria-live="polite"></span></div>
+        <div class="settings-actions"><button id="qqSave">保存并应用</button><button id="qqMenu" class="ghost">一键配置 QQ 菜单</button><span id="qqMsg" class="msg" aria-live="polite"></span></div>
         ${c.error ? `<div class="settings-note err">${esc(c.error)}</div>` : ""}
         ${c.last_event ? `<div class="settings-note">最近一条 QQ 消息：${esc(c.last_event)}</div>` : ""}
       </section>
@@ -1627,7 +1629,7 @@ async function renderSettingsQQBot(body) {
         <li>在 QQ 里给机器人发条消息完成授权，回到本页填入凭据并打开开关。</li>
       </ol>
       <div class="settings-side-title" style="margin-top:12px">聊天内指令</div>
-      <p style="font-size:12px;line-height:1.8">/帮助 查看用法 · /新对话 清空上下文 · /暂停 不再回复 · /继续 恢复回复。可在 QQ 管理端「自定义菜单 / 指令面板」把这几个指令配置成按钮。</p>
+      <p style="font-size:12px;line-height:1.8">/快速问答 与 /探索模式 切换提问方式 · /深度思考 与 /关闭思考 切换推理模型 · /新对话 清空上下文 · /暂停 /继续 · /状态。点上方「一键配置 QQ 菜单」可把 帮助 / 提问方式 / 思考深度 / 新对话 推送为会话底部菜单（等价控制台手工配置）；若推送失败，可在 q.qq.com 管理端「高级设置 → 自定义菜单 / 指令面板」手动添加同样内容。</p>
     </aside></div>`;
   $("#qqSave").onclick = async () => {
     const msg = $("#qqMsg");
@@ -1635,7 +1637,9 @@ async function renderSettingsQQBot(body) {
     msg.textContent = ""; msg.className = "msg";
     try {
       const payload = { app_id: $("#qqAppId").value, enabled: $("#qqEnabled").checked,
-                        group_reply: $("#qqGroup").checked };
+                        group_reply: $("#qqGroup").checked,
+                        default_explorer: $("#qqExplorer").checked,
+                        default_thinking: $("#qqThinking").checked };
       const sec = $("#qqSecret").value;
       if (sec) payload.app_secret = sec;
       const r = await api("/api/qqbot/config", { method: "POST",
@@ -1645,6 +1649,17 @@ async function renderSettingsQQBot(body) {
       else { msg.textContent = "已保存并应用"; msg.className = "msg ok"; }
     } catch (e) { msg.textContent = "保存失败: " + e.message; msg.className = "msg err"; }
     finally { $("#qqSave").disabled = false; $("#qqSave").textContent = "保存并应用"; setTimeout(() => showSettings("qqbot"), 1500); }
+  };
+  $("#qqMenu").onclick = async () => {
+    const msg = $("#qqMsg");
+    const b = $("#qqMenu");
+    b.disabled = true; b.textContent = "配置中…"; msg.textContent = ""; msg.className = "msg";
+    try {
+      const r = await api("/api/qqbot/menu", { method: "POST" });
+      if (r && r.ok) { msg.textContent = "菜单已推送到 QQ（重新打开机器人会话可见）"; msg.className = "msg ok"; }
+      else { msg.textContent = "菜单配置失败: " + ((r && (r.error || r.body)) || "未知错误"); msg.className = "msg err"; }
+    } catch (e) { msg.textContent = "菜单配置失败: " + e.message; msg.className = "msg err"; }
+    finally { b.disabled = false; b.textContent = "一键配置 QQ 菜单"; }
   };
 }
 

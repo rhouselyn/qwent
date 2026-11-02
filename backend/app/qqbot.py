@@ -55,6 +55,8 @@ DEFAULT_CONF = {
     "app_secret": "",
     "group_reply": False,
     "citations": False,
+    "default_explorer": False,        # 新用户默认提问方式：探索模式
+    "default_thinking": False,        # 新用户默认深度思考
     "max_msg_chars": MAX_MSG_CHARS,
     "max_chunks": MAX_CHUNKS,
     "allow_openids": [],              # 空 = 不限制
@@ -220,10 +222,14 @@ def chunk_text(text: str, limit: int, max_chunks: int) -> list[str]:
 # ================================================================ 提示词
 
 
-def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict]:
+def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dict]:
     import main as M                     # 延迟导入避免循环依赖
+    conf_q = conf_of(M.load_conf())
     state = _load_state()
     ent = state.setdefault(openid, {"session_id": None, "turns": [], "paused": False})
+    # 老状态补齐两个模式开关（取设置页默认值）
+    ent.setdefault("explorer", bool(conf_q.get("default_explorer")))
+    ent.setdefault("thinking", bool(conf_q.get("default_thinking")))
     stored = list(ent.get("turns") or [])
     now = int(time.time())
     if question:
@@ -267,7 +273,6 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict]:
         total += len(item["line"])
     picked.reverse()
 
-    conf_q = conf_of(M.load_conf())
     sources: dict[int, dict] = {}
     if conf_q.get("citations"):
         wi = 0
@@ -302,13 +307,15 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict]:
             _save_state(state)
         except Exception as exc:  # noqa: BLE001
             log.warning("create session failed: %s", exc)
-    return prompt, sid, sources
+    return prompt, sid, sources, ent
 
 
 def ask_wechat(openid: str, question: str) -> str:
     import main as M
-    prompt, sid, sources = build_prompt(openid, question)
-    payload = {"question": prompt, "chat": None, "history": [], "agent": True}
+    prompt, sid, sources, ent = build_prompt(openid, question)
+    payload = {"question": prompt, "chat": None, "history": [], "agent": True,
+               "explorer": bool(ent.get("explorer")),
+               "thinking": bool(ent.get("thinking"))}
     if sid:
         payload["session_id"] = sid
     data = M.api_ask(payload)
@@ -329,6 +336,59 @@ def ask_wechat(openid: str, question: str) -> str:
         answer = strip_citation_markers(answer)
     log.info("ask openid=%s prompt=%d answer=%d", openid[:8], len(prompt), len(answer))
     return answer
+
+
+# ================================================================ 自定义菜单
+
+# PUT /v2/menu：body = {"menu": {"items": [...]}}；type ∈ switch / send_message /
+# link / menu（子菜单≤5 不嵌套）；name 顶层≤10 字符、子菜单≤14；send_message
+# 点击后自动填入聊天输入框，用户发送后走本地指令处理
+MENU_ITEMS = [
+    {"type": "send_message", "name": "帮助", "send_message": "帮助"},
+    {"type": "menu", "name": "提问方式", "sub_menu_items": [
+        {"type": "send_message", "name": "快速问答", "send_message": "快速"},
+        {"type": "send_message", "name": "探索模式", "send_message": "探索"},
+    ]},
+    {"type": "menu", "name": "思考深度", "sub_menu_items": [
+        {"type": "send_message", "name": "开深度思考", "send_message": "思考"},
+        {"type": "send_message", "name": "关深度思考", "send_message": "关闭思考"},
+    ]},
+    {"type": "send_message", "name": "新对话", "send_message": "新对话"},
+]
+
+
+def _fetch_token(conf_q: dict) -> str:
+    r = requests.post(TOKEN_URL, timeout=15, json={
+        "appId": conf_q.get("app_id"), "clientSecret": conf_q.get("app_secret")})
+    r.raise_for_status()
+    d = r.json()
+    if not d.get("access_token"):
+        raise RuntimeError(f"获取 access_token 失败: {d}")
+    return d["access_token"]
+
+
+def set_menu(conf_q: dict) -> dict:
+    """一键把菜单推到 QQ（等价于控制台手工配置）。"""
+    try:
+        r = requests.put(f"{API_BASE}/v2/menu", timeout=15,
+                         json={"menu": {"items": MENU_ITEMS}},
+                         headers={"Authorization": f"QQBot {_fetch_token(conf_q)}"})
+        ok = r.status_code < 400
+        log.info("set_menu -> %s %s", r.status_code, r.text[:200])
+        return {"ok": ok, "status": r.status_code, "error": "" if ok else r.text[:300]}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("set_menu failed: %s", exc)
+        return {"ok": False, "status": 0, "error": str(exc)[:300]}
+
+
+def get_menu(conf_q: dict) -> dict:
+    try:
+        r = requests.get(f"{API_BASE}/v2/menu", timeout=15,
+                         headers={"Authorization": f"QQBot {_fetch_token(conf_q)}"})
+        return {"ok": r.status_code < 400, "status": r.status_code,
+                "body": r.json() if r.status_code < 400 else r.text[:300]}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": 0, "body": str(exc)[:300]}
 
 
 # ================================================================ 网关客户端
@@ -549,6 +609,17 @@ class QQBotRunner(threading.Thread):
         state = _load_state()
         ent = state.setdefault(openid, {"session_id": None, "turns": [],
                                         "paused": False})
+        conf_q = conf_of(self.q) if isinstance(self.q, dict) else dict(DEFAULT_CONF)
+        ent.setdefault("explorer", bool(conf_q.get("default_explorer")))
+        ent.setdefault("thinking", bool(conf_q.get("default_thinking")))
+
+        def _save():
+            _save_state(state)
+
+        def _mode_line() -> str:
+            return (f"提问方式：{'探索模式' if ent.get('explorer') else '快速问答'} · "
+                    f"深度思考：{'开' if ent.get('thinking') else '关'}")
+
         cmd = content.lstrip("/").strip()
         if cmd in ("帮助", "help", "菜单"):
             self._reply(t, d, "\n".join([
@@ -557,7 +628,31 @@ class QQBotRunner(threading.Thread):
                 "· 「XX 发过的那个链接讲了什么」",
                 "· 「帮我找一下那个报价单」",
                 "",
-                "指令：/新对话 清空上下文 · /暂停 不再回复 · /继续 恢复回复"]))
+                "提问方式：/快速问答 少轮检索 · /探索模式 多轮检索",
+                "思考深度：/深度思考 开推理模型 · /关闭思考 关推理模型",
+                "其他：/新对话 清空上下文 · /暂停 不再回复 · /继续 恢复回复 · /状态",
+                "",
+                f"当前：{_mode_line()}"]))
+            return
+        if cmd in ("快速", "快速问答"):
+            ent["explorer"] = False
+            _save()
+            self._reply(t, d, f"已切换为快速问答（少轮检索）。{_mode_line()}")
+            return
+        if cmd in ("探索", "探索模式"):
+            ent["explorer"] = True
+            _save()
+            self._reply(t, d, f"已切换为探索模式（多轮检索，回答更慢更全）。{_mode_line()}")
+            return
+        if cmd in ("思考", "深度思考", "开启思考"):
+            ent["thinking"] = True
+            _save()
+            self._reply(t, d, f"已开启深度思考（推理模型，更准更慢）。{_mode_line()}")
+            return
+        if cmd in ("关闭思考", "关闭深度思考"):
+            ent["thinking"] = False
+            _save()
+            self._reply(t, d, f"已关闭深度思考。{_mode_line()}")
             return
         if cmd in ("新对话", "新会话", "reset"):
             import main as M
@@ -568,23 +663,24 @@ class QQBotRunner(threading.Thread):
                 except Exception:  # noqa: BLE001
                     pass
                 ent["session_id"] = None
-            _save_state(state)
+            _save()
             self._reply(t, d, "已开启新对话，上下文已清空。")
             return
         if cmd in ("暂停", "停止回复", "pause"):
             ent["paused"] = True
-            _save_state(state)
+            _save()
             self._reply(t, d, "已暂停回复，发送 /继续 恢复。")
             return
         if cmd in ("继续", "恢复回复", "resume"):
             ent["paused"] = False
-            _save_state(state)
+            _save()
             self._reply(t, d, "已恢复回复。")
             return
         if ent.get("paused"):
             return
         if cmd in ("状态", "status"):
-            self._reply(t, d, f"运行中 · 微信消息 {STATUS.get('last_event') or '—'}")
+            self._reply(t, d, f"运行中 · {_mode_line()} · "
+                              f"最近消息 {STATUS.get('last_event') or '—'}")
             return
 
         answer = ask_wechat(openid, content)

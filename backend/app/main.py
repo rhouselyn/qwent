@@ -1029,7 +1029,8 @@ def api_ask(payload: dict):
                               "WHERE username=?", (chat,)).fetchone()
             chat_name = row[0] if row else chat
         res = agent_mod.run(q, conf0, chat_ctx=chat, chat_name=chat_name,
-                            quoted=quoted, history=history)
+                            quoted=quoted, history=history,
+                            explorer=bool(payload.get("explorer")))
         ans, refs, trace = res["answer"], res["refs"], res["trace"]
         ensure_qa_table(con)
         sid = session_id or get_or_create_session(con, chat or "assistant", new=want_new_session)
@@ -1051,7 +1052,8 @@ def api_ask(payload: dict):
             chat_name = row[0] if row else chat
         try:
             res = agent_mod.run(q, conf0, chat_ctx=chat, chat_name=chat_name,
-                                history=history)
+                                history=history,
+                                explorer=bool(payload.get("explorer")))
             if res.get("answer"):
                 ensure_qa_table(con)
                 sid = session_id or get_or_create_session(con, chat or "assistant",
@@ -2581,6 +2583,8 @@ def api_qqbot_status():
                              else ("已配置" if secret else ""),
             "group_reply": bool(conf.get("group_reply")),
             "citations": bool(conf.get("citations")),
+            "default_explorer": bool(conf.get("default_explorer")),
+            "default_thinking": bool(conf.get("default_thinking")),
             "running": st.get("running"), "connected": st.get("connected"),
             "username": st.get("username"), "error": st.get("error"),
             "last_event": st.get("last_event"), "users": st.get("users")}
@@ -2594,7 +2598,8 @@ def api_qqbot_config(payload: dict):
         q["app_id"] = str(payload.get("app_id") or "").strip()
     if payload.get("app_secret"):
         q["app_secret"] = str(payload["app_secret"]).strip()
-    for k in ("enabled", "group_reply", "citations"):
+    for k in ("enabled", "group_reply", "citations",
+              "default_explorer", "default_thinking"):
         if k in payload:
             q[k] = bool(payload[k])
     CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2),
@@ -2603,6 +2608,13 @@ def api_qqbot_config(payload: dict):
     qqbot_mod.apply_config(load_conf())
     st = qqbot_mod.status()
     return {"ok": True, "running": st.get("running"), "error": st.get("error")}
+
+
+@app.post("/api/qqbot/menu")
+def api_qqbot_menu():
+    """一键把自定义菜单推送到 QQ（等价控制台手工配置）。"""
+    import qqbot as qqbot_mod
+    return qqbot_mod.set_menu(qqbot_mod.conf_of(load_conf()))
 
 
 # ---------------------------------------------------------------- API: 同步
