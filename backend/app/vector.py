@@ -223,16 +223,18 @@ def backfill_new(con, cap: int = 30) -> int:
     for i in range(0, len(todo), 16):
         chunk = todo[i:i + 16]
         vecs = embed([text for _, text, _ in chunk])
+        # vec0 虚表不支持 INSERT OR REPLACE,必须先删再插(否则主键冲突)
+        ids = [c[0] for c in chunk]
         if tbl == "msg_vec_p":
+            con.executemany("DELETE FROM msg_vec_p WHERE message_id=?", [(i,) for i in ids])
             con.executemany(
-                "INSERT OR REPLACE INTO msg_vec_p(message_id, embedding, chat_user) "
-                "VALUES(?,?,?)",
+                "INSERT INTO msg_vec_p(message_id, embedding, chat_user) VALUES(?,?,?)",
                 [(mid, vecs[j].tobytes(), chat_user)
                  for j, (mid, _, chat_user) in enumerate(chunk)])
         else:
-            con.executemany(
-                "INSERT OR REPLACE INTO msg_vec(message_id, embedding) VALUES(?,?)",
-                [(mid, vecs[j].tobytes()) for j, (mid, _, _) in enumerate(chunk)])
+            con.executemany("DELETE FROM msg_vec WHERE message_id=?", [(i,) for i in ids])
+            con.executemany("INSERT INTO msg_vec(message_id, embedding) VALUES(?,?)",
+                            [(mid, vecs[j].tobytes()) for j, (mid, _, _) in enumerate(chunk)])
         # 含媒体文字的消息记入 vec_media_synced,避免 refresh_media_vectors 重复作废
         mids = [c[0] for c in chunk]
         ph = ",".join("?" * len(mids))

@@ -31,7 +31,8 @@ except Exception:      # 兜底：脚本独立运行时退回原始内容
     def _search_text(t, c):
         return c or ""
 
-MSG_DBS = [f"message/message_{i}.db" for i in range(8)] + [f"message_{i}.db" for i in range(8)]
+# 只保留一种写法(路径用于定位,写库时统一取 basename)——两种写法曾导致重复导入
+MSG_DBS = [f"message/message_{i}.db" for i in range(8)]
 XML_TITLE_RE = re.compile(r"<title><!\[CDATA\[(.*?)\]\]></title>", re.S)
 XML_DES_RE = re.compile(r"<des><!\[CDATA\[(.*?)\]\]></des>", re.S)
 # 群文本消息正文以 "<wxid>:\n" 前缀标注实际发送人（比 Name2Id rowid 更可靠）
@@ -220,7 +221,8 @@ def import_messages(dec_dir: str, con: sqlite3.Connection, own_wxid: str = "") -
                 batch.append((chat_user, is_sender,
                               "" if is_sender else sender,
                               rv[idx["create_time"]], rv[idx["local_type"]],
-                              content[:20000], name, t, rv[idx["local_id"]]))
+                              content[:20000], os.path.basename(name), t,
+                              rv[idx["local_id"]]))
             con.executemany("INSERT INTO message(chat_user,is_sender,sender,ts,type,content,"
                             "src_db,src_table,src_local_id) VALUES(?,?,?,?,?,?,?,?,?)", batch)
             total += len(batch)

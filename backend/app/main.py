@@ -2470,6 +2470,9 @@ def _flush_rows(con, own, db_label: str, t: str, chat_user: str,
     total = 0
     max_ts = 0
     batch = []
+    # src_db 统一存 basename:历史上"message/message_N.db"与"message_N.db"两种
+    # 写法让唯一索引 (src_db,src_table,src_local_id) 失效,同一消息被导入两次
+    db_label = db_label.rsplit("/", 1)[-1]
     for local_id, local_type, create_time, message_content, real_sender_id in rows:
         max_ts = max(max_ts, create_time or 0)
         try:
