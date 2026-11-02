@@ -68,10 +68,19 @@ def is_payload_dump(content: str) -> bool:
     return bool(_B64_JSON.match(c)) or bool(_BASE64ISH.match(c))
 
 
+def _type32(type_id) -> int:
+    """消息 type 是 64 位组合值(标志位在高位)，业务判断一律用低 32 位。"""
+    try:
+        return int(type_id or 0) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return 0
+
+
 def display_text(type_id: int, content: str) -> str:
     """给界面/引用用的可读文本。"""
     if not content:
         return ""
+    type_id = _type32(type_id)
     content = normalize(content)
     if is_payload_dump(content):
         return "[数据载荷]"
@@ -104,7 +113,10 @@ def is_pat(content: str) -> bool:
 
 def search_text(type_id: int, content: str) -> str:
     """给全文索引用：噪声类型返回空串，XML 只保留标题/描述。"""
-    if not content or type_id in NOISE_TYPES:
+    if not content:
+        return ""
+    type_id = _type32(type_id)
+    if type_id in NOISE_TYPES:
         return ""
     content = normalize(content)
     if appmsg_subtype(content) in _NOISE_APPMSG_TYPES:

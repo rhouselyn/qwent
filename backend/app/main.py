@@ -392,16 +392,20 @@ def msg_row(m: sqlite3.Row, con) -> dict:
     disp = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) FROM chat "
                        "WHERE username=?", (m["chat_user"],)).fetchone()
     parsed = parse_message(m)
-    if m["type"] in (34, 43):       # 语音/视频消息带上转写文本
+    # type 列是 64 位组合值(LikeFlag 等标志在高位),必须掩码取低 32 位才是真实
+    # 消息类型——否则前端 switch(type) 匹配不到 49(链接/文件/合并转发)、
+    # 媒体判断也全部失效,整条消息渲染空白。
+    mtype = (m["type"] or 0) & 0xFFFFFFFF
+    if mtype in (34, 43):           # 语音/视频消息带上转写文本
         asr = _media_text(con, m["id"], "asr")
         if asr:
             parsed["asr_text"] = asr
-    elif m["type"] == 3:            # 图片消息带上 OCR 文本
+    elif mtype == 3:                # 图片消息带上 OCR 文本
         ocr = _media_text(con, m["id"], "ocr")
         if ocr:
             parsed["ocr_text"] = ocr
     return {
-        "id": m["id"], "ts": m["ts"], "type": m["type"],
+        "id": m["id"], "ts": m["ts"], "type": mtype,
         "is_sender": m["is_sender"], "sender": m["sender"],
         "sender_name": sender_name(con, m["chat_user"], m["sender"], m["is_sender"]),
         "chat": m["chat_user"],

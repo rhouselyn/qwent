@@ -128,7 +128,7 @@ def _fmt(ts) -> str:
 
 def _msg_brief(con, row) -> dict:
     from textutil import display_text
-    text = (display_text(row["type"], row["content"]) or "")[:600]
+    text = (display_text((row["type"] or 0) & 0xFFFFFFFF, row["content"]) or "")[:600]
     # 媒体消息附上 OCR/转写文本：工具检索到图片/语音/视频时模型才能看到其内容
     try:
         t = con.execute("SELECT kind, text FROM media_text WHERE message_id=?",
