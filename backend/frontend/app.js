@@ -1512,6 +1512,7 @@ async function refreshJobs() {
 const SETTING_SECTIONS = [
   { id: "model", label: "AI 模型", icon: "✦", desc: "接口与回答方式" },
   { id: "data", label: "数据与同步", icon: "↻", desc: "实时入库与定时任务" },
+  { id: "qqbot", label: "QQ 机器人", icon: "✆", desc: "QQ 消息接本机微信" },
   { id: "index", label: "索引任务", icon: "⌁", desc: "搜索与媒体处理" },
   { id: "about", label: "关于", icon: "i", desc: "状态与本地数据" },
 ];
@@ -1541,6 +1542,7 @@ async function showSettings(section) {
   body.innerHTML = `<div class="qa-empty">加载中…</div>`;
 
   if (settingsSection === "model") await renderSettingsModel(body);
+  if (settingsSection === "qqbot") await renderSettingsQQBot(body);
   if (settingsSection === "data") await renderSettingsData(body);
   if (settingsSection === "index") await renderSettingsIndex(body);
   if (settingsSection === "about") renderSettingsAbout(body, status);
@@ -1587,6 +1589,65 @@ async function renderSettingsModel(body) {
     finally { $("#testCfg").disabled = false; $("#saveCfg").disabled = false; $("#testCfg").textContent = "测试连接"; }
   };
 }
+
+async function renderSettingsQQBot(body) {
+  let c;
+  try { c = await api("/api/qqbot/status"); }
+  catch (e) { body.innerHTML = `<div class="qa-empty">加载失败: ${esc(e.message)}</div>`; return; }
+  const stateText = !c.enabled ? "未启用"
+    : c.error ? "异常"
+    : c.connected ? `已连接${c.username ? " · " + esc(c.username) : ""}`
+    : c.running ? "连接中…" : "已停止";
+  const stateCls = !c.enabled ? "neutral" : c.error ? "err" : c.connected ? "success" : "warning";
+  body.innerHTML = `
+    <div class="settings-page-head"><div><span class="settings-eyebrow">QQ CHANNEL</span><h2>QQ 机器人</h2><p>在 QQ 里直接向本机微信知识库提问。机器人从本机出站连接 QQ 网关，无需公网 IP。</p></div>
+      <span class="settings-status-pill ${stateCls}">${stateText}</span></div>
+    <div class="settings-grid"><div class="settings-stack">
+      <section class="settings-card">
+        <div class="settings-card-head"><span class="settings-card-icon">✆</span><div><h3>机器人凭据</h3><p>来自 <a href="https://q.qq.com" target="_blank" rel="noreferrer">q.qq.com</a> → 机器人管理 → 开发设置。</p></div></div>
+        <div class="settings-form">
+          <div class="settings-field"><label for="qqAppId">AppID</label><input id="qqAppId" value="${attrEsc(c.app_id || "")}" placeholder="1906230635"></div>
+          <div class="settings-field"><label for="qqSecret">AppSecret</label><input id="qqSecret" type="password" autocomplete="off" placeholder="${c.has_secret ? attrEsc("已配置 " + c.secret_masked + "（留空则不修改）") : "机器人密钥"}"><small>只保存在本机 config.json，不会上传。</small></div>
+          <div class="settings-switch-card">
+            <label class="switch-row"><input type="checkbox" id="qqEnabled" ${c.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用 QQ 机器人</b><small>开启后本机直连 QQ 网关收发消息。</small></span></label>
+            <label class="switch-row"><input type="checkbox" id="qqGroup" ${c.group_reply ? "checked" : ""}><span class="switch-track"></span><span><b>允许群聊响应</b><small>默认关闭：群成员可以查你的微信记录，谨慎开启。</small></span></label>
+          </div>
+        </div>
+        <div class="settings-actions"><button id="qqSave">保存并应用</button><span id="qqMsg" class="msg" aria-live="polite"></span></div>
+        ${c.error ? `<div class="settings-note err">${esc(c.error)}</div>` : ""}
+        ${c.last_event ? `<div class="settings-note">最近一条 QQ 消息：${esc(c.last_event)}</div>` : ""}
+      </section>
+    </div>
+    <aside class="settings-side-card"><div class="settings-side-title">操作指南</div>
+      <ol>
+        <li>登录 <a href="https://q.qq.com" target="_blank" rel="noreferrer">q.qq.com</a>，进入机器人「开发设置」，复制 AppID 与 AppSecret。</li>
+        <li>「服务接入 / 消息推送设置」接入方式选择 <b>WebSocket</b>。</li>
+        <li>「事件订阅」勾选 <b>C2C_MESSAGE_CREATE</b>（私聊）；需要群聊再勾 GROUP_AT_MESSAGE_CREATE。</li>
+        <li>「开发体验用户」添加你的 QQ 绑定手机号，否则私聊会显示"服务不可用"。</li>
+        <li>在 QQ 里给机器人发条消息完成授权，回到本页填入凭据并打开开关。</li>
+      </ol>
+      <div class="settings-side-title" style="margin-top:12px">聊天内指令</div>
+      <p style="font-size:12px;line-height:1.8">/帮助 查看用法 · /新对话 清空上下文 · /暂停 不再回复 · /继续 恢复回复。可在 QQ 管理端「自定义菜单 / 指令面板」把这几个指令配置成按钮。</p>
+    </aside></div>`;
+  $("#qqSave").onclick = async () => {
+    const msg = $("#qqMsg");
+    $("#qqSave").disabled = true; $("#qqSave").textContent = "保存中…";
+    msg.textContent = ""; msg.className = "msg";
+    try {
+      const payload = { app_id: $("#qqAppId").value, enabled: $("#qqEnabled").checked,
+                        group_reply: $("#qqGroup").checked };
+      const sec = $("#qqSecret").value;
+      if (sec) payload.app_secret = sec;
+      const r = await api("/api/qqbot/config", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload) });
+      if (r && r.error) { msg.textContent = "已保存，但连接异常: " + r.error; msg.className = "msg err"; }
+      else { msg.textContent = "已保存并应用"; msg.className = "msg ok"; }
+    } catch (e) { msg.textContent = "保存失败: " + e.message; msg.className = "msg err"; }
+    finally { $("#qqSave").disabled = false; $("#qqSave").textContent = "保存并应用"; setTimeout(() => showSettings("qqbot"), 1500); }
+  };
+}
+
 
 async function renderSettingsData(body) {
   let s, a, rt;

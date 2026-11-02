@@ -1508,6 +1508,11 @@ def _on_startup():
         threading.Thread(target=_sns_loop, daemon=True).start()
     threading.Thread(target=_vec_loop, daemon=True).start()
     threading.Thread(target=_auto_backlog_boot, daemon=True).start()
+    try:
+        import qqbot as qqbot_mod
+        qqbot_mod.apply_config(load_conf())
+    except Exception as exc:      # noqa: BLE001 QQ 机器人配置异常不影响主服务
+        print(f"[qqbot] startup failed: {exc}")
 
 
 def _register_sns_links(con) -> int:
@@ -2560,6 +2565,44 @@ def api_files(q: str = "", n: int = 200):
         if len(out) >= n:
             break
     return out
+
+
+# ---------------------------------------------------------------- API: QQ 机器人
+@app.get("/api/qqbot/status")
+def api_qqbot_status():
+    conf = load_conf().get("qqbot", {})
+    import qqbot as qqbot_mod
+    st = qqbot_mod.status()
+    secret = str(conf.get("app_secret") or "")
+    return {"enabled": bool(conf.get("enabled")),
+            "app_id": str(conf.get("app_id") or ""),
+            "has_secret": bool(secret),
+            "secret_masked": (secret[:4] + "…" + secret[-4:]) if len(secret) > 8
+                             else ("已配置" if secret else ""),
+            "group_reply": bool(conf.get("group_reply")),
+            "citations": bool(conf.get("citations")),
+            "running": st.get("running"), "connected": st.get("connected"),
+            "username": st.get("username"), "error": st.get("error"),
+            "last_event": st.get("last_event"), "users": st.get("users")}
+
+
+@app.post("/api/qqbot/config")
+def api_qqbot_config(payload: dict):
+    conf = load_conf()
+    q = conf.setdefault("qqbot", {})
+    if "app_id" in payload:
+        q["app_id"] = str(payload.get("app_id") or "").strip()
+    if payload.get("app_secret"):
+        q["app_secret"] = str(payload["app_secret"]).strip()
+    for k in ("enabled", "group_reply", "citations"):
+        if k in payload:
+            q[k] = bool(payload[k])
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2),
+                      encoding="utf-8")
+    import qqbot as qqbot_mod
+    qqbot_mod.apply_config(load_conf())
+    st = qqbot_mod.status()
+    return {"ok": True, "running": st.get("running"), "error": st.get("error")}
 
 
 # ---------------------------------------------------------------- API: 同步
