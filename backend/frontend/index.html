@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#07c160">
 <title>微信知识助手</title>
-<link rel="stylesheet" href="style.css?v=39">
+<link rel="stylesheet" href="style.css?v=43">
 </head>
 <body>
 <div class="app">
@@ -85,17 +85,22 @@
             <span id="quoteClear" class="quote-clear" title="取消引用">✕</span>
           </div>
           <div class="composer-toolbar">
-            <div class="composer-mode">
-            <span class="composer-section-label">提问方式</span>
-            <div class="mode-segment" role="radiogroup" aria-label="提问方式">
-              <label title="先检索重点内容并快速给出结论"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速回答</span><small>先给结论</small></label>
-              <label title="进行更多轮检索，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span><small>多轮检索</small></label>
-            </div>
+            <div class="composer-modes">
+              <div class="composer-mode">
+                <span class="composer-section-label">提问方式</span>
+                <div class="mode-segment" role="radiogroup" aria-label="提问方式">
+                  <label title="工具调用上限：本会话 4 步、全局 6 步，检索轮次较少"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速问答</span><small>少轮检索</small></label>
+                  <label title="工具调用上限：本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span><small>多轮检索</small></label>
+                </div>
+              </div>
+              <div class="composer-mode">
+                <span class="composer-section-label">思考深度</span>
+                <div class="mode-segment mode-segment-check" role="group" aria-label="思考深度">
+                  <label title="切换推理模型：复杂问题更准，但回答更慢"><input type="checkbox" id="thinkToggle"><span>深度思考</span><small>推理模型</small></label>
+                </div>
+              </div>
             </div>
             <div class="composer-toolbar-actions">
-              <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
-                <input type="checkbox" id="thinkToggle"><span>🧠 深度思考</span>
-              </label>
               <button id="newSessionBtn" class="ghost-btn" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
             </div>
             <input type="checkbox" id="exploreToggle" class="mode-state" aria-hidden="true" tabindex="-1">
@@ -127,24 +132,30 @@
         <footer class="composer-wrap assistant-composer-wrap">
           <div class="scope-bar assistant-scope-bar">
             <span class="scope-caption">回答范围</span>
-            <span id="assistantScopeGlobal" class="assistant-scope-pill">全部聊天记录</span>
-            <label class="scope-toggle" id="assistantScopeWrap" title="勾选后只在这个会话里检索">
-              <input type="checkbox" id="assistantScopeToggle" checked><span>仅本会话</span><b id="assistantScopeName"></b>
+            <select id="assistantScopeSelect" class="assistant-scope-select" aria-label="选择回答范围">
+              <option value="assistant">全部聊天记录</option>
+            </select>
+            <label class="scope-toggle" id="assistantScopeWrap" title="勾选后只在这个范围内检索" style="display:none">
+              <input type="checkbox" id="assistantScopeToggle" checked><span id="assistantScopeToggleText">仅本会话</span><b id="assistantScopeName"></b>
             </label>
-            <span class="scope-help">可随时切换范围</span>
           </div>
           <div class="composer-toolbar assistant-toolbar">
-            <div class="composer-mode">
-            <span class="composer-section-label">提问方式</span>
-            <div class="mode-segment" role="radiogroup" aria-label="AI 助手提问方式">
-              <label title="先检索重点内容并快速给出结论"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速回答</span><small>先给结论</small></label>
-              <label title="进行更多轮检索，适合统计、枚举和跨时段排查"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span><small>多轮检索</small></label>
-            </div>
+            <div class="composer-modes">
+              <div class="composer-mode">
+                <span class="composer-section-label">提问方式</span>
+                <div class="mode-segment" role="radiogroup" aria-label="AI 助手提问方式">
+                  <label title="工具调用上限：本会话 4 步、全局 6 步，检索轮次较少"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速问答</span><small>少轮检索</small></label>
+                  <label title="工具调用上限：本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span><small>多轮检索</small></label>
+                </div>
+              </div>
+              <div class="composer-mode">
+                <span class="composer-section-label">思考深度</span>
+                <div class="mode-segment mode-segment-check" role="group" aria-label="AI 助手思考深度">
+                  <label title="切换推理模型：复杂问题更准，但回答更慢"><input type="checkbox" id="assistantThink"><span>深度思考</span><small>推理模型</small></label>
+                </div>
+              </div>
             </div>
             <div class="composer-toolbar-actions">
-              <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
-                <input type="checkbox" id="assistantThink"><span>🧠 深度思考</span>
-              </label>
               <button id="assistantNew" class="ghost-btn">＋ 新会话</button>
             </div>
           </div>
@@ -177,7 +188,7 @@
   </main>
 </div>
 <div id="toast" class="toast"></div>
-<script src="app.js?v=75"></script>
-<script src="stream_qa.js?v=17"></script>
+<script src="app.js?v=78"></script>
+<script src="stream_qa.js?v=18"></script>
 </body>
 </html>

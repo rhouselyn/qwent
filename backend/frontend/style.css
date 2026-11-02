@@ -477,12 +477,7 @@ body {
 }
 .quote-x:hover { color: #e11d48; }
 
-.think-toggle {
-  display: flex; align-items: center; gap: 3px; font-size: 15px; cursor: pointer;
-  padding: 0 4px; user-select: none; opacity: .45;
-}
-.think-toggle:has(input:checked) { opacity: 1; }
-.think-toggle input { width: auto; margin: 0; cursor: pointer; }
+/* 提问方式与思考深度共用同一种分段控件（见 .mode-segment） */
 
 /* Markdown 表格 */
 .qa-turn .a.md .md-table {
@@ -952,7 +947,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
   .msg .col { max-width: 80%; }
   .composer { flex-wrap: wrap; }
   .composer textarea { flex: 1 1 100%; }
-  .composer .think-toggle { margin-left: 3px; }
 }
 @media (max-width: 520px) {
   .list-pane { min-width: 194px; width: 40vw; }
@@ -1082,7 +1076,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .assistant-pane .composer { width: min(900px, 100%); margin: 0 auto; padding: 0; align-items: flex-end; }
 .assistant-pane .composer textarea { min-height: 45px; max-height: 150px; resize: vertical; background: #f8fafb; }
 .assistant-pane .explore-bar { width: min(900px, 100%); margin: 0 auto; }
-.assistant-pane .think-toggle { color: #7d8790; font-size: 11px; }
 .assistant-pane .qa-empty { max-width: 420px; margin: 70px auto 0; padding: 28px; border: 1px dashed #dce4e0; border-radius: 14px; background: rgba(255,255,255,.6); text-align: center; }
 @media (max-width: 900px) {
   .settings-grid { grid-template-columns: 1fr; }
@@ -1176,14 +1169,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .chat-column > .composer-wrap .input-shell textarea::placeholder { color: #a2abb2; }
 .input-tip { display: block; margin-top: 3px; color: #b0b7bd; font-size: 10px; line-height: 1.2; }
 .composer-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
-.chat-column > .composer-wrap .think-toggle {
-  min-height: 39px; padding: 0 8px; border: 1px solid #e4e8ea; border-radius: 9px; background: #fff;
-  color: #7b8790; font-size: 11px; opacity: 1; white-space: nowrap;
-}
-.chat-column > .composer-wrap .think-toggle:has(input:checked) { color: #087c43; background: #eefaf2; border-color: #9ddbb1; }
-.chat-column > .composer-wrap .think-toggle input { width: 14px; height: 14px; accent-color: #07a957; }
 .chat-column > .composer-wrap .ghost-btn { min-height: 39px; padding: 8px 11px !important; border-radius: 9px; color: #60707b !important; font-size: 11px; }
-.chat-column > .composer-wrap #sendBtn { min-height: 39px; min-width: 64px; padding: 8px 16px; border-radius: 9px; font-size: 13px; }
+.chat-column > .composer-wrap #sendBtn { min-height: 39px; min-width: 69px; padding: 8px 16px; border-radius: 9px; font-size: 13px; }
 @media (max-width: 820px) {
   .scope-help, .explore-toggle small { display: none; }
   .chat-column > .composer-wrap .composer { flex-wrap: wrap; }
@@ -1193,8 +1180,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 @media (max-width: 520px) {
   .chat-column > .composer-wrap .explore-bar { align-items: flex-start; }
   .chat-column > .composer-wrap .composer-actions { gap: 5px; }
-  .chat-column > .composer-wrap .think-toggle span { font-size: 0; }
-  .chat-column > .composer-wrap .think-toggle span::after { content: "🧠"; font-size: 14px; }
   .chat-column > .composer-wrap .ghost-btn { padding-inline: 8px !important; }
 }
 
@@ -1212,7 +1197,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .assistant-composer-wrap { padding: 8px clamp(12px, 3vw, 30px) 13px !important; background: rgba(255,255,255,.97); border-top: 1px solid var(--line); }
 .assistant-composer-wrap .scope-bar, .assistant-composer-wrap .explore-bar, .assistant-composer-wrap .composer { width: min(900px, 100%); margin-left: auto; margin-right: auto; }
 .assistant-composer-wrap .scope-bar { display: flex; justify-content: flex-start; align-items: center; gap: 8px; min-height: 26px; padding: 0 2px; margin-bottom: 6px; }
-.assistant-scope-pill, .assistant-composer-wrap .scope-toggle { display: inline-flex; align-items: center; min-height: 25px; padding: 4px 9px; border: 1px solid #d8e5dc; border-radius: 999px; color: #397255; background: #f2faf5; font-size: 11px; font-weight: 600; }
+.assistant-scope-select, .assistant-composer-wrap .scope-toggle { display: inline-flex; align-items: center; min-height: 25px; padding: 3px 10px; border: 1px solid #d8e5dc; border-radius: 999px; color: #397255; background: #f2faf5; font-size: 11px; font-weight: 600; }
+.assistant-scope-select { max-width: min(320px, 46vw); cursor: pointer; }
+.assistant-scope-select:focus-visible { outline: 2px solid rgba(7,169,87,.35); outline-offset: 1px; }
 .assistant-composer-wrap .scope-toggle { gap: 6px; cursor: pointer; }
 .assistant-composer-wrap .scope-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #07a957; }
 .assistant-composer-wrap #assistantScopeName { max-width: min(280px, 34vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1220,7 +1207,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .assistant-composer-wrap .explore-bar { display: flex; align-items: center; gap: 10px; padding: 0 2px; margin-bottom: 6px; }
 .mode-state { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .mode-segment { display: inline-flex; align-items: stretch; overflow: hidden; border: 1px solid #e0e7e3; border-radius: 9px; background: #fafcfb; }
-.mode-segment label { position: relative; display: grid; grid-template-columns: auto 1fr; grid-template-rows: 1fr 1fr; column-gap: 5px; align-items: center; min-width: 104px; padding: 4px 9px; color: #6f7b84; cursor: pointer; }
+.mode-segment label { position: relative; display: grid; grid-template-columns: auto 1fr; grid-template-rows: 1fr 1fr; column-gap: 5px; align-items: center; min-width: 94px; padding: 4px 7px; color: #6f7b84; cursor: pointer; }
 .mode-segment label + label { border-left: 1px solid #e0e7e3; }
 .mode-segment input { position: absolute; opacity: 0; pointer-events: none; }
 .mode-segment label::before { content: ""; width: 7px; height: 7px; grid-row: 1 / span 2; border: 2px solid #b7c1c7; border-radius: 50%; }
@@ -1229,15 +1216,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .mode-segment label span { font-size: 11px; font-weight: 650; line-height: 1.1; }
 .mode-segment label small { color: #a1aab1; font-size: 9px; line-height: 1.1; }
 .mode-segment label:has(input:checked) small { color: #65a17d; }
+/* 深度思考：与提问方式同一种分段外形，用方形勾选点区分单选/开关 */
+.mode-segment-check label { min-width: 0; }
+.mode-segment-check label::before { border-radius: 3px; }
 .assistant-composer-wrap .assistant-composer { display: flex; align-items: flex-end; gap: 10px; padding: 0; }
 .assistant-composer-wrap .input-shell { min-width: 0; flex: 1 1 auto; }
 .assistant-composer-wrap .input-shell textarea { display: block; width: 100%; min-height: 27px; max-height: 126px; padding: 0; border: 0; outline: 0; resize: vertical; background: transparent; box-shadow: none; font-size: 14px; line-height: 1.5; }
 .assistant-composer-wrap .composer-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
-.assistant-composer-wrap .think-toggle { min-height: 39px; padding: 0 8px; border: 1px solid #e4e8ea; border-radius: 9px; background: #fff; color: #7b8790; font-size: 11px; opacity: 1; white-space: nowrap; flex: 0 0 auto; }
-.assistant-composer-wrap .think-toggle input { width: 14px; height: 14px; accent-color: #07a957; }
-.assistant-composer-wrap .think-toggle:has(input:checked) { color: #087c43; background: #eefaf2; border-color: #9ddbb1; }
-.assistant-composer-wrap .ghost-btn { min-height: 39px; padding: 8px 11px !important; border-radius: 9px; font-size: 11px; flex: 0 0 auto; white-space: nowrap; }
-.assistant-composer-wrap #assistantSend { min-height: 39px; min-width: 64px; padding: 8px 16px; border-radius: 9px; font-size: 13px; flex: 0 0 auto; white-space: nowrap; }
+.assistant-composer-wrap .ghost-btn { min-height: 39px; min-width: 69px; padding: 8px 11px !important; border-radius: 9px; font-size: 11px; flex: 0 0 auto; white-space: nowrap; }
+.assistant-composer-wrap #assistantSend { min-height: 39px; min-width: 69px; padding: 8px 16px; border-radius: 9px; font-size: 13px; flex: 0 0 auto; white-space: nowrap; }
 @media (max-width: 900px) {
   .ai-sessions-panel { width: 185px; flex-basis: 185px; }
 }
@@ -1252,23 +1239,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .chat-column > .composer-wrap .composer-toolbar,
 .assistant-composer-wrap .composer-toolbar {
   width: min(960px, 100%); min-height: 36px; display: flex; align-items: center;
-  justify-content: space-between; gap: 12px; margin: 0 auto 7px; padding: 0 2px;
+  justify-content: space-between; gap: 12px; margin: 0 auto 7px; padding: 0;
 }
-.composer-mode { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.assistant-composer-wrap .composer-toolbar { width: min(900px, 100%); }
+.composer-modes { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.composer-mode { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .composer-toolbar-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
-.chat-column > .composer-wrap .composer-toolbar .think-toggle,
-.assistant-composer-wrap .composer-toolbar .think-toggle {
-  min-height: 32px; padding: 0 9px; border: 1px solid #e4e8ea; border-radius: 8px;
-  background: #fff; color: #7b8790; font-size: 11px; opacity: 1; white-space: nowrap; flex: 0 0 auto;
-}
-.chat-column > .composer-wrap .composer-toolbar .think-toggle:has(input:checked),
-.assistant-composer-wrap .composer-toolbar .think-toggle:has(input:checked) {
-  color: #087c43; background: #eefaf2; border-color: #9ddbb1;
-}
-.composer-toolbar .think-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #07a957; }
 .chat-column > .composer-wrap .composer-toolbar .ghost-btn,
 .assistant-composer-wrap .composer-toolbar .ghost-btn {
-  min-height: 32px; padding: 6px 10px !important; border-radius: 8px; font-size: 11px;
+  min-width: 69px; min-height: 32px; padding: 6px 10px !important; border-radius: 8px; font-size: 11px;
   white-space: nowrap; flex: 0 0 auto;
 }
 .chat-column > .composer-wrap .composer,
@@ -1278,7 +1257,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 @media (max-width: 820px) {
   .chat-column > .composer-wrap .composer-toolbar,
   .assistant-composer-wrap .composer-toolbar { align-items: flex-start; flex-wrap: wrap; gap: 7px; }
-  .composer-mode { flex: 1 1 100%; }
+  .composer-modes { flex: 1 1 100%; gap: 10px; }
   .composer-toolbar-actions { width: 100%; justify-content: flex-end; }
   .chat-column > .composer-wrap .composer,
   .assistant-composer-wrap .assistant-composer { flex-wrap: nowrap; }

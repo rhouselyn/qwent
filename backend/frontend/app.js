@@ -14,6 +14,7 @@ const aiState = {
   openScopes: {},
   currentSession: null,
   currentScope: null,
+  scopeContexts: {},       // scope -> {chat|file|link}，选中文件/链接作用域时按需解析
 };
 async function loadAiTree() {
   try { aiState.tree = await api("/api/ai/sessions"); } catch { aiState.tree = []; }
@@ -52,21 +53,19 @@ function renderAiTree() {
                      <span class="n">${s.count} 问</span>
                      <span class="del" title="删除该对话">✕</span>`;
       d.querySelector(".t").onclick = () => {
-        aiState.currentSession = s.id;
-        loadSessionTurns(s.id);
-        renderAiTree();
+        selectAssistantScope(g.scope, s.id);
       };
       d.querySelector(".n").onclick = () => d.querySelector(".t").click();
       d.querySelector(".del").onclick = async (e) => {
         e.stopPropagation();
         await api(`/api/ai/session/${s.id}/delete`, { method: "POST" });
         if (aiState.currentSession === s.id) { aiState.currentSession = null; state.qaHistory = []; renderQA(); }
-        await loadAiTree(); renderAiTree();
+        await loadAiTree(); renderAiTree(); syncAssistantScopeSelect();
         toast("已删除对话");
       };
       list.appendChild(d);
     }
-    // 点分组头：展开 / 收起该分组下的会话
+    // 点分组头：展开 / 收起；点组内对话才是切换提问范围
     const head = wrap.querySelector(".ai-group-head");
     head.onclick = (e) => {
       e.stopPropagation();
@@ -805,7 +804,11 @@ function renderQA() {
   const box = isAssistant() ? $("#assistantConv") : $("#qaList");
   box.innerHTML = "";
   if (!state.qaHistory.length) {
-    box.innerHTML = `<div class="qa-empty">还没有问答记录。<br>在下方输入框提问，AI 会在${isAssistant() ? "全部聊天记录" : "当前会话"}中检索作答。</div>`;
+    const where = isAssistant()
+      ? (aiState.currentScope && aiState.currentScope !== "assistant"
+          ? `「${scopeNameOf(aiState.currentScope)}」` : "全部聊天记录")
+      : "当前会话";
+    box.innerHTML = `<div class="qa-empty">还没有问答记录。<br>在下方输入框提问，AI 会在${where}中检索作答。</div>`;
     return;
   }
     for (const turn of state.qaHistory) {
@@ -855,28 +858,95 @@ function renderQA() {
   box.scrollTop = box.scrollHeight;
 }
 
-/* ---------------- AI 助手的作用域（仅本会话） ---------------- */
+/* ---------------- AI 助手的作用域（全局 / 会话 / 文件 / 链接） ---------------- */
+function scopeGroup(scope) {
+  return aiState.tree.find(g => g.scope === scope) || null;
+}
 function scopeNameOf(scope) {
   if (!scope || scope === "assistant") return "";
+  const g = scopeGroup(scope);
+  if (g && g.name) return g.name;
   if (scope.startsWith("moment:")) return "朋友圈";
+  if (scope.startsWith("file:")) return "文件问答";
+  if (scope.startsWith("link:")) return "链接问答";
   const s = state.sessions.find(x => x.username === scope);
   return s ? s.name : scope;
 }
-
+function scopeToggleText(scope) {
+  if (scope.startsWith("file:")) return "仅本文件";
+  if (scope.startsWith("link:")) return "仅本文";
+  if (scope.startsWith("moment:")) return "仅本朋友圈";
+  return "仅本会话";
+}
+function assistantScopeLabel(g) {
+  if (g.kind === "file") return "文件：" + g.name;
+  if (g.kind === "link") return "链接：" + g.name;
+  if (g.kind === "group") return "群聊：" + g.name;
+  if (g.kind === "chat") return "会话：" + g.name;
+  return g.name || "全局助手";
+}
+function syncAssistantScopeSelect() {
+  const sel = document.querySelector("#assistantScopeSelect");
+  if (!sel) return;
+  const scope = aiState.currentScope || "assistant";
+  sel.innerHTML = `<option value="assistant">全部聊天记录</option>` +
+    aiState.tree.filter(g => g.scope !== "assistant")
+      .map(g => `<option value="${attrEsc(g.scope)}">${esc(assistantScopeLabel(g))}</option>`)
+      .join("");
+  if ([...sel.options].some(o => o.value === scope)) {
+    sel.value = scope;
+  } else if (scope !== "assistant") {
+    const opt = document.createElement("option");
+    opt.value = scope;
+    opt.textContent = scopeNameOf(scope);
+    sel.appendChild(opt);
+    sel.value = scope;
+  }
+}
 function updateAssistantScopeUI() {
   const wrap = document.querySelector("#assistantScopeWrap");
-  const global = document.querySelector("#assistantScopeGlobal");
   if (!wrap) return;
-  const scope = aiState.currentScope;
-  if (!scope || scope === "assistant") {
+  const scope = aiState.currentScope || "assistant";
+  const g = scopeGroup(scope);
+  const title = document.querySelector("#assistantTitle");
+  const toggleText = document.querySelector("#assistantScopeToggleText");
+  if (title) title.textContent = "✦ " + (scope === "assistant" ? "全局助手"
+    : (g && g.name ? g.name : scopeNameOf(scope) || "AI 助手"));
+  if (scope === "assistant") {
     wrap.style.display = "none";
-    if (global) global.style.display = "inline-flex";
     return;
   }
-  wrap.style.display = "inline";
-  if (global) global.style.display = "none";
+  wrap.style.display = "inline-flex";
+  if (toggleText) toggleText.textContent = scopeToggleText(scope);
   const nm = document.querySelector("#assistantScopeName");
   if (nm) nm.textContent = "（" + scopeNameOf(scope) + "）";
+}
+/* 在 AI 助手右侧列表或范围下拉里选择会话/文件后，提问范围随之切换 */
+async function selectAssistantScope(scope, sessionId) {
+  aiState.currentScope = scope || "assistant";
+  const toggle = document.querySelector("#assistantScopeToggle");
+  if (toggle && aiState.currentScope !== "assistant") toggle.checked = true;
+  syncAssistantScopeSelect();
+  updateAssistantScopeUI();
+  const g = scopeGroup(aiState.currentScope);
+  const target = sessionId || (g && g.sessions.length ? g.sessions[0].id : null);
+  aiState.currentSession = target;
+  await loadSessionTurns(target);
+  const meta = document.querySelector("#assistantMeta");
+  if (meta) meta.textContent = `${state.qaHistory.length} 轮 · 右侧可切换对话`;
+  renderAiTree();
+}
+/* 文件/链接作用域不能只传 scope 字符串，提问前要还原成后端可读的上下文 */
+async function resolveScopeAskContext(scope) {
+  if (!scope || scope === "assistant" || scope.startsWith("moment:")) return {};
+  if (aiState.scopeContexts[scope]) return aiState.scopeContexts[scope];
+  try {
+    const d = await api("/api/ai/scope/context?scope=" + encodeURIComponent(scope));
+    aiState.scopeContexts[scope] = d || {};
+  } catch {
+    aiState.scopeContexts[scope] = {};
+  }
+  return aiState.scopeContexts[scope];
 }
 
 /* 当前上下文的 AI 会话作用域：群聊/私聊、每个文件、每个链接各自独立，互不混用 */
@@ -901,7 +971,16 @@ function aiScopeForContext() {
   if (typeof previewMoment !== "undefined" && previewMoment) {
     return { key: `moment:${previewMoment}`, name: "朋友圈", kind: "moment" };
   }
-  if (isAssistant() || !state.current) return { key: "assistant", name: "全局助手", kind: "assistant" };
+  if (isAssistant()) {
+    const scope = aiState.currentScope;
+    if (scope && scope !== "assistant") {
+      const g = scopeGroup(scope);
+      return { key: scope, name: (g && g.name) || scopeNameOf(scope),
+               kind: (g && g.kind) || "chat" };
+    }
+    return { key: "assistant", name: "全局助手", kind: "assistant" };
+  }
+  if (!state.current) return { key: "assistant", name: "全局助手", kind: "assistant" };
   return { key: state.current.username, name: state.current.name || state.current.username,
            kind: "chat" };
 }
@@ -909,8 +988,9 @@ function aiScopeForContext() {
 /* 切到某个上下文时，载入"该作用域自己的"最新会话（绝不沿用别的上下文的 session） */
 async function enterAiScope(scopeKey, name) {
   aiState.currentScope = scopeKey;
-  updateAssistantScopeUI();
   await loadAiTree();
+  syncAssistantScopeSelect();
+  updateAssistantScopeUI();
   const g = aiState.tree.find(x => x.scope === scopeKey);
   const target = g && g.sessions.length ? g.sessions[0].id : null;
   aiState.currentSession = target;
@@ -922,11 +1002,10 @@ async function enterAiScope(scopeKey, name) {
 function currentAskScope() {
   if (isAssistant()) {
     const scope = aiState.currentScope;
-    const wrap = document.querySelector("#assistantScopeWrap");
-    const on = wrap && wrap.style.display !== "none";
     const checked = document.querySelector("#assistantScopeToggle");
-    if (on && scope && scope !== "assistant" && (!checked || checked.checked)) return scope;
-    return null;
+    if (!scope || scope === "assistant") return null;
+    if (checked && !checked.checked) return null;
+    return scope;
   }
   return $("#scopeToggle").checked ? state.current.username : null;
 }
@@ -1035,11 +1114,16 @@ async function globalSearch(q) {
 /* ---------------- AI 会话视图 ---------------- */
 
 async function openAssistantById(sessionId) {
-  // 从右侧面板选历史对话：中间切换到该对话
+  // 从右侧面板选历史对话：中间切换到该对话，作用域跟随该对话
   aiState.currentSession = sessionId;
   try {
     const d = await api(`/api/ai/session/${sessionId}`);
     state.qaHistory = d.turns;
+    if (d.scope) aiState.currentScope = d.scope;
+    const toggle = document.querySelector("#assistantScopeToggle");
+    if (toggle && aiState.currentScope !== "assistant") toggle.checked = true;
+    syncAssistantScopeSelect();
+    updateAssistantScopeUI();
   } catch { state.qaHistory = []; }
   renderQA();
   renderAiTree();
@@ -1059,8 +1143,9 @@ async function openAssistant(sessionId) {
   $("#assistantPane").style.display = "flex";
   updateScopeBar();
   aiState.currentScope = "assistant";
-  updateAssistantScopeUI();
   await loadAiTree();
+  syncAssistantScopeSelect();
+  updateAssistantScopeUI();
   const group = aiState.tree.find(g => g.scope === "assistant");
   const target = sessionId || (group && group.sessions[0] ? group.sessions[0].id : null);
   aiState.currentSession = target;
@@ -1948,5 +2033,15 @@ function bindAssistantComposer() {
   $("#assistantFastMode").onchange = () => { $("#exploreToggle").checked = false; };
   $("#assistantExploreMode").onchange = () => { $("#exploreToggle").checked = true; };
   document.querySelector("#assistantNew").onclick = () => newAiSession();
+  const scopeSel = document.querySelector("#assistantScopeSelect");
+  if (scopeSel && !scopeSel.dataset.bound) {
+    scopeSel.addEventListener("change", () => selectAssistantScope(scopeSel.value));
+    scopeSel.dataset.bound = "1";
+  }
+  const scopeToggle = document.querySelector("#assistantScopeToggle");
+  if (scopeToggle && !scopeToggle.dataset.bound) {
+    scopeToggle.addEventListener("change", updateAssistantScopeUI);
+    scopeToggle.dataset.bound = "1";
+  }
   input.focus();
 }

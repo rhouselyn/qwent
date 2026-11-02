@@ -158,14 +158,26 @@ async function askStream(question) {
   if (streamState.busy) { toast("上一条还在回答中"); return; }
   // 文件预览中勾选范围 → 针对该文件提问；文章预览 → 针对本文提问；取消勾选 → 全局检索
   const scopeOn = $("#scopeToggle") ? $("#scopeToggle").checked : true;
-  const fileCtx = (previewFile && scopeOn)
+  let fileCtx = (previewFile && scopeOn)
     ? { chat: previewFile.chat, local_id: previewFile.id, ts: previewFile.ts,
         name: previewFile.title }
     : null;
-  const linkCtx = (!fileCtx && typeof previewLink !== "undefined" && previewLink && scopeOn)
+  let linkCtx = (!fileCtx && typeof previewLink !== "undefined" && previewLink && scopeOn)
     ? { url: previewLink.url, title: previewLink.title }
     : null;
-  const chat = (fileCtx || linkCtx) ? null : currentAskScope();
+  let chat = (fileCtx || linkCtx) ? null : currentAskScope();
+  // AI 助手里选中了文件/链接作用域：把 scope 还原成后端可读的上下文
+  if (isAssistant() && !fileCtx && !linkCtx) {
+    const scope = aiState.currentScope || "assistant";
+    const scopeToggle = $("#assistantScopeToggle");
+    if (scope !== "assistant" && (!scopeToggle || scopeToggle.checked)
+        && typeof resolveScopeAskContext === "function") {
+      const ctx = await resolveScopeAskContext(scope);
+      fileCtx = ctx.file || null;
+      linkCtx = ctx.link || null;
+      chat = (fileCtx || linkCtx) ? null : (ctx.chat || null);
+    }
+  }
   const sc = (typeof aiScopeForContext === "function") ? aiScopeForContext() : null;
   // 发问前就把会话建好并放进 tree：否则要等流结束才出现，从其它窗口跳回来是空的
   if (!aiState.currentSession && typeof api === "function") {

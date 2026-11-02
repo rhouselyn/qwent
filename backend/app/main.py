@@ -1224,6 +1224,82 @@ def api_ai_sessions():
     return out
 
 
+def _ai_scope_hash(text: str) -> str:
+    """与前端 hashStr 一致：djb2 + 0x7fffffff，按 UTF-16 单元计算后转 base36。"""
+    h = 5381
+    for ch in str(text or ""):
+        cp = ord(ch)
+        if cp > 0xFFFF:
+            cp -= 0x10000
+            units = (0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF))
+        else:
+            units = (cp,)
+        for u in units:
+            h = ((h << 5) + h + u) & 0x7fffffff
+    if not h:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    while h:
+        h, r = divmod(h, 36)
+        out = digits[r] + out
+    return out
+
+
+@app.get("/api/ai/scope/context")
+def api_ai_scope_context(scope: str):
+    """把 AI 会话作用域还原成提问所需的 chat / file / link 上下文。
+
+    前端在 AI 助手里选中"会话/文件/链接"后，只靠 scope 字符串无法带上文件正文
+    或链接地址，这里统一在服务端解析，避免把两套规则散落在多个页面上。
+    """
+    scope = (scope or "").strip()
+    if not scope or scope == "assistant" or scope.startswith("moment:"):
+        return {}
+    con = db()
+    if scope.startswith("file:"):
+        parts = scope.split(":", 2)
+        chat = parts[1] if len(parts) > 1 else ""
+        try:
+            lid = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            lid = 0
+        if not chat or lid <= 0:
+            return {}
+        name, ts = "", 0
+        try:
+            _ensure_file_text(con)
+            row = con.execute("SELECT name FROM file_text WHERE key=?",
+                              (f"{chat}:{lid}",)).fetchone()
+            if row and row[0]:
+                name = row[0]
+        except Exception:
+            pass
+        row = con.execute(
+            "SELECT ts, content FROM message WHERE chat_user=? AND src_local_id=? "
+            "AND (type & 0xFFFFFFFF)=49 ORDER BY ts DESC LIMIT 1", (chat, lid)).fetchone()
+        if row:
+            ts = int(row[0] or 0)
+            if not name:
+                m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>",
+                              row[1] or "", re.S)
+                name = m.group(1).strip() if m else ""
+        return {"file": {"chat": chat, "local_id": lid, "ts": ts,
+                         "name": name or "文件"}}
+    if scope.startswith("link:"):
+        target = scope.split(":", 1)[1]
+        try:
+            from link_media import normalize_url
+        except Exception:
+            normalize_url = lambda x: x
+        for url, title in con.execute("SELECT url, title FROM chat_link").fetchall():
+            u = normalize_url(url)
+            if _ai_scope_hash(u) == target:
+                return {"link": {"url": u, "title": title or "链接"}}
+        return {}
+    return {"chat": scope}
+
+
 @app.post("/api/ai/sessions")
 def api_ai_session_new(payload: dict):
     con = db()
