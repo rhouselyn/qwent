@@ -3,6 +3,9 @@ data/
 
 # ===== 本机配置,含真实 API key =====
 backend/config.json
+# QQ 桥接 token / 本地状态
+backend/qqbot_bridge.json
+backend/qqbot_bridge_state.json
 
 # ===== 内部需求/技术方案,不随仓库分发 =====
 需求文档.md

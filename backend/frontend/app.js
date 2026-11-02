@@ -2036,6 +2036,24 @@ function startAutoRefresh() {
   }, 30000);
 }
 
+/* ---------------- 深链：/?chat=<wxid>&msg=<id> ---------------- */
+async function applyDeepLink() {
+  const qp = new URLSearchParams(location.search);
+  const qmsg = Number(qp.get("msg") || 0);
+  const qchat = qp.get("chat") || "";
+  if (!qmsg && !qchat) return;
+  try {
+    if (qmsg) {
+      await jumpToRef({ id: qmsg });
+    } else {
+      await openChat(qchat, qp.get("name") || qchat, qchat.includes("@chatroom"));
+    }
+    history.replaceState(null, "", location.pathname);
+  } catch (e) {
+    console.warn("深链打开失败", e);
+  }
+}
+
 /* ---------------- 启动 ---------------- */
 (async function init() {
   try {
@@ -2046,6 +2064,7 @@ function startAutoRefresh() {
     try { const me = await api("/api/me"); state.selfUsername = me.username; } catch {}
     await loadSessions();
     startAutoRefresh();
+    await applyDeepLink();
   } catch (e) {
     $("#statusHint").textContent = "后端连接失败: " + e.message;
   }

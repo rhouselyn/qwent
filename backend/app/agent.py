@@ -129,6 +129,35 @@ def _fmt(ts) -> str:
 def _msg_brief(con, row) -> dict:
     from textutil import display_text
     text = (display_text((row["type"] or 0) & 0xFFFFFFFF, row["content"]) or "")[:600]
+    # 合并转发/文件/链接：display_text 只给标题，这里补上模型真正需要的内容。
+    # parse_message 在 main.py 里，延迟导入避免循环依赖。
+    try:
+        import main as M
+        parsed = M.parse_message(row)
+        if isinstance(parsed, dict):
+            rec = parsed.get("record")
+            if rec:
+                lines = [f"[合并转发《{parsed.get('title') or '聊天记录'}》"
+                         f"共 {rec.get('count') or 0} 条]"]
+                info = (rec.get("info") or "").strip()
+                if info:
+                    lines.append(info[:400])
+                for it in (rec.get("items") or [])[:20]:
+                    who = it.get("name") or ""
+                    when = it.get("time") or ""
+                    body = it.get("text") or it.get("title") or it.get("url") or ""
+                    body = " ".join(str(body).split())
+                    lines.append((f"{when} {who}: {body}" if (when or who) else body)[:300])
+                if len(rec.get("items") or []) > 20:
+                    lines.append(f"……其余 {len(rec['items']) - 20} 条未展开")
+                text = "\n".join(x for x in lines if x)[:1500]
+            elif parsed.get("kind") == "link" and parsed.get("url"):
+                title = parsed.get("title") or text or "[链接]"
+                text = f"{title} {parsed['url']}"[:800]
+            elif parsed.get("kind") == "file" and parsed.get("title"):
+                text = f"[文件] {parsed['title']}"[:600]
+    except Exception:  # noqa: BLE001 解析失败不影响原消息
+        pass
     # 媒体消息附上 OCR/转写文本：工具检索到图片/语音/视频时模型才能看到其内容
     try:
         t = con.execute("SELECT kind, text FROM media_text WHERE message_id=?",
