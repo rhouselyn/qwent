@@ -245,12 +245,73 @@ def has_xml_text(content: str) -> bool:
     return c.startswith(("<?xml", "<msg", "<appmsg"))
 
 
+_RECORD_HINT = re.compile(r"support\.weixin\.qq\.com/.*(readtemplate|unsupport)")
+
+
+def parse_record(c: str) -> dict | None:
+    """解析合并转发的聊天记录（appmsg subtype 19 的 <recorditem>）。
+
+    结构：<recorditem><![CDATA[<recordinfo><info>摘要</info>
+          <datalist count=N><dataitem datatype=".."><sourcename/><datadesc/>
+          <link/><title/>...
+    返回 {count, info, items:[{type,name,time,text,title,url}]}；解析失败返回 None。
+    """
+    m = re.search(r"<recorditem>(.*?)</recorditem>", c, re.S)
+    if not m:
+        return None
+    raw = m.group(1)
+    cd = re.search(r"<!\[CDATA\[(.*?)\]\]>", raw, re.S)
+    inner = cd.group(1) if cd else raw
+    inner = _xml_unescape(inner)
+    if "<recordinfo" not in inner:
+        return None
+    info_m = re.search(r"<info>(.*?)</info>", inner, re.S)
+    info = ""
+    if info_m:
+        rows = [x.strip() for x in _xml_unescape(info_m.group(1)).splitlines() if x.strip()]
+        info = chr(10).join(rows)[:600]
+    items = []
+    for it in re.finditer(r"<dataitem([^>]*)>(.*?)</dataitem>", inner, re.S):
+        attrs, body = it.group(1), it.group(2)
+        dt = re.search(r'datatype="(\d+)"', attrs)
+        dtype = int(dt.group(1)) if dt else 0
+
+        def pick(tag, _body=body):
+            mm = re.search(r"<" + tag + r">(.*?)</" + tag + r">", _body, re.S)
+            if not mm:
+                return ""
+            v = re.sub(r"<!\[CDATA\[(.*?)\]\]>", lambda x: x.group(1),
+                       mm.group(1), flags=re.S)
+            return _xml_unescape(v).strip()
+
+        item = {
+            "type": dtype,
+            "name": pick("sourcename")[:40],
+            "time": pick("sourcetime")[:24],
+            "text": pick("datadesc")[:400],
+            "title": pick("title")[:200],
+            "url": pick("link")[:800],
+        }
+        # datatype: 1=文本 3=图片 5=链接 19=嵌套聊天记录 34=语音 43=视频 37/47=表情
+        if not (item["text"] or item["title"] or item["url"]):
+            continue
+        items.append(item)
+    if not items:
+        return None
+    return {"count": len(items), "info": info, "items": items[:200]}
+
+
 def _appmsg_dict(c: str) -> dict:
     """把一段 appmsg XML 解析成 {kind, title, des, url}。"""
     sub = re.search(r"<type>(\d+)</type>", c)
     subtype = sub.group(1) if sub else ""
     mt, md_, mu = XML_TITLE.search(c), XML_DES.search(c), XML_URL.search(c)
     title = mt.group(1) if mt else ""
+    if subtype == "19":
+        rec = parse_record(c)
+        if rec:
+            return {"kind": "record", "title": title or "聊天记录",
+                    "des": (rec["info"] or "")[:200], "record": rec}
     if subtype == "62":
         return {"text": title or "[拍了拍]"}
     if subtype in ("57",):
@@ -261,9 +322,12 @@ def _appmsg_dict(c: str) -> dict:
             rdisp = _quote_oneline(_xml_unescape(x.group(1))) if x else ""
             rtitle = _refer_text(ref.group(1))
         return {"kind": "quote", "title": title, "refer": {"who": rdisp, "title": rtitle}}
+    link_url = _xml_unescape(mu.group(1)) if mu else ""
+    if _RECORD_HINT.search(link_url or ""):
+        link_url = ""      # 微信"不支持查看"的占位地址,不是真实内容
     return {"kind": "link", "title": title or "[消息]",
             "des": (md_.group(1) if md_ else "")[:200],
-            "url": (mu.group(1) if mu else "")}
+            "url": link_url}
 SENDER_PREFIX = re.compile(r"^([^:\n]{4,64}):\r?\n")
 
 
@@ -317,6 +381,14 @@ def parse_message(m: sqlite3.Row) -> dict:
         title = (XML_TITLE.search(c) or [None, ""])[1] if XML_TITLE.search(c) else ""
         des = (XML_DES.search(c) or [None, ""])[1] if XML_DES.search(c) else ""
         url = (XML_URL.search(c) or [None, ""])[1] if XML_URL.search(c) else ""
+        if subtype == "19":                          # 合并转发聊天记录
+            rec = parse_record(c)
+            if rec:
+                out["kind"] = "record"
+                out["title"] = _quote_oneline(_xml_unescape(title)) or "聊天记录"
+                out["des"] = (rec.get("info") or "")[:200]
+                out["record"] = rec
+                return out
         if subtype == "62":                          # 拍一拍
             out["text"] = clean_display(62, c) or "[拍了拍]"
         elif subtype == "57":
@@ -338,9 +410,12 @@ def parse_message(m: sqlite3.Row) -> dict:
             out["size"] = int(total.group(1)) if total else 0
             out["des"] = des[:200]
         else:
+            link_url = _xml_unescape(url)
+            if _RECORD_HINT.search(link_url or ""):
+                link_url = ""     # 微信"不支持查看该内容"的占位地址
             out["kind"] = "link"
             out["title"] = title or "[消息]"
-            out["url"] = url
+            out["url"] = link_url
             out["des"] = des[:200]
     else:
         # 4.1.15 里部分 XML 消息（小程序/转发等）以普通文本类型落库

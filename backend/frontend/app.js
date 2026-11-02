@@ -639,6 +639,43 @@ function renderBubbleContent(m, p) {
       });
       return el;
     }
+    case "record": {
+      const rec = p.record || { items: [], count: 0 };
+      el.className = "card record-card";
+      const head = document.createElement("div");
+      head.className = "rec-head";
+      head.innerHTML = `📋 <span class="t">${esc(p.title || "聊天记录")}</span>` +
+        `<span class="rec-count">${rec.count || rec.items.length} 条</span>` +
+        `<span class="rec-toggle">展开 ▸</span>`;
+      const body = document.createElement("div");
+      body.className = "rec-body";
+      body.style.display = "none";
+      (rec.items || []).forEach((it) => {
+        const row = document.createElement("div");
+        row.className = "rec-item" + (it.url ? " clickable" : "");
+        const who = it.name ? `<span class="rec-who">${esc(it.name)}</span>` : "";
+        const time = it.time ? `<span class="rec-time">${esc(it.time)}</span>` : "";
+        let main = esc(it.text || "");
+        if (it.title) main = (main ? main + " " : "") + `<b>${esc(it.title)}</b>`;
+        if (it.url && !it.title) main = main || esc(it.url);
+        const badge = it.url ? '<span class="rec-go">↗</span>'
+          : (it.type === 3 ? '<span class="rec-tag">图片</span>'
+             : it.type === 34 ? '<span class="rec-tag">语音</span>'
+             : it.type === 43 ? '<span class="rec-tag">视频</span>' : "");
+        row.innerHTML = `${who}${time}<div class="rec-text">${main}${badge}</div>`;
+        if (it.url) row.onclick = (ev) => { ev.stopPropagation(); openLinkPreview(it.url, it.title || it.url); };
+        body.appendChild(row);
+      });
+      if (!(rec.items || []).length) body.textContent = p.des || "（无内容）";
+      head.onclick = () => {
+        const open = body.style.display !== "none";
+        body.style.display = open ? "none" : "block";
+        head.querySelector(".rec-toggle").textContent = open ? "展开 ▸" : "收起 ▾";
+      };
+      el.appendChild(head);
+      el.appendChild(body);
+      return el;
+    }
     case "link": {
       el.className = "card";
       el.innerHTML = `🔗 <span class="t">${esc(p.title || "[链接]")}</span>` +

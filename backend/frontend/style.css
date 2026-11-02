@@ -780,3 +780,23 @@ pre.sns-text.pv-text {
   background: #e4e6ea; font-weight: 600; box-shadow: inset 3px 0 0 #07c160;
 }
 #settingsNav { overflow-y: auto; }
+
+/* 合并转发聊天记录卡片：点击展开逐条查看（与微信一致） */
+.record-card { min-width: 240px; max-width: 380px; }
+.rec-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.rec-head .t { flex: 1; font-weight: 600; }
+.rec-count { font-size: 12px; color: #8a8a90; }
+.rec-toggle { font-size: 12px; color: #576b95; flex-shrink: 0; }
+.rec-body {
+  margin-top: 8px; border-top: 1px solid #ececee; padding-top: 6px;
+  max-height: 320px; overflow-y: auto;
+}
+.rec-item { padding: 5px 0; font-size: 13px; line-height: 1.5; }
+.rec-item + .rec-item { border-top: 1px dashed #f2f3f5; }
+.rec-item.clickable { cursor: pointer; }
+.rec-item.clickable:hover { background: #f5f7fa; }
+.rec-who { color: #576b95; font-weight: 600; margin-right: 6px; font-size: 12.5px; }
+.rec-time { color: #b0b2b8; font-size: 11px; float: right; }
+.rec-text { color: #1f2329; }
+.rec-tag { font-size: 11px; color: #8a8a90; margin-left: 6px; }
+.rec-go { font-size: 11px; color: #576b95; margin-left: 6px; }
