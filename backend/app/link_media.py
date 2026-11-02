@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import io
+import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.parse
@@ -52,6 +54,38 @@ def normalize_url(url: str) -> str:
     return u.replace("\u200b", "").replace("\ufeff", "")
 
 
+def _validate_remote_url(url: str) -> str:
+    """拒绝本机/内网目标；链接内容来自聊天记录，不能默认可信。"""
+    u = urllib.parse.urlparse(str(url or "").strip())
+    if u.scheme not in {"http", "https"} or not u.hostname:
+        raise ValueError("只支持 http/https 链接")
+    host = u.hostname.rstrip(".").lower()
+    if host in {"localhost", "localhost.localdomain"}:
+        raise ValueError("不允许访问本机地址")
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, u.port, type=socket.SOCK_STREAM)}
+    except socket.gaierror as exc:
+        raise ValueError("链接域名无法解析") from exc
+    if any(not ipaddress.ip_address(a.split("%", 1)[0]).is_global for a in addresses):
+        raise ValueError("不允许访问内网或保留地址")
+    return u.geturl()
+
+
+def _safe_get(url: str, **kwargs):
+    """请求外部资源时逐跳校验重定向，避免短链绕过地址检查。"""
+    current = _validate_remote_url(url)
+    for _ in range(4):
+        r = requests.get(current, allow_redirects=False, **kwargs)
+        if r.status_code not in {301, 302, 303, 307, 308}:
+            return r
+        target = r.headers.get("Location")
+        r.close()
+        if not target:
+            return r
+        current = _validate_remote_url(urllib.parse.urljoin(current, target))
+    raise ValueError("链接重定向次数过多")
+
+
 def detect(url: str) -> str:
     u = normalize_url(url).lower()
     if any(k in u for k in ("xiaohongshu.com", "xhslink.com", "xhscdn.com")):
@@ -64,8 +98,8 @@ def detect(url: str) -> str:
 def resolve(url: str) -> str:
     """跟随短链（xhslink / b23.tv）到真实地址。"""
     try:
-        r = requests.get(url, headers={"User-Agent": UA_MOBILE}, timeout=HTTP_TIMEOUT,
-                         allow_redirects=True, stream=True)
+        r = _safe_get(url, headers={"User-Agent": UA_MOBILE}, timeout=HTTP_TIMEOUT,
+                      stream=True)
         final = r.url or url
         r.close()
         return final
@@ -237,7 +271,7 @@ def parse_xhs(url: str, progress=None) -> dict:
     final = resolve(url) if any(k in url.lower() for k in ("xhslink.com",)) else url
     emit("正在打开小红书笔记…")
     try:
-        r = requests.get(final, headers={"User-Agent": UA_MOBILE}, timeout=HTTP_TIMEOUT)
+        r = _safe_get(final, headers={"User-Agent": UA_MOBILE}, timeout=HTTP_TIMEOUT)
         html = r.text
     except Exception as e:
         return {"error": f"打开笔记失败：{type(e).__name__} {str(e)[:60]}"}
@@ -254,8 +288,8 @@ def parse_xhs(url: str, progress=None) -> dict:
             if tok:
                 alt += "?xsec_token=" + urllib.parse.quote(tok) + "&xsec_source=pc_share"
             try:
-                st2 = _xhs_state(requests.get(alt, headers={"User-Agent": UA_DESKTOP},
-                                              timeout=HTTP_TIMEOUT).text)
+                st2 = _xhs_state(_safe_get(alt, headers={"User-Agent": UA_DESKTOP},
+                                            timeout=HTTP_TIMEOUT).text)
                 note = _xhs_note(st2) if st2 else None
             except Exception:
                 note = None
@@ -275,9 +309,9 @@ def parse_xhs(url: str, progress=None) -> dict:
         emit("正在 OCR 图片…", total=len(imgs), done=0)
         for i, iu in enumerate(imgs, 1):
             try:
-                rb = requests.get(iu, headers={"User-Agent": UA_MOBILE,
-                                               "Referer": "https://www.xiaohongshu.com/"},
-                                  timeout=HTTP_TIMEOUT)
+                rb = _safe_get(iu, headers={"User-Agent": UA_MOBILE,
+                                             "Referer": "https://www.xiaohongshu.com/"},
+                               timeout=HTTP_TIMEOUT)
                 if rb.ok and rb.content[:4] != b"\x00\x00\x00\x00":
                     t = _ocr(rb.content).strip()
                     if t:
@@ -360,7 +394,7 @@ def parse_bili(url: str, progress=None) -> dict:
             su = subs[0].get("subtitle_url") or ""
             if su.startswith("//"):
                 su = "https:" + su
-            j = requests.get(su, headers=H, timeout=HTTP_TIMEOUT).json()
+            j = _safe_get(su, headers=H, timeout=HTTP_TIMEOUT).json()
             sub_text = "".join((b.get("content") or "") for b in (j.get("body") or []))
     except Exception:
         sub_text = ""
@@ -404,7 +438,7 @@ def _download(url: str, headers: dict) -> str | None:
     """流式下载到临时文件，超过上限中止。返回路径。"""
     import tempfile
     try:
-        with requests.get(url, headers=headers, timeout=HTTP_TIMEOUT, stream=True) as r:
+        with _safe_get(url, headers=headers, timeout=HTTP_TIMEOUT, stream=True) as r:
             if not r.ok:
                 return None
             suffix = ".mp4" if "video/mp4" in (r.headers.get("content-type") or "") else ".m4a"
@@ -448,7 +482,7 @@ def compose_text(res: dict) -> str:
 
 def parse(url: str, progress=None) -> dict:
     """解析入口：按平台分发，统一返回 {kind,title,text,parts,images,...}。"""
-    url = normalize_url(url)
+    url = _validate_remote_url(normalize_url(url))
     kind = detect(url)
     if kind == "xhs":
         res = parse_xhs(url, progress)

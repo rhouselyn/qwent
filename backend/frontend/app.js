@@ -113,9 +113,9 @@ function fmtTime(ts) {
 }
 function maskSecrets(t) {
   return String(t || "")
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-****")
-    .replace(/(ghp|gho|github_pat)_[A-Za-z0-9_]{10,}/g, "$1_****")
-    .replace(/(AKIA|ASIA)[A-Z0-9]{12,}/g, "$1****")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-****")
+    .replace(/\b(ghp|gho|github_pat)_[A-Za-z0-9_]{10,}/g, "$1_****")
+    .replace(/\b(AKIA|ASIA)[A-Z0-9]{12,}/g, "$1****")
     .replace(/((?:api[_-]?key|token|password|passwd|secret)\s*[:=]\s*)[^\s,;]{6,}/gi, "$1****");
 }
 
@@ -154,9 +154,9 @@ function mdToHtml(text) {
       .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
       .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
       .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-               (_, txt, url) => hold('<a href="' + url + '" target="_blank" rel="noopener">' + txt + "</a>"))
+               (_, txt, url) => hold('<a href="' + safeHttpUrl(url) + '" target="_blank" rel="noopener noreferrer">' + txt + "</a>"))
       .replace(/\[(\d{1,3})\]/g, '<span class="md-ref" data-ref="$1">[$1]</span>')
-      .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+      .replace(/(https?:\/\/[^\s<]+)/g, (_, url) => '<a href="' + safeHttpUrl(url) + '" target="_blank" rel="noopener noreferrer">' + url + '</a>');
     return s.replace(/\u0001K(\d+)\u0001/g, (_, i) => keep[+i]);
   };
   const out = [];
@@ -223,10 +223,20 @@ function mdToHtml(text) {
 }
 
 function esc(s) { return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function attrEsc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function safeHttpUrl(url) {
+  try {
+    const u = new URL(String(url || "").replace(/&amp;/g, "&"));
+    return (u.protocol === "http:" || u.protocol === "https:") ? attrEsc(u.href) : "#";
+  } catch { return "#"; }
+}
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 2500); }
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.detail || e.message || `${r.status} ${r.statusText}`);
+  }
   return r.json();
 }
 
@@ -240,8 +250,11 @@ function showPane(id) {
 
 /* ---------------- 会话列表 ---------------- */
 async function loadSessions() {
+  const box = $("#sessionList");
+  const scrollTop = box ? box.scrollTop : 0;
   state.sessions = await api("/api/sessions");
   renderSessions();
+  if (box) box.scrollTop = scrollTop;
 }
 function renderSessions(filter = "") {
   const box = $("#sessionList");
@@ -249,6 +262,12 @@ function renderSessions(filter = "") {
   const mkItem = (html, cls, onclick) => {
     const d = document.createElement("div");
     d.className = "session-item " + cls; d.innerHTML = html; d.onclick = onclick;
+    d.setAttribute("role", "button"); d.tabIndex = 0;
+    d.addEventListener("keydown", (e) => {
+      if ((e.key === "Enter" || e.key === " ") && e.target === d) {
+        e.preventDefault(); onclick();
+      }
+    });
     return d;
   };
   // 置顶 AI 助手
@@ -257,8 +276,12 @@ function renderSessions(filter = "") {
      <div class="info"><div class="row1"><span class="name">AI 助手<b class="badge">置顶</b></span></div>
      <div class="row2">全局问答：所有聊天记录 + 随时追问</div></div>`,
     "ai", () => openAssistant()));
-  const list = state.sessions.filter(s =>
-    !filter || s.name.toLowerCase().includes(filter.toLowerCase()) || s.username.includes(filter));
+  const needle = String(filter || "").trim().toLowerCase();
+  const list = state.sessions.filter(s => {
+    const name = String(s.name || "");
+    const username = String(s.username || "");
+    return !needle || name.toLowerCase().includes(needle) || username.toLowerCase().includes(needle);
+  });
   const pinned = list.filter(s => s.pinned);
   const rest = list.filter(s => !s.pinned);
   const add = (s) => {
@@ -336,7 +359,7 @@ async function setPin(s, pinned) {
 }
 
 /* ---------------- 打开会话 ---------------- */
-async function openChat(username, name, isGroup, sessionId) {
+async function openChat(username, name, isGroup, sessionId, options = {}) {
   state.current = { username, name, is_group: isGroup };
   state.searchMode = false;
   if (previewFile) exitPreview();
@@ -345,8 +368,10 @@ async function openChat(username, name, isGroup, sessionId) {
   $("#previewPane").style.display = "none";
   $("#msgList").style.display = "block";
   $(".composer #input").placeholder = "问 AI（Enter 发送，Shift+Enter 换行）";
-  showPane("#sessionList");
-  renderSessions($("#searchInput").value);
+  if (!options.keepListPane) {
+    showPane("#sessionList");
+    renderSessions($("#searchInput").value);
+  }
   showChatPane();
   $("#assistantPane").style.display = "none";
   $("#aiSessionsPanel").style.display = "none";
@@ -444,18 +469,26 @@ async function loadMessages(username, { initial = false, before = 0 } = {}) {
   const data = await api("/api/messages?" + qs);
   const box = $("#msgs");
   const sc = msgScroller();
-  const frag = document.createDocumentFragment();
   const oldHeight = sc ? sc.scrollHeight : 0;
-  data.messages.forEach(m => frag.appendChild(renderMsg(m)));
   if (before) {
+    const frag = document.createDocumentFragment();
+    data.messages.forEach(m => frag.appendChild(renderMsg(m)));
     box.prepend(frag);
     state.msgs[username] = [...data.messages, ...state.msgs[username]];
     // 加载更早消息时保持当前视口位置
     if (sc) sc.scrollTop = sc.scrollHeight - oldHeight;
   }
   else {
-    box.appendChild(frag);
-    state.msgs[username] = data.messages;
+    const known = new Set((state.msgs[username] || []).map(m => m.id));
+    const fresh = initial ? data.messages : data.messages.filter(m => !known.has(m.id));
+    if (fresh.length) {
+      const freshFrag = document.createDocumentFragment();
+      fresh.forEach(m => freshFrag.appendChild(renderMsg(m)));
+      box.appendChild(freshFrag);
+    }
+    state.msgs[username] = initial
+      ? data.messages
+      : [...(state.msgs[username] || []), ...fresh];
     if (initial) {
       scrollMsgsToBottom();              // 进入会话默认停在最新日期
       [80, 300, 800, 1500].forEach(ms => setTimeout(() => {
@@ -832,13 +865,16 @@ function scopeNameOf(scope) {
 
 function updateAssistantScopeUI() {
   const wrap = document.querySelector("#assistantScopeWrap");
+  const global = document.querySelector("#assistantScopeGlobal");
   if (!wrap) return;
   const scope = aiState.currentScope;
   if (!scope || scope === "assistant") {
     wrap.style.display = "none";
+    if (global) global.style.display = "inline-flex";
     return;
   }
   wrap.style.display = "inline";
+  if (global) global.style.display = "none";
   const nm = document.querySelector("#assistantScopeName");
   if (nm) nm.textContent = "（" + scopeNameOf(scope) + "）";
 }
@@ -873,6 +909,7 @@ function aiScopeForContext() {
 /* 切到某个上下文时，载入"该作用域自己的"最新会话（绝不沿用别的上下文的 session） */
 async function enterAiScope(scopeKey, name) {
   aiState.currentScope = scopeKey;
+  updateAssistantScopeUI();
   await loadAiTree();
   const g = aiState.tree.find(x => x.scope === scopeKey);
   const target = g && g.sessions.length ? g.sessions[0].id : null;
@@ -968,40 +1005,6 @@ async function jumpToRef(r) {
   updateDrawerScope();
 }
 
-/* ---------------- 助手会话 ---------------- */
-async function openAssistant(sessionId) {
-  state.current = { username: "assistant", name: "AI 助手", is_group: false };
-  state.searchMode = false;
-  showPane("#sessionList");
-  renderSessions($("#searchInput").value);
-  $("#chatEmpty").style.display = "none";
-  $("#chatMain").style.display = "flex";
-  // 三栏：中间对话 + 右侧会话列表
-  document.querySelector(".chat-column").style.display = "none";
-  $("#drawer").style.display = "none";
-  $("#aiSessionsPanel").style.display = "flex";
-  $("#assistantPane").style.display = "flex";
-  updateScopeBar();
-  aiState.currentScope = "assistant";
-  await loadAiTree();
-  const group = aiState.tree.find(g => g.scope === "assistant");
-  const target = sessionId || aiState.currentSession ||
-    (group && group.sessions[0] ? group.sessions[0].id : null);
-  aiState.currentSession = target;
-  let turns = [];
-  if (target) {
-    try { turns = (await api(`/api/ai/session/${target}`)).turns; } catch { turns = []; }
-  }
-  state.qaHistory = turns;
-  renderQA();
-  renderAiTree();
-  $("#assistantTitle").textContent = "✦ 全局助手";
-  $("#assistantMeta").textContent = `${turns.length} 轮 · 右侧可切换对话`;
-  updateAssistantScopeUI();
-  if (window.bindAssistantComposer) bindAssistantComposer();
-  const inp = $("#assistantInput"); if (inp) inp.focus();
-}
-
 /* ---------------- 全局搜索 ---------------- */
 async function globalSearch(q) {
   if (!q.trim()) { state.searchMode = false; showPane("#sessionList"); renderSessions(); return; }
@@ -1009,7 +1012,13 @@ async function globalSearch(q) {
   const box = $("#resultList");
   box.innerHTML = `<div class="qa-empty">搜索中…</div>`;
   showPane("#resultList");
-  const res = await api(`/api/search?q=${encodeURIComponent(q)}&n=40`);
+  let res;
+  try {
+    res = await api(`/api/search?q=${encodeURIComponent(q)}&n=40`);
+  } catch (e) {
+    box.innerHTML = `<div class="qa-empty">搜索失败：${esc(e.message)}</div>`;
+    return;
+  }
   box.innerHTML = "";
   if (!res.length) { box.innerHTML = `<div class="qa-empty">无结果</div>`; return; }
   box.appendChild(Object.assign(document.createElement("div"), { className: "qa-empty", textContent: `命中 ${res.length} 条（回车切换回会话列表）` }));
@@ -1050,6 +1059,7 @@ async function openAssistant(sessionId) {
   $("#assistantPane").style.display = "flex";
   updateScopeBar();
   aiState.currentScope = "assistant";
+  updateAssistantScopeUI();
   await loadAiTree();
   const group = aiState.tree.find(g => g.scope === "assistant");
   const target = sessionId || (group && group.sessions[0] ? group.sessions[0].id : null);
@@ -1061,6 +1071,9 @@ async function openAssistant(sessionId) {
   state.qaHistory = turns;
   renderQA();
   renderAiTree();
+  const mainExplore = $("#exploreToggle");
+  if ($("#assistantExploreMode")) $("#assistantExploreMode").checked = !!mainExplore?.checked;
+  if ($("#assistantFastMode")) $("#assistantFastMode").checked = !mainExplore?.checked;
   $("#assistantTitle").textContent = "✦ 全局助手";
   $("#assistantMeta").textContent = `${turns.length} 轮 · 右侧可切换对话`;
   if (window.bindAssistantComposer) bindAssistantComposer();
@@ -1090,8 +1103,8 @@ async function showContacts(q = "") {
       <div class="row2">${esc(c.username)}</div></div>`;
     d.onclick = () => {
       const s = state.sessions.find(x => x.username === c.username);
-      if (s) openChat(s.username, s.name, s.is_group);
-      else openChat(c.username, c.name, c.is_group);   // 没有聊天记录也开一个空会话
+      if (s) openChat(s.username, s.name, s.is_group, undefined, { keepListPane: true });
+      else openChat(c.username, c.name, c.is_group, undefined, { keepListPane: true });   // 没有聊天记录也开一个空会话
     };
     box.appendChild(d);
   }
@@ -1374,10 +1387,10 @@ async function refreshJobs() {
 }
 
 const SETTING_SECTIONS = [
-  { id: "model", label: "AI 模型" },
-  { id: "data", label: "数据与同步" },
-  { id: "index", label: "索引任务" },
-  { id: "about", label: "关于" },
+  { id: "model", label: "AI 模型", icon: "✦", desc: "接口与回答方式" },
+  { id: "data", label: "数据与同步", icon: "↻", desc: "实时入库与定时任务" },
+  { id: "index", label: "索引任务", icon: "⌁", desc: "搜索与媒体处理" },
+  { id: "about", label: "关于", icon: "i", desc: "状态与本地数据" },
 ];
 let settingsSection = "model";
 
@@ -1396,7 +1409,9 @@ async function showSettings(section) {
   const status = await api("/api/status").catch(() => null);
   const nav = document.querySelector("#settingsNav");
   nav.innerHTML = SETTING_SECTIONS.map(x =>
-    `<div class="sf-item ${x.id === settingsSection ? "active" : ""}" data-sec="${x.id}">${esc(x.label)}</div>`
+    `<button class="sf-item ${x.id === settingsSection ? "active" : ""}" data-sec="${x.id}" aria-current="${x.id === settingsSection ? "page" : "false"}">
+      <span class="sf-item-icon">${x.icon}</span><span class="sf-item-copy"><b>${esc(x.label)}</b><small>${esc(x.desc)}</small></span><span class="sf-arrow">›</span>
+    </button>`
   ).join("");
   nav.querySelectorAll(".sf-item").forEach(el => el.onclick = () => showSettings(el.dataset.sec));
   const body = document.querySelector("#sfBody");
@@ -1411,26 +1426,22 @@ async function showSettings(section) {
 async function renderSettingsModel(body) {
   const c = await api("/api/config");
   body.innerHTML = `
-    <h3>AI 模型</h3>
-    <div class="card">
-      <div class="form-row"><label>接口地址</label>
-        <input id="cfgBase" value="${esc(c.base_url)}"></div>
-      <div class="form-row"><label>模型名</label>
-        <input id="cfgModel" value="${esc(c.model)}"></div>
-      <div class="form-row"><label>API Key</label>
-        <input id="cfgKey" placeholder="${c.has_key ? "已配置 " + esc(c.key_masked) + "（留空则不修改）" : "sk-..."}"></div>
-      <div class="form-row"><label>深度思考</label>
-        <label class="chk"><input type="checkbox" id="cfgThinking" ${c.thinking ? "checked" : ""} style="width:auto">
-          启用推理模型</label>
-        <input id="cfgThinkingModel" value="${esc(c.thinking_model || "")}" placeholder="deepseek-reasoner" style="flex:1"></div>
-      <div class="btn-row">
-        <button id="saveCfg">保存</button>
-        <button id="testCfg" class="ghost">测试连接</button>
-        <span id="cfgMsg" class="msg"></span></div>
-      <div class="hint-sm">支持任意 OpenAI 兼容接口（DeepSeek / GLM / Kimi / 硅基流动）。Key 只存本机。</div>
-    </div>`;
+    <div class="settings-page-head"><div><span class="settings-eyebrow">AI CONFIGURATION</span><h2>AI 模型</h2><p>配置问答引擎，获得更自然、更完整的知识库回答。</p></div>
+      <span class="settings-status-pill ${c.has_key ? "success" : "warning"}">${c.has_key ? "已配置" : "待配置"}</span></div>
+    <div class="settings-grid"><section class="settings-card settings-card-primary">
+      <div class="settings-card-head"><span class="settings-card-icon">✦</span><div><h3>连接配置</h3><p>支持任意 OpenAI 兼容接口。</p></div></div>
+      <div class="settings-form">
+        <div class="settings-field"><label for="cfgBase">接口地址</label><input id="cfgBase" value="${attrEsc(c.base_url)}" placeholder="https://api.example.com/v1"><small>通常以 /v1 结尾，需包含完整协议。</small></div>
+        <div class="settings-field"><label for="cfgModel">模型名</label><input id="cfgModel" value="${attrEsc(c.model)}" placeholder="deepseek-chat"></div>
+        <div class="settings-field"><label for="cfgKey">API Key</label><input id="cfgKey" type="password" autocomplete="off" placeholder="${c.has_key ? attrEsc("已配置 " + c.key_masked + "（留空则不修改）") : "sk-..."}"><small>密钥只保存在本机，不会展示完整内容。</small></div>
+        <div class="settings-switch-card"><label class="switch-row"><input type="checkbox" id="cfgThinking" ${c.thinking ? "checked" : ""}><span class="switch-track"></span><span><b>启用深度思考</b><small>适合复杂检索、归纳和多步推理。</small></span></label>
+          <div class="settings-field nested-field"><label for="cfgThinkingModel">推理模型</label><input id="cfgThinkingModel" value="${attrEsc(c.thinking_model || "")}" placeholder="deepseek-reasoner"></div></div>
+      </div>
+      <div class="settings-actions"><button id="saveCfg">保存配置</button><button id="testCfg" class="ghost">测试连接</button><span id="cfgMsg" class="msg" aria-live="polite"></span></div>
+    </section><aside class="settings-side-card"><div class="settings-side-title">配置提示</div><p>推荐使用稳定的 OpenAI 兼容服务，接口地址和模型名需匹配。</p><ul><li>Key 仅存本机</li><li>留空 Key 可保留原配置</li><li>保存后可立即测试连通性</li></ul></aside></div>`;
   $("#saveCfg").onclick = async () => {
     const msg = $("#cfgMsg");
+    $("#saveCfg").disabled = true; $("#testCfg").disabled = true; $("#saveCfg").textContent = "保存中…";
     try {
       await api("/api/config", { method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1440,15 +1451,17 @@ async function renderSettingsModel(body) {
                                thinking_model: $("#cfgThinkingModel").value }) });
       msg.textContent = "已保存"; msg.className = "msg ok";
       setTimeout(() => showSettings("model"), 600);
-    } catch (e) { msg.textContent = "保存失败: " + e.message; msg.className = "msg err"; }
+    } catch (e) { msg.textContent = "保存失败: " + e.message; msg.className = "msg err"; $("#saveCfg").disabled = false; $("#testCfg").disabled = false; $("#saveCfg").textContent = "保存配置"; }
   };
   $("#testCfg").onclick = async () => {
     const msg = $("#cfgMsg");
+    $("#testCfg").disabled = true; $("#saveCfg").disabled = true; $("#testCfg").textContent = "测试中…";
     msg.textContent = "测试中…"; msg.className = "msg";
     try {
       const r = await api("/api/config/test", { method: "POST" });
       msg.textContent = `连接成功（${r.model}）：${r.reply}`; msg.className = "msg ok";
     } catch (e) { msg.textContent = e.message; msg.className = "msg err"; }
+    finally { $("#testCfg").disabled = false; $("#saveCfg").disabled = false; $("#testCfg").textContent = "测试连接"; }
   };
 }
 
@@ -1459,49 +1472,41 @@ async function renderSettingsData(body) {
       api("/api/status"), api("/api/sync/auto"), api("/api/sync/realtime")]);
   } catch (e) { body.innerHTML = `<div class="qa-empty">加载失败: ${esc(e.message)}</div>`; return; }
   body.innerHTML = `
-    <h3>数据与同步</h3>
-    <div class="card">
-      <b>实时同步</b>
-      <div class="form-row"><label>开关</label>
-        <label class="chk"><input type="checkbox" id="rtSync" ${rt.realtime ? "checked" : ""} style="width:auto">
-          启用（微信收到新消息即自动入库，撤回前即抓取）</label></div>
-      <div class="form-row"><label>兜底轮询</label>
-        <label class="chk" style="font-size:12px;color:#6b6b70">每
-          <input id="rtInterval" type="number" min="15" value="${rt.realtime_sec}" style="width:64px"> 秒</label></div>
-      <div class="job-state" id="rtState"></div>
-      <div class="hint-sm">触发方式：微信数据库文件一有变化立即同步（毫秒级感知），
-        长时间无变化时按间隔兜底。需要微信已登录且密钥有效。</div>
-    </div>
-    <div class="card">
-      <b>定时同步（兜底）</b>
-      <div class="form-row"><label>开关</label>
-        <label class="chk"><input type="checkbox" id="autoSync" ${a.auto ? "checked" : ""} style="width:auto">
-          每 <input id="autoInterval" type="number" min="5" value="${a.interval_min}" style="width:64px"> 分钟</label>
-        <span class="job-state">${a.last ? "上次 " + a.last : "尚未运行"}</span></div>
-    </div>
-    <div class="card">
-      <button id="syncBtn" ${s.sync.running ? "disabled" : ""}>${s.sync.running ? "同步中…" : "立即同步一次"}</button>
-      <pre>${esc(s.sync.log || "")}</pre>
-    </div>`;
+    <div class="settings-page-head"><div><span class="settings-eyebrow">DATA PIPELINE</span><h2>数据与同步</h2><p>控制消息入库节奏，确保知识库保持最新。</p></div><span class="settings-status-pill ${rt.realtime ? "success" : "neutral"}">${rt.realtime ? "实时同步中" : "实时同步已关闭"}</span></div>
+    <div class="settings-grid"><div class="settings-stack">
+      <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">↻</span><div><h3>实时同步</h3><p>发现微信数据库变化后立即入库，轮询作为兜底。</p></div></div>
+        <label class="switch-row"><input type="checkbox" id="rtSync" ${rt.realtime ? "checked" : ""}><span class="switch-track"></span><span><b>启用实时同步</b><small>需要微信已登录且密钥有效。</small></span></label>
+        <div class="inline-setting"><label for="rtInterval">兜底轮询</label><div><input id="rtInterval" type="number" min="15" value="${rt.realtime_sec}"> <span>秒</span></div></div><div class="settings-note" id="rtState"></div>
+      </section>
+      <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">◷</span><div><h3>定时同步</h3><p>定期扫描数据库，适合实时监听不可用时使用。</p></div></div>
+        <label class="switch-row"><input type="checkbox" id="autoSync" ${a.auto ? "checked" : ""}><span class="switch-track"></span><span><b>启用定时同步</b><small>每 <input class="inline-number" id="autoInterval" type="number" min="5" value="${a.interval_min}"> 分钟执行一次。</small></span></label><div class="settings-note">${a.last ? "上次运行：" + esc(a.last) : "尚未运行"}</div>
+      </section>
+      <section class="settings-card settings-action-card"><div><h3>手动同步</h3><p>立即扫描一次，适合刚登录微信或需要立刻更新时使用。</p></div><button id="syncBtn" ${s.sync.running ? "disabled" : ""}>${s.sync.running ? "同步中…" : "立即同步一次"}</button><pre>${esc(s.sync.log || "")}</pre></section>
+    </div><aside class="settings-side-card"><div class="settings-side-title">同步说明</div><p>实时同步优先处理新消息；历史图片、语音和链接解析可在“索引任务”中补跑。</p><div class="settings-mini-stat"><span>当前状态</span><b>${s.sync.running ? "正在同步" : "空闲"}</b></div></aside></div>`;
   const saveSync = async () => {
-    await api("/api/sync/realtime", { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ realtime: $("#rtSync").checked,
-                             realtime_sec: +$("#rtInterval").value || 60 }) });
-    await api("/api/sync/auto", { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auto: $("#autoSync").checked,
-                             interval_min: +$("#autoInterval").value || 30 }) });
-    toast("同步设置已保存");
-    setTimeout(() => showSettings("data"), 600);
+    const controls = [$("#rtSync"), $("#rtInterval"), $("#autoSync"), $("#autoInterval")];
+    controls.forEach(x => x.disabled = true);
+    try {
+      await api("/api/sync/realtime", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ realtime: $("#rtSync").checked,
+                               realtime_sec: +$("#rtInterval").value || 60 }) });
+      await api("/api/sync/auto", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto: $("#autoSync").checked,
+                               interval_min: +$("#autoInterval").value || 30 }) });
+      toast("同步设置已保存");
+      setTimeout(() => showSettings("data"), 600);
+    } catch (e) { toast("同步设置保存失败：" + e.message); controls.forEach(x => x.disabled = false); }
   };
   $("#rtSync").onchange = saveSync;
   $("#rtInterval").onchange = saveSync;
   $("#autoSync").onchange = saveSync;
   $("#autoInterval").onchange = saveSync;
   $("#syncBtn").onclick = async () => {
-    await api("/api/sync", { method: "POST" });
-    toast("同步已启动"); setTimeout(() => showSettings("data"), 1500);
+    const b = $("#syncBtn"); b.disabled = true; b.textContent = "同步中…";
+    try { await api("/api/sync", { method: "POST" }); toast("同步已启动"); setTimeout(() => showSettings("data"), 1500); }
+    catch (e) { toast("同步失败：" + e.message); b.disabled = false; b.textContent = "立即同步一次"; }
   };
   const rtState = $("#rtState");
   rtState.textContent = rt.last ? `最近：${rt.last} · 新增 ${rt.added} 条` +
@@ -1514,67 +1519,49 @@ async function renderSettingsIndex(body) {
   const j = await api("/api/jobs");
   const row = (key, label, state, canStart) => `
     <div class="job-row">
-      <span class="label">${label}</span>
+      <span class="job-icon">${key === "vectors" ? "⌁" : key === "ocr" ? "▧" : key === "asr" ? "◖" : "↗"}</span><span class="job-copy"><b>${label}</b><small>${key === "vectors" ? "提升语义检索效果" : "处理历史存量内容"}</small></span>
       <span class="job-state ${state.running ? "running" : ""}">
         ${state.running ? "进行中 " + (state.count || "") : (state.done !== undefined ? state.done + (state.total ? "/" + state.total : "") : "")}</span>
       <span><button class="mini" data-job="${key}" ${state.running || !canStart ? "disabled" : ""}>开始</button>
       <button class="mini ghost" data-stop="${key}" ${state.running ? "" : "disabled"}>停止</button></span>
     </div>`;
   body.innerHTML = `
-    <h3>索引任务</h3>
-    <div class="card"><div class="jobs" id="jobsBox">
+    <div class="settings-page-head"><div><span class="settings-eyebrow">INDEX & MEDIA</span><h2>索引任务</h2><p>补跑历史内容，让搜索、OCR 和语音转写更完整。</p></div><span class="settings-status-pill info">可断点续跑</span></div>
+    <div class="settings-grid"><div class="settings-stack"><section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">⌁</span><div><h3>历史处理任务</h3><p>建议一次只运行一个任务，避免占用过多资源。</p></div></div><div class="jobs" id="jobsBox">
       ${row("vectors", "向量索引（语义检索）", j.vector, j.vector.model)}
       ${row("ocr", "图片 OCR（历史图片）", j.ocr, true)}
       ${row("asr", "语音转写（历史语音）", j.asr, true)}
       ${row("links", "公众号正文（历史链接）", j.links, true)}
       ${row("files", "文件正文（历史文件）", j.files, true)}
       ${row("snsocr", "朋友圈 OCR", j.snsocr, true)}
-    </div></div>
-    <div class="card">
-      <div class="hint-sm">新消息的图片/语音/朋友圈链接会在实时同步时自动处理，无需手动；
-        这里的任务用于补跑历史存量，均可断点续跑。建议一次只跑一个。</div>
-    </div>
-    <div class="card">
-      <h3>补漏重扫</h3>
-      <div class="hint-sm">怀疑有消息没显示出来时用：按时间窗重新扫描全部消息库补导入
-        （幂等，不会重复），并顺带补该窗口内的图片/语音解析。</div>
-      <div style="display:flex; gap:8px; margin-top:8px">
+    </div></section><section class="settings-card settings-advanced"><div class="settings-card-head"><span class="settings-card-icon">↺</span><div><h3>补漏重扫</h3><p>按时间窗重新扫描，幂等执行，不会重复导入。</p></div></div><div class="rescan-actions">
         <button class="mini" data-rescan="1">最近 24 小时</button>
         <button class="mini" data-rescan="7">最近 7 天</button>
         <button class="mini" data-rescan="30">最近 30 天</button>
-      </div>
-    </div>`;
+      </div></section></div><aside class="settings-side-card"><div class="settings-side-title">自动处理</div><p>新消息的图片、语音和朋友圈链接会在实时同步时自动处理。</p><ul><li>向量索引用于语义检索</li><li>OCR 处理图片文字</li><li>ASR 转写历史语音</li></ul></aside></div>`;
   body.querySelectorAll("[data-job]").forEach(b => b.onclick = async () => {
-    await api(`/api/jobs/${b.dataset.job}/start`, { method: "POST",
-      headers: { "Content-Type": "application/json" }, body: "{}" });
-    toast("任务已启动"); setTimeout(() => showSettings("index"), 1500);
+    b.disabled = true; b.textContent = "启动中…";
+    try { await api(`/api/jobs/${b.dataset.job}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); toast("任务已启动"); setTimeout(() => showSettings("index"), 1500); }
+    catch (e) { toast("启动失败：" + e.message); b.disabled = false; b.textContent = "开始"; }
   });
   body.querySelectorAll("[data-stop]").forEach(b => b.onclick = async () => {
-    await api(`/api/jobs/${b.dataset.job}/stop`, { method: "POST" });
-    setTimeout(() => showSettings("index"), 800);
+    try { await api(`/api/jobs/${b.dataset.job}/stop`, { method: "POST" }); setTimeout(() => showSettings("index"), 800); } catch (e) { toast("停止失败：" + e.message); }
   });
   body.querySelectorAll("[data-rescan]").forEach(b => b.onclick = async () => {
-    await api("/api/jobs/rescan/start", { method: "POST",
+    b.disabled = true;
+    try { await api("/api/jobs/rescan/start", { method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ days: +b.dataset.rescan }) });
     toast(`已开始重扫最近 ${b.dataset.rescan} 天`);
-    setTimeout(() => showSettings("index"), 1200);
+    setTimeout(() => showSettings("index"), 1200); } catch (e) { toast("重扫失败：" + e.message); b.disabled = false; }
   });
 }
 
 function renderSettingsAbout(body, status) {
+  status = status || {};
   body.innerHTML = `
-    <h3>关于</h3>
-    <div class="card">
-      <div><span class="k">知识库</span>${status.messages.toLocaleString()} 条消息 ·
-        ${status.chats} 个会话 · ${status.contacts} 个联系人</div>
-      <div style="margin-top:6px"><span class="k">问答模式</span>${status.llm === "configured"
-        ? "AI 生成（" + esc(status.llm_model) + "）" : "检索模式（未配置 Key）"}</div>
-      <div style="margin-top:6px"><span class="k">数据库密钥</span>fp=${status.key_fp}
-        （密钥账号级稳定，服务会定期 HMAC 实测；失效时自动扫运行中微信内存重取，免退出微信）</div>
-      <div style="margin-top:6px"><span class="k">数据位置</span>data/knowledge.db 与
-        data/decrypted（全部在本机）</div>
-    </div>`;
+    <div class="settings-page-head"><div><span class="settings-eyebrow">LOCAL KNOWLEDGE BASE</span><h2>关于</h2><p>查看当前知识库规模、运行模式与本地数据说明。</p></div><span class="settings-status-pill success">运行正常</span></div>
+    <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">i</span><div><h3>知识库概览</h3><p>所有数据均保存在当前设备。</p></div></div><div class="settings-stats"><div class="settings-stat"><b>${(status.messages || 0).toLocaleString()}</b><span>条消息</span></div><div class="settings-stat"><b>${(status.chats || 0).toLocaleString()}</b><span>个会话</span></div><div class="settings-stat"><b>${(status.contacts || 0).toLocaleString()}</b><span>个联系人</span></div></div><div class="settings-info-list"><div><span>问答模式</span><b>${status.llm === "configured" ? "AI 生成 · " + esc(status.llm_model || "") : "检索模式（未配置 Key）"}</b></div><div><span>数据库密钥</span><b>fp=${esc(status.key_fp || "未读取")}</b></div><div><span>数据位置</span><b>data/knowledge.db 与 data/decrypted</b></div></div></section><div class="settings-privacy"><b>隐私说明</b><span>微信数据、API Key 与解密文件均只保存在本机。</span></div>`;
 }
 
 
@@ -1885,12 +1872,21 @@ $("#drawerFab").onclick = () => {
   d.style.display = hidden ? "flex" : "none";
 };
 $("#scopeToggle").onchange = updateDrawerScope;
-$("#sendBtn").onclick = () => { const v = $("#input").value; $("#input").value = ""; ask(v); };
+$("#fastMode").onchange = () => { $("#exploreToggle").checked = false; };
+$("#exploreMode").onchange = () => { $("#exploreToggle").checked = true; };
+function submitQuestion(input) {
+  const v = input && input.value.trim();
+  if (!v) return;
+  if (typeof streamState !== "undefined" && streamState.busy) { toast("上一条还在回答中，请稍候"); return; }
+  input.value = "";
+  ask(v);
+}
+$("#sendBtn").onclick = () => submitQuestion($("#input"));
 // ＋新会话：在当前上下文（群/私聊/文件/链接/全局助手）新建一个 AI 会话
-// （此前只绑定在未被加载的 ai_sessions.js 里，按钮一直是死的）
+// 主脚本统一绑定，避免按需视图切换时出现死按钮。
 $("#newSessionBtn").onclick = () => newAiSession();
 $("#input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const v = $("#input").value; $("#input").value = ""; ask(v); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitQuestion($("#input")); }
 });
 $("#loadMore").onclick = () => {
   if (state.current && state.msgs[state.current.username]?.length)
@@ -1904,11 +1900,14 @@ function startAutoRefresh() {
   _autoRefreshTimer = setInterval(async () => {
     // 刷新会话列表（不打断当前聊天）
     if (state.view === "chats" && !state.searchMode) {
-      const old = state.sessions;
-      await loadSessions();
-      // 如果正在看某个聊天，静默加载新消息
-      if (state.current && state.current.username) {
-        await loadMessages(state.current.username, { initial: false });
+      try {
+        await loadSessions();
+        // SSE 负责实时消息；这里仅做一次去重后的兜底同步。
+        if (state.current && state.current.username && !isAssistant()) {
+          await loadMessages(state.current.username, { initial: false });
+        }
+      } catch (e) {
+        console.warn("自动刷新失败", e);
       }
     }
   }, 30000);
@@ -1934,16 +1933,20 @@ function startAutoRefresh() {
 function bindAssistantComposer() {
   const go = () => {
     const el = document.querySelector("#assistantInput");
-    const v = el.value;
-    if (!v.trim()) return;
-    el.value = "";
     $("#thinkToggle") && ($("#thinkToggle").checked = document.querySelector("#assistantThink").checked);
-    ask(v);
+    $("#exploreToggle") && ($("#exploreToggle").checked = document.querySelector("#assistantExploreMode").checked);
+    submitQuestion(el);
   };
   document.querySelector("#assistantSend").onclick = go;
-  document.querySelector("#assistantInput").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go(); }
-  });
+  const input = document.querySelector("#assistantInput");
+  if (!input.dataset.bound) {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go(); }
+    });
+    input.dataset.bound = "1";
+  }
+  $("#assistantFastMode").onchange = () => { $("#exploreToggle").checked = false; };
+  $("#assistantExploreMode").onchange = () => { $("#exploreToggle").checked = true; };
   document.querySelector("#assistantNew").onclick = () => newAiSession();
-  document.querySelector("#assistantInput").focus();
+  input.focus();
 }

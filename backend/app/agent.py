@@ -330,12 +330,13 @@ def t_overview(args):
         pass
     top = con.execute("""SELECT chat_user, COUNT(*) c FROM message GROUP BY chat_user
                          ORDER BY c DESC LIMIT 5""").fetchall()
+    top_chats = [{"chat_name": _chat_name(con, r[0]), "count": r[1]}
+                 for r in top]
     con.close()
     return {"groups": groups, "private_chats": privates, "friends": friends,
             "messages": msgs, "files": files,
             "range": {"from": _fmt(lo), "to": _fmt(hi)},
-            "top_chats": [{"chat_name": _chat_name(_db(), r[0]), "count": r[1]}
-                          for r in top]}
+            "top_chats": top_chats}
 
 
 def t_chat_stats(args):
@@ -354,11 +355,13 @@ def t_chat_stats(args):
     top = con.execute(f"""SELECT sender, is_sender, COUNT(*) c FROM message
         WHERE {where} AND is_sender=0 GROUP BY sender ORDER BY c DESC LIMIT 8""",
         params).fetchall()
+    top_senders = [{"who": _sender(con, chat, r[0], r[1]), "count": r[2]}
+                   for r in top]
+    name = _chat_name(con, chat)
     con.close()
-    return {"chat": chat, "chat_name": _chat_name(con, chat) if False else chat,
+    return {"chat": chat, "chat_name": name,
             "total": total[0], "from": _fmt(total[1]), "to": _fmt(total[2]),
-            "top_senders": [{"who": _sender(_db(), chat, r[0], r[1]), "count": r[2]}
-                            for r in top]}
+            "top_senders": top_senders}
 
 
 def _read_link_blocking(url: str, wait: int = 60, max_chars: int = 12000) -> dict:
@@ -787,8 +790,9 @@ def t_recent_messages(args):
                            "ORDER BY ts DESC LIMIT ?", (chat, limit)).fetchall()
     rows = list(reversed(rows))
     data = [_msg_brief(con, r) for r in rows]
+    name = _chat_name(con, chat) if data else chat
     con.close()
-    return {"chat": chat, "chat_name": _chat_name(_db(), chat) if data else chat,
+    return {"chat": chat, "chat_name": name,
             "hours": hours, "messages": data, "count": len(data)}
 
 
@@ -1056,8 +1060,14 @@ def _pick_model(conf):
 def friendly_err(exc) -> str:
     """把模型接口的原始报错转成用户能看懂、知道该干嘛的提示。"""
     s = str(exc).replace("urlopen error ", "").replace("<", "").replace(">", "")
-    return ("模型接口连不上：" + s[:120] +
-            " —— 多半是本机代理节点掉了（已自动重试仍失败），换个节点或稍后再问")
+    low = s.lower()
+    if "401" in low or "403" in low or "unauthorized" in low:
+        return "模型接口拒绝访问：请检查 API Key 和模型权限。"
+    if "429" in low or "rate limit" in low:
+        return "模型接口限流：请稍等片刻后重试，或降低提问频率。"
+    if "timed out" in low or "timeout" in low:
+        return "模型接口响应超时：可稍后重试，复杂问题也可关闭探索模式。"
+    return "模型接口调用失败：" + s[:160]
 
 
 def _call_llm(conf, messages, tools):
@@ -1092,16 +1102,17 @@ def _stream_llm(conf, messages, tools=None):
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    req = urllib.request.Request(
-        llm["base_url"].rstrip("/") + "/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {llm['api_key']}",
-                 "Accept": "text/event-stream"})
     full = []
     last_err = None
     for attempt in range(4):        # 1/2/4 秒退避：网络抖一下能扛过去，节点挂了也不会秒失败
         try:
+            # 每次重试都新建 Request，避免复用已被底层读取过的请求对象。
+            req = urllib.request.Request(
+                llm["base_url"].rstrip("/") + "/chat/completions",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {llm['api_key']}",
+                         "Accept": "text/event-stream"})
             with urllib.request.urlopen(req, timeout=180) as resp:
                 for raw in resp:
                     line = raw.decode("utf-8", "ignore").strip()
@@ -1274,8 +1285,7 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
                            "chat": item.get("chat", ""),
                            "local_id": item.get("local_id", 0),
                            "ts": item.get("ts", 0),
-                           "chat_name": item.get("chat_name")
-                                        or _chat_name(_db(), item.get("chat", "")),
+                            "chat_name": item.get("chat_name") or item.get("chat", ""),
                            "title": title, "size": item.get("size", 0),
                            "snippet": title[:160]}
                     seen_msgs[fkey] = ent

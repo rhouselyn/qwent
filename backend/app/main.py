@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import os
 import re
 import queue
+import socket
 import sqlite3
 import sys
 import threading
@@ -1612,17 +1614,30 @@ def locate_file(chat: str, local_id: int, ts: int, name: str) -> Path | None:
         return None
     t = datetime.fromtimestamp(ts or 0)
     months = [(t + timedelta(days=d)).strftime("%Y-%m") for d in (0, -1, 1)]
-    safe = name.replace("/", "_")
+    # 文件名来自 URL 参数，Windows 下的反斜杠同样会被 Path 当作目录分隔符。
+    # 保留历史上的斜杠转下划线行为，同时彻底消除目录分隔符。
+    safe = str(name or "").replace("/", "_").replace("\\", "_")
+    if not safe or safe in {".", ".."}:
+        return None
+    root = fdir.resolve()
+
+    def is_inside(path: Path) -> bool:
+        try:
+            path.resolve().relative_to(root)
+            return path.is_file()
+        except (OSError, ValueError):
+            return False
+
     cands: list[Path] = []
     for mth in months:
         p = fdir / mth / safe
-        if p.exists():
+        if is_inside(p):
             cands.append(p)
     if not cands:      # 兜底：全目录按文件名搜索（只扫有该月的少量目录）
         for sub in sorted(fdir.iterdir(), reverse=True)[:36]:
             if sub.is_dir():
                 p = sub / safe
-                if p.exists():
+                if is_inside(p):
                     cands.append(p)
                     break
     if not cands:
@@ -1803,7 +1818,7 @@ def api_file_meta(chat: str, local_id: int, ts: int, name: str):
     p = locate_file(chat, local_id, ts, name)
     if not p:
         return {"found": False, "name": name, "msg_id": msg_id}
-    return {"found": True, "name": p.name, "path": str(p),
+    return {"found": True, "name": p.name,
             "size": p.stat().st_size, "ext": p.suffix.lower(), "msg_id": msg_id,
             "previewable": p.suffix.lower() in FILE_EXTS_TEXT | {".pdf"} |
                            {".png", ".jpg", ".jpeg", ".gif", ".webp"}}
@@ -1833,6 +1848,44 @@ def api_file_text(chat: str, local_id: int, ts: int, name: str, limit: int = 200
     if not text:
         raise HTTPException(404, "文件不在本地（可能已被清理或未下载）")
     return {"name": fname, "text": text[:limit]}
+
+
+def _validate_external_url(url: str) -> str:
+    """校验外部抓取地址，拒绝本机/内网目标，避免链接代理成为 SSRF。"""
+    u = urllib.parse.urlparse(str(url or "").strip())
+    if u.scheme not in {"http", "https"} or not u.hostname:
+        raise HTTPException(400, "只支持 http/https 链接")
+    host = u.hostname.rstrip(".").lower()
+    if host in {"localhost", "localhost.localdomain"}:
+        raise HTTPException(400, "不允许访问本机地址")
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, u.port, type=socket.SOCK_STREAM)}
+    except socket.gaierror:
+        raise HTTPException(400, "链接域名无法解析")
+    for addr in addresses:
+        try:
+            ip = ipaddress.ip_address(addr.split("%", 1)[0])
+        except ValueError:
+            continue
+        if not ip.is_global:
+            raise HTTPException(400, "不允许访问内网或保留地址")
+    return u.geturl()
+
+
+def _safe_external_get(url: str, **kwargs):
+    """带有限重定向的外部请求；每一跳都重新校验目标地址。"""
+    import requests
+    current = _validate_external_url(url)
+    for _ in range(4):
+        resp = requests.get(current, allow_redirects=False, **kwargs)
+        if resp.status_code not in {301, 302, 303, 307, 308}:
+            return resp
+        target = resp.headers.get("Location")
+        resp.close()
+        if not target:
+            return resp
+        current = _validate_external_url(urllib.parse.urljoin(current, target))
+    raise HTTPException(400, "链接重定向次数过多")
 
 
 # ---------------------------------------------------------------- API: 媒体
@@ -2962,9 +3015,10 @@ def fetch_platform_link(url: str, force: bool = False) -> dict:
 
 def fetch_article(url: str, force: bool = False) -> dict:
     """抓取公众号/网页正文（带缓存）。小红书/B站走深度解析（OCR/字幕/ASR）。"""
-    import requests
     from bs4 import BeautifulSoup
     # 统一 URL 形式：消息里是 &amp;，与缓存键必须一致，否则"解析过却查不到"
+    # 入口也做校验：该函数既被 HTTP API 调用，也会被 Agent/后台链接线程直接调用。
+    url = _validate_external_url(url)
     try:
         from link_media import detect, normalize_url
         url = normalize_url(url)
@@ -2981,7 +3035,7 @@ def fetch_article(url: str, force: bool = False) -> dict:
             return {"url": url, "title": r[0] or "", "text": r[1],
                     "chars": len(r[1]), "cached": True}
     try:
-        resp = requests.get(url, timeout=20, headers={
+        resp = _safe_external_get(url, timeout=20, headers={
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36")})
         # 编码：优先页面声明的 charset，其次响应头，最后 utf-8
@@ -3106,11 +3160,8 @@ def api_link_job(url: str):
 @app.get("/api/link/img")
 def api_link_img(u: str):
     """图片代理：避免防盗链/混合内容，统一转 https 并带 Referer。"""
-    import requests as _rq
     from fastapi.responses import Response
-    u = (u or "").strip()
-    if not u.lower().startswith("http"):
-        raise HTTPException(400, "bad url")
+    u = _validate_external_url(u)
     host = urllib.parse.urlparse(u).netloc
     ref = "https://www.bilibili.com/" if "bili" in host or "hdslb" in host else \
           ("https://www.xiaohongshu.com/" if "xhscdn" in host else "https://" + host + "/")
@@ -3118,11 +3169,17 @@ def api_link_img(u: str):
                               "AppleWebKit/537.36 Chrome/120 Safari/537.36"),
                "Referer": ref}
     try:
-        r = _rq.get(u, headers=headers, timeout=20)
-        if not r.ok:
-            raise HTTPException(502, f"图片 {r.status_code}")
-        return Response(content=r.content, media_type=r.headers.get("content-type", "image/jpeg"),
-                        headers={"Cache-Control": "max-age=86400"})
+        with _safe_external_get(u, headers=headers, timeout=20, stream=True) as r:
+            if not r.ok:
+                raise HTTPException(502, f"图片 {r.status_code}")
+            content_type = (r.headers.get("content-type") or "").split(";", 1)[0].lower()
+            if content_type and not content_type.startswith("image/"):
+                raise HTTPException(400, "目标不是图片")
+            content = r.raw.read(12 * 1024 * 1024 + 1)
+            if len(content) > 12 * 1024 * 1024:
+                raise HTTPException(413, "图片过大")
+            return Response(content=content, media_type=content_type or "image/jpeg",
+                            headers={"Cache-Control": "max-age=86400"})
     except HTTPException:
         raise
     except Exception as e:

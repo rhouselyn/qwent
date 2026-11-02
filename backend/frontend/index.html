@@ -2,28 +2,30 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#07c160">
 <title>微信知识助手</title>
-<link rel="stylesheet" href="style.css?v=38">
+<link rel="stylesheet" href="style.css?v=39">
 </head>
 <body>
 <div class="app">
   <!-- 左侧功能栏 -->
-  <nav class="rail">
-    <div class="avatar">微</div>
-    <button class="rail-btn active" data-view="chats" title="聊天">💬</button>
-    <button class="rail-btn" data-view="contacts" title="通讯录">👥</button>
-    <button class="rail-btn" data-view="files" title="文件">📁</button>
-    <button class="rail-btn" data-view="links" title="链接 / 公众号">📰</button>
-    <button class="rail-btn" data-view="moments" title="朋友圈">🌄</button>
+  <nav class="rail" aria-label="主导航">
+    <div class="avatar" aria-label="微信知识助手">微</div>
+    <button class="rail-btn active" data-view="chats" title="聊天" aria-label="聊天">💬</button>
+    <button class="rail-btn" data-view="contacts" title="通讯录" aria-label="通讯录">👥</button>
+    <button class="rail-btn" data-view="files" title="文件" aria-label="文件">📁</button>
+    <button class="rail-btn" data-view="links" title="链接 / 公众号" aria-label="链接 / 公众号">📰</button>
+    <button class="rail-btn" data-view="moments" title="朋友圈" aria-label="朋友圈">🌄</button>
     <div class="rail-spacer"></div>
-    <button class="rail-btn" data-view="settings" title="设置">⚙️</button>
+    <button class="rail-btn" data-view="settings" title="设置" aria-label="设置">⚙️</button>
   </nav>
 
   <!-- 中栏列表 -->
-  <section class="list-pane">
+  <section class="list-pane" aria-label="导航列表">
     <div class="searchbar">
-      <input id="searchInput" placeholder="搜索会话 / 全局搜消息（回车）">
+      <label class="sr-only" for="searchInput">搜索会话或消息</label>
+      <input id="searchInput" type="search" autocomplete="off" placeholder="搜索会话 / 全局搜消息（回车）">
     </div>
     <div id="sessionList" class="session-list"></div>
     <div id="resultList" class="session-list" style="display:none"></div>
@@ -37,7 +39,7 @@
   </section>
 
   <!-- 右区：聊天列 + AI 结果列 -->
-  <section class="chat-pane">
+  <main class="chat-pane">
     <div id="chatEmpty" class="chat-empty">
       <div class="logo-big">微</div>
       <h2>微信知识助手</h2>
@@ -67,11 +69,13 @@
         </div>
         <footer class="composer-wrap">
           <div id="scopeBar" class="scope-bar" style="display:none">
+            <span class="scope-caption">回答范围</span>
             <label class="scope-toggle" id="scopeToggleWrap"
                    title="勾选：只在当前会话/文件内检索提问；取消勾选：全局检索">
               <input type="checkbox" id="scopeToggle" checked>
               <span id="scopeLabel">仅在当前会话内提问</span>
             </label>
+            <span class="scope-help">关闭后将搜索全部聊天记录</span>
           </div>
           <div id="quoteBar" class="quote-bar" style="display:none">
             <div class="quote-bar-body">
@@ -80,18 +84,30 @@
             </div>
             <span id="quoteClear" class="quote-clear" title="取消引用">✕</span>
           </div>
-          <div class="explore-bar">
-            <label class="explore-toggle" title="探索模式：跳过快速回答，直接多轮深度检索；工具调用步数翻倍（会话内 8 步 / 全局 12 步），适合统计、枚举、跨时段排查">
-              <input type="checkbox" id="exploreToggle"> 🔎 探索模式
-            </label>
+          <div class="composer-toolbar">
+            <div class="composer-mode">
+            <span class="composer-section-label">提问方式</span>
+            <div class="mode-segment" role="radiogroup" aria-label="提问方式">
+              <label title="先检索重点内容并快速给出结论"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速回答</span><small>先给结论</small></label>
+              <label title="进行更多轮检索，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span><small>多轮检索</small></label>
+            </div>
+            </div>
+            <div class="composer-toolbar-actions">
+              <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
+                <input type="checkbox" id="thinkToggle"><span>🧠 深度思考</span>
+              </label>
+              <button id="newSessionBtn" class="ghost-btn" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
+            </div>
+            <input type="checkbox" id="exploreToggle" class="mode-state" aria-hidden="true" tabindex="-1">
           </div>
           <div class="composer">
-            <textarea id="input" rows="1" placeholder="问 AI（Enter 发送，Shift+Enter 换行；可在消息上点「引用」）"></textarea>
-            <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
-              <input type="checkbox" id="thinkToggle"> 🧠
-            </label>
-            <button id="newSessionBtn" class="ghost-btn" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
-            <button id="sendBtn">发送</button>
+            <div class="input-shell">
+              <textarea id="input" rows="1" placeholder="输入你想查询的问题…"></textarea>
+              <span class="input-tip">Enter 发送 · Shift+Enter 换行 · 消息可引用</span>
+            </div>
+            <div class="composer-actions">
+              <button id="sendBtn">发送</button>
+            </div>
           </div>
         </footer>
       </div>
@@ -103,24 +119,44 @@
         <div class="sf-body" id="sfBody"></div>
       </div>
       <aside id="assistantPane" class="assistant-pane" style="display:none">
-        <div class="drawer-head">
-          <span id="assistantTitle">✦ 全局助手</span>
-          <span class="drawer-scope" id="assistantScopeWrap" style="display:none">
-            <label class="scope-toggle" title="勾选后只在这个会话里检索">
-              <input type="checkbox" id="assistantScopeToggle" checked> 仅本会话
-              <b id="assistantScopeName"></b>
-            </label>
-          </span>
+        <div class="drawer-head assistant-head">
+          <div class="assistant-heading"><span class="assistant-mark">✦</span><div><b id="assistantTitle">AI 助手</b><small>统一检索聊天记录，帮你归纳和追问</small></div></div>
           <span id="assistantMeta" class="drawer-scope"></span>
         </div>
         <div id="assistantConv" class="qa-list"></div>
-        <footer class="composer">
-          <textarea id="assistantInput" rows="1" placeholder="问 AI（全局检索全部聊天记录，Enter 发送）"></textarea>
-          <label class="think-toggle" title="深度思考">
-            <input type="checkbox" id="assistantThink"> 🧠
-          </label>
-          <button id="assistantNew" class="ghost-btn">＋ 新会话</button>
-          <button id="assistantSend">发送</button>
+        <footer class="composer-wrap assistant-composer-wrap">
+          <div class="scope-bar assistant-scope-bar">
+            <span class="scope-caption">回答范围</span>
+            <span id="assistantScopeGlobal" class="assistant-scope-pill">全部聊天记录</span>
+            <label class="scope-toggle" id="assistantScopeWrap" title="勾选后只在这个会话里检索">
+              <input type="checkbox" id="assistantScopeToggle" checked><span>仅本会话</span><b id="assistantScopeName"></b>
+            </label>
+            <span class="scope-help">可随时切换范围</span>
+          </div>
+          <div class="composer-toolbar assistant-toolbar">
+            <div class="composer-mode">
+            <span class="composer-section-label">提问方式</span>
+            <div class="mode-segment" role="radiogroup" aria-label="AI 助手提问方式">
+              <label title="先检索重点内容并快速给出结论"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速回答</span><small>先给结论</small></label>
+              <label title="进行更多轮检索，适合统计、枚举和跨时段排查"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span><small>多轮检索</small></label>
+            </div>
+            </div>
+            <div class="composer-toolbar-actions">
+              <label class="think-toggle" title="深度思考（推理模型，复杂问题更准）">
+                <input type="checkbox" id="assistantThink"><span>🧠 深度思考</span>
+              </label>
+              <button id="assistantNew" class="ghost-btn">＋ 新会话</button>
+            </div>
+          </div>
+          <div class="composer assistant-composer">
+            <div class="input-shell">
+              <textarea id="assistantInput" rows="1" placeholder="输入想了解的问题…"></textarea>
+              <span class="input-tip">Enter 发送 · Shift+Enter 换行</span>
+            </div>
+            <div class="composer-actions">
+              <button id="assistantSend">发送</button>
+            </div>
+          </div>
         </footer>
       </aside>
       <aside id="aiSessionsPanel" class="ai-sessions-panel" style="display:none">
@@ -138,10 +174,10 @@
         <div id="qaList" class="qa-list"></div>
       </aside>
     </div>
-  </section>
+  </main>
 </div>
 <div id="toast" class="toast"></div>
-<script src="app.js?v=74"></script>
+<script src="app.js?v=75"></script>
 <script src="stream_qa.js?v=17"></script>
 </body>
 </html>
