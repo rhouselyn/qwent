@@ -132,7 +132,7 @@ python backend/scripts/setup.py --index-url https://pypi.tuna.tsinghua.edu.cn/si
 </details>
 
 > [!NOTE]
-> macOS 支持为实验性：解密、导入、检索、朋友圈等核心逻辑可运行，但需要一次性手动导入 64 位 hex 密钥，且暂不支持内存扫钥。详见 [项目文档](项目文档.md)。
+> macOS 支持为实验性：解密、导入、检索、朋友圈等核心逻辑可运行，但需要一次性手动导入 64 位 hex 密钥，且暂不支持内存扫钥。
 
 ### 配置
 

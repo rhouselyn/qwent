@@ -199,7 +199,7 @@ def _ensure_key() -> bool:
     print("  正在启动微信并捕获密钥,微信窗口会自动弹出,请勿操作 ...")
     if _chattrace(["keyagent", "run", "--account-dir",
                    str(_account()[0]), "--store"]).returncode != 0:
-        _mark(False, "密钥捕获失败 — 请按项目文档.md 手动执行 ChatTrace keyagent")
+        _mark(False, "密钥捕获失败 — 请手动执行 ChatTrace keyagent")
         return False
     return True
 

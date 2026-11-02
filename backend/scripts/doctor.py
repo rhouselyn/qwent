@@ -69,7 +69,7 @@ def main() -> int:
         results.append(check("微信账号目录已定位", True,
                              note=f"{ACCOUNT_DIR}"))
         results.append(check("解密输出目录(ChatTrace)存在", DECRYPTED_DIR.is_dir(),
-                             "python backend/scripts/m0_decrypt.py(需先抓密钥,见项目文档)",
+                             "python backend/scripts/m0_decrypt.py(需先抓密钥)",
                              str(DECRYPTED_DIR)))
     except SystemExit as e:
         results.append(check("微信账号目录已定位", False,
