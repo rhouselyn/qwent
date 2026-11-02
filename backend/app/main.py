@@ -723,22 +723,30 @@ def api_search(q: str, chat: str = "", n: int = 30):
 
 @app.get("/api/contacts")
 def api_contacts(q: str = "", limit: int = 3000):
-    """通讯录：只用有真实名字的联系人，按拼音首字母分组排序。"""
+    """通讯录：只用有真实名字的联系人，按拼音首字母分组排序。
+
+    搜索同时匹配备注/昵称/别名/微信号，以及微信自带的拼音全拼与首字母
+    （输入 wangzixin 或 wzx 也能找到人）。
+    """
     con = db()
+    like = f"%{q}%"
     rows = con.execute("""
         SELECT c.username,
-               TRIM(COALESCE(NULLIF(TRIM(c.remark),''), NULLIF(TRIM(c.nick_name),''), '')) AS name,
+               TRIM(COALESCE(NULLIF(TRIM(c.remark),''), NULLIF(TRIM(c.nick_name),''),
+                             NULLIF(TRIM(c.alias),''), '')) AS name,
                COALESCE(c.initial_letter, '') AS letter
         FROM contact c
         WHERE IFNULL(c.local_type,0) IN (1, 2, 6) AND IFNULL(c.delete_flag,0)=0
-          AND TRIM(COALESCE(NULLIF(TRIM(c.remark),''), NULLIF(TRIM(c.nick_name),''), '')) <> ''
-          AND (? = '' OR c.username LIKE ? OR c.nick_name LIKE ? OR c.remark LIKE ?)
+          AND TRIM(COALESCE(NULLIF(TRIM(c.remark),''), NULLIF(TRIM(c.nick_name),''),
+                            NULLIF(TRIM(c.alias),''), '')) <> ''
+          AND (? = '' OR c.username LIKE ? OR c.nick_name LIKE ? OR c.remark LIKE ?
+               OR c.alias LIKE ? OR c.quan_pin LIKE ? OR c.pin_yin_initial LIKE ?)
         ORDER BY CASE WHEN INSTR('ABCDEFGHIJKLMNOPQRSTUVWXYZ',
                                  IFNULL(c.initial_letter,'')) > 0 THEN 0
                       WHEN INSTR('0123456789', IFNULL(c.initial_letter,'')) > 0 THEN 1
                       ELSE 2 END,
                  c.initial_letter, name
-        LIMIT ?""", (q, f"%{q}%", f"%{q}%", f"%{q}%", limit)).fetchall()
+        LIMIT ?""", (q, like, like, like, like, like, like, limit)).fetchall()
     out = []
     for r in rows:
         letter = r["letter"] or "#"
@@ -1468,6 +1476,13 @@ def _warm_models():
 @app.on_event("startup")
 def _on_startup():
     threading.Thread(target=_warm_models, daemon=True).start()
+    # 启动先同步一次联系人/会话：修复历史漏导（新增好友/会话没进列表）
+    def _dirs_boot():
+        try:
+            _refresh_dirs()
+        except Exception:      # noqa: BLE001
+            pass
+    threading.Thread(target=_dirs_boot, daemon=True).start()
     # 链接后台解析：历史回填 + 常驻 worker（新收到的链接即时解析入库）
     def _links_boot():
         try:
@@ -2592,6 +2607,40 @@ def _name2id_maps(src):
     return sender_map, name2id
 
 
+def _ensure_chat_row(con, chat_user: str, last_ts: int) -> None:
+    """新消息先于 session.db 到达时，立即补一行会话。
+
+    新加好友/新群的第一条消息往往比 session.db 的刷新更早被发现；只等
+    _refresh_dirs 会让会话列表里没有这个人，或者退回显示 wxid。这里在有
+    消息时就建行，并优先用通讯录里的备注/昵称作为显示名。
+    """
+    name_row = con.execute(
+        "SELECT COALESCE(NULLIF(TRIM(remark),''), NULLIF(TRIM(nick_name),''),"
+        " NULLIF(TRIM(alias),'')) FROM contact WHERE username=?",
+        (chat_user,)).fetchone()
+    disp = (name_row[0] if name_row else "") or ""
+    is_group = 1 if ("@chatroom" in chat_user or "@openim" in chat_user) else 0
+    ts = int(last_ts or 0)
+    if disp:
+        con.execute("""
+            INSERT INTO chat(username, is_group, display_name, last_ts, summary)
+            VALUES(?,?,?,?,'')
+            ON CONFLICT(username) DO UPDATE SET
+                is_group=excluded.is_group,
+                display_name=excluded.display_name,
+                last_ts=MAX(IFNULL(chat.last_ts,0), IFNULL(excluded.last_ts,0))
+        """, (chat_user, is_group, disp, ts))
+    else:
+        # 通讯录还没同步到：先建会话保证"列表里有"，显示名暂用 username；
+        # 随后的 _refresh_dirs 会用通讯录把 display_name 补正。
+        con.execute("""
+            INSERT OR IGNORE INTO chat(username, is_group, display_name, last_ts, summary)
+            VALUES(?,?,NULL,?,'')
+        """, (chat_user, is_group, ts))
+        con.execute("UPDATE chat SET is_group=?, last_ts=MAX(IFNULL(last_ts,0),?) "
+                    "WHERE username=?", (is_group, ts, chat_user))
+
+
 def _flush_rows(con, own, db_label: str, t: str, chat_user: str,
                 sender_map: dict, rows) -> tuple[int, int]:
     """处理一批源消息行(五元组 local_id,local_type,create_time,message_content,
@@ -2632,6 +2681,9 @@ def _flush_rows(con, own, db_label: str, t: str, chat_user: str,
         "src_db,src_table,src_local_id) VALUES(?,?,?,?,?,?,?,?,?)", batch)
     added = con.total_changes - prev     # 仅消息插入（此刻还没动 FTS）
     total += added
+    # 只要本批有消息，就保证会话行存在并跟上最新时间；即使消息早已入库
+    # （补扫/重扫），也能把之前漏建的会话补回来，并同步改名/备注。
+    _ensure_chat_row(con, chat_user, max_ts)
     if added:
         # 只重建"本次新插入"的这几条：撤回后微信会改写源库内容，
         # 已入库的 message.content 不会被覆盖（历史照旧显示原文），
@@ -2661,6 +2713,216 @@ def _flush_rows(con, own, db_label: str, t: str, chat_user: str,
                          _refresh_platform(_u)))
                     _LINK_QUEUE.put(_u)
     return total, max_ts
+
+
+# ---------------------------------------------------------------- 联系人/会话增量刷新
+_dir_sync: dict = {"contact": None, "session": None, "heal_ts": 0.0}
+_dir_src_fp: dict[str, tuple] = {}
+
+
+def _sync_decrypted_dirs() -> list[str]:
+    """让解密后的 contact/session 跟上微信源库（页级增量，只解变化的库）。
+
+    返回本次实际解密的相对路径，供 _refresh_dirs 立即导入，避免"文件刚
+    更新、指纹还没被重新比较"导致新好友要等下一轮甚至更久才出现。
+    """
+    import fastsync
+    import keyvault
+    wanted: list[str] = []
+    fps: dict[str, tuple] = {}
+    for rel in ("contact/contact.db", "session/session.db"):
+        src = ACCOUNT_DIR / "db_storage" / rel
+        try:
+            st = src.stat()
+        except OSError:
+            continue
+        wal = Path(str(src) + "-wal")
+        try:
+            wst = wal.stat() if wal.exists() else None
+        except OSError:
+            wst = None
+        fp = (st.st_mtime, st.st_size,
+              wst.st_mtime if wst else 0, wst.st_size if wst else 0)
+        if _dir_src_fp.get(rel) != fp:
+            wanted.append(rel)
+            fps[rel] = fp
+    if not wanted:
+        return []
+    key = keyvault.load_key(ACCOUNT_ID)
+    if not key:
+        return []                   # 没密钥不标记，等拿到密钥后重试
+    updated = fastsync.fast_sync_message_dbs(ACCOUNT_DIR, DECRYPTED_DIR, key, dbs=wanted)
+    _dir_src_fp.update(fps)
+    return updated or []
+
+
+def _decrypted_path(rel: str) -> Path:
+    p = DECRYPTED_DIR / rel
+    return p if p.exists() else DECRYPTED_DIR / Path(rel).name
+
+
+def _import_contacts(con, p: Path) -> int:
+    """contact.db → contact 表。
+
+    原来 contact 表只在首次导入时写一次，之后新加的好友/改备注永远不会
+    出现在通讯录里（消息能导进来，人却搜不到）。这里做增量 upsert。
+    """
+    src = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in src.execute("PRAGMA table_info(contact)")}
+        sel = ["username", "nick_name", "remark"]
+        for c in ("alias", "pin_yin_initial", "quan_pin",
+                  "local_type", "flag", "delete_flag"):
+            sel.append(c if c in cols else f"NULL AS {c}")
+        rows = src.execute(f"SELECT {','.join(sel)} FROM contact "
+                           "WHERE username IS NOT NULL AND username != ''").fetchall()
+    finally:
+        src.close()
+    try:
+        from pypinyin import lazy_pinyin
+    except ImportError:
+        lazy_pinyin = None
+    letters: dict[str, str] = {}
+
+    def initial(name: str) -> str:
+        ch = (name or "").strip()[:1]
+        if not ch:
+            return "#"
+        if ch not in letters:
+            letter = lazy_pinyin(ch)[0][:1].upper() if lazy_pinyin else ch.upper()
+            letters[ch] = letter if letter.isalnum() else "#"
+        return letters[ch]
+
+    vals = []
+    for r in rows:
+        name = ((r["remark"] or "").strip() or (r["nick_name"] or "").strip()
+                or (r["alias"] or "").strip())
+        vals.append((r["username"] or "", r["nick_name"], r["remark"], r["alias"],
+                     r["pin_yin_initial"] or "", r["quan_pin"] or "",
+                     int(r["local_type"] or 0), int(r["flag"] or 0),
+                     int(r["delete_flag"] or 0), initial(name)))
+    con.executemany("""
+        INSERT INTO contact(username, nick_name, remark, alias, pin_yin_initial,
+                            quan_pin, local_type, flag, delete_flag, initial_letter)
+        VALUES(?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(username) DO UPDATE SET
+            nick_name=excluded.nick_name, remark=excluded.remark,
+            alias=excluded.alias, pin_yin_initial=excluded.pin_yin_initial,
+            quan_pin=excluded.quan_pin, local_type=excluded.local_type,
+            flag=excluded.flag, delete_flag=excluded.delete_flag,
+            initial_letter=excluded.initial_letter
+    """, vals)
+    return len(vals)
+
+
+def _import_sessions(con, p: Path) -> int:
+    """session.db → chat 表：新增会话补行，已有会话保留置顶/摘要只更新名称。"""
+    src = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+    try:
+        rows = src.execute("SELECT username, summary, last_timestamp "
+                           "FROM SessionTable").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        src.close()
+    names = {r[0]: r[1] for r in con.execute(
+        "SELECT username, COALESCE(NULLIF(TRIM(remark),''), NULLIF(TRIM(nick_name),''),"
+        " NULLIF(TRIM(alias),''), username) FROM contact")}
+    n = 0
+    for r in rows:
+        u = r["username"]
+        if not u:
+            continue
+        name = names.get(u) or u
+        is_group = int("@chatroom" in u or "@openim" in u)
+        cur = con.execute("""
+            INSERT INTO chat(username, is_group, display_name, last_ts, summary)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(username) DO UPDATE SET
+                is_group=excluded.is_group,
+                display_name=CASE WHEN excluded.display_name != excluded.username
+                                  THEN excluded.display_name ELSE chat.display_name END,
+                last_ts=MAX(IFNULL(chat.last_ts,0), IFNULL(excluded.last_ts,0)),
+                summary=CASE WHEN IFNULL(excluded.summary,'') != ''
+                             THEN excluded.summary ELSE chat.summary END
+        """, (u, is_group, name, int(r["last_timestamp"] or 0), r["summary"] or ""))
+        n += cur.rowcount
+    return n
+
+
+def _refresh_dirs(force: bool = False) -> dict:
+    """联系人/会话增量刷新（通讯录搜不到人、会话列表漏新聊天都靠这里兜住）。
+
+    调用点：实时同步每轮、补漏重扫、启动时。按解密产物指纹跳过未变化的库，
+    开销只有 stat；contact.db 变了才会做 1.8 万行 upsert。
+    """
+    out = {"contacts": 0, "chats": 0}
+    updated: list[str] = []
+    try:
+        updated = _sync_decrypted_dirs() or []
+    except Exception as exc:      # noqa: BLE001 解密失败时仍用已有产物导入
+        _realtime["dir_err"] = str(exc)[:120]
+    con = db()
+    try:
+        p = _decrypted_path("contact/contact.db")
+        fp = (p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+        if fp and (force or _dir_sync["contact"] != fp
+                   or "contact/contact.db" in updated):
+            out["contacts"] = _import_contacts(con, p)
+            _dir_sync["contact"] = fp
+        p = _decrypted_path("session/session.db")
+        fp = (p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+        if fp and (force or _dir_sync["session"] != fp
+                   or "session/session.db" in updated):
+            out["chats"] = _import_sessions(con, p)
+            _dir_sync["session"] = fp
+        changed = bool(out["contacts"] or out["chats"] or force)
+        healed = False
+        # 有消息但没有会话行的（首导后新开的聊天/历史漏导）：10 分钟查一次
+        if changed or time.time() - _dir_sync["heal_ts"] > 600:
+            _dir_sync["heal_ts"] = time.time()
+            if con.execute("SELECT 1 FROM message m WHERE NOT EXISTS "
+                           "(SELECT 1 FROM chat c WHERE c.username=m.chat_user) "
+                           "LIMIT 1").fetchone():
+                con.execute("""
+                    INSERT OR IGNORE INTO chat(username, is_group, display_name,
+                                               last_ts, summary)
+                    SELECT m.chat_user,
+                           MAX(CASE WHEN INSTR(m.chat_user,'@chatroom')>0
+                                     OR INSTR(m.chat_user,'@openim')>0 THEN 1 ELSE 0 END),
+                           COALESCE((SELECT COALESCE(NULLIF(TRIM(c.remark),''),
+                                                     NULLIF(TRIM(c.nick_name),''),
+                                                     NULLIF(TRIM(c.alias),''),
+                                                     m.chat_user)
+                                     FROM contact c WHERE c.username=m.chat_user),
+                                    m.chat_user),
+                           MAX(m.ts), ''
+                    FROM message m LEFT JOIN chat ch ON ch.username=m.chat_user
+                    WHERE ch.username IS NULL GROUP BY m.chat_user
+                """)
+                healed = True
+        if changed or healed:
+            # 改名/改备注后会话列表立即跟着变
+            con.execute("""
+                UPDATE chat SET display_name = (
+                    SELECT COALESCE(NULLIF(TRIM(c.remark),''), NULLIF(TRIM(c.nick_name),''),
+                                    NULLIF(TRIM(c.alias),''), chat.display_name)
+                    FROM contact c WHERE c.username = chat.username)
+                WHERE EXISTS (SELECT 1 FROM contact c WHERE c.username = chat.username
+                              AND COALESCE(NULLIF(TRIM(c.remark),''),
+                                           NULLIF(TRIM(c.nick_name),''),
+                                           NULLIF(TRIM(c.alias),''), '') != '')
+            """)
+            con.execute("""UPDATE chat SET last_ts =
+                (SELECT MAX(ts) FROM message m WHERE m.chat_user = chat.username)
+                WHERE EXISTS (SELECT 1 FROM message m WHERE m.chat_user = chat.username
+                              AND m.ts > chat.last_ts)""")
+        con.commit()
+    finally:
+        con.close()
+    return out
 
 
 def _import_fast(decrypted_dir=None, only: set[str] | None = None,
@@ -2734,6 +2996,10 @@ def _import_fast(decrypted_dir=None, only: set[str] | None = None,
                       AND m.ts > chat.last_ts)""")
     con.commit()
     con.close()
+    try:
+        _refresh_dirs()
+    except Exception as exc:      # noqa: BLE001 目录刷新失败不影响消息导入
+        _realtime["dir_err"] = str(exc)[:120]
     return total
 
 
@@ -2900,6 +3166,10 @@ def _import_live() -> int:
                       AND m.ts > chat.last_ts)""")
     con.commit()
     con.close()
+    try:
+        _refresh_dirs()
+    except Exception as exc:      # noqa: BLE001 目录刷新失败不影响消息导入
+        _realtime["dir_err"] = str(exc)[:120]
     return total
 
 
@@ -3000,6 +3270,10 @@ def _import_incremental() -> int:
                 "WHERE m.chat_user = chat.username) WHERE last_ts < "
                 "(SELECT COALESCE(MAX(ts),0) FROM message m WHERE m.chat_user = chat.username)")
     con.commit()
+    try:
+        _refresh_dirs()
+    except Exception as exc:      # noqa: BLE001 目录刷新失败不影响消息导入
+        _realtime["dir_err"] = str(exc)[:120]
     return total
 
 
@@ -3378,7 +3652,11 @@ def _decrypt_quick() -> str:
 
 
 def _db_fingerprint() -> dict:
-    """message_*.db 及其 -wal 的 (mtime, size) 指纹，用于检测"微信刚写了新消息"。"""
+    """message_*.db 及其 -wal 的 (mtime, size) 指纹，用于检测"微信刚写了新消息"。
+
+    联系人/会话库也一起盯：加好友、改备注、新开会话不写消息库，只靠消息
+    文件变化的话这些变化要等下次有人发消息才会被发现。
+    """
     fp = {}
     msg_dir = ACCOUNT_DIR / "db_storage" / "message"
     try:
@@ -3390,6 +3668,14 @@ def _db_fingerprint() -> dict:
                 continue
     except OSError:
         pass
+    for rel in ("contact/contact.db", "contact/contact.db-wal",
+                "session/session.db", "session/session.db-wal"):
+        p = ACCOUNT_DIR / "db_storage" / rel
+        try:
+            st = p.stat()
+            fp[rel] = (int(st.st_mtime), st.st_size)
+        except OSError:
+            continue
     return fp
 
 

@@ -42,6 +42,10 @@ def main() -> int:
     _m._decrypt_quick()
     n = _m._import_fast(watermark_override=since)
     print(f"[rescan] 补导入消息 {n} 条", flush=True)
+    # 联系人/会话强制重扫：新好友、改名、新会话不随消息时间窗导入，
+    # 必须每次补漏都核对一遍（指纹未变也重读，确保通讯录能搜到人）
+    dc = _m._refresh_dirs(force=True)
+    print(f"[rescan] 联系人 {dc.get('contacts', 0)} / 会话 {dc.get('chats', 0)}", flush=True)
 
     from auto_media import process_new_media
     st = process_new_media(_m.db(), ocr_cap=300, asr_cap=150, video_cap=60, since=since)

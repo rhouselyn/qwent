@@ -100,7 +100,12 @@ async function newAiSession() {
 
 const AVA_COLORS = ["#5b8ff9","#61ddaa","#65789b","#f6bd16","#7262fd","#78d3f8","#9661bc","#f6903d","#008685","#f08bb4"];
 function hue(s) { let h = 0; for (const c of s || "") h = (h * 31 + c.charCodeAt(0)) % 997; return AVA_COLORS[h % AVA_COLORS.length]; }
-function initial(name) { return (name || "?").trim().charAt(0).toUpperCase(); }
+function initial(name) {
+  // 用 Array.from 取完整字符：charAt(0) 会把 emoji 截成半个代理字符，头像显示成“�”
+  const s = String(name || "?").trim();
+  const ch = s ? Array.from(s)[0] : "?";
+  return ch.toUpperCase();
+}
 function fmtTime(ts) {
   if (!ts) return "";
   const d = new Date(ts * 1000), now = new Date();
@@ -416,12 +421,56 @@ function stopLiveStream() {
   liveState.es = null; liveState.chat = null;
 }
 
+function msgOrder(a, b) {
+  return ((a.ts || 0) - (b.ts || 0)) || ((a.id || 0) - (b.id || 0));
+}
+
+/* 合并新消息并保持时间顺序：补漏重扫会把旧消息以新 id 入库，
+   只按 id 追加会把它们排到列表末尾（刷新后才恢复）。 */
+function mergeMessages(chat, incoming) {
+  const prev = state.msgs[chat] || [];
+  const known = new Set(prev.map(m => m.id));
+  const add = (incoming || []).filter(m => !known.has(m.id));
+  if (!add.length) return [];
+  state.msgs[chat] = prev.concat(add).sort(msgOrder);
+  return add;
+}
+
+/* 把新消息按时间位置插入 DOM（只在正看这个会话时动 DOM）。 */
+function insertMessages(chat, add) {
+  if (!add.length) return;
+  if (!state.current || state.current.username !== chat) return;
+  const viewingChat = $("#msgList").style.display !== "none"
+    && $("#previewPane").style.display === "none" && !isAssistant();
+  if (!viewingChat) return;
+  const box = $("#msgs");
+  const eh = box.querySelector(".empty-hint");
+  if (eh) eh.remove();              // 空会话提示有了真消息就撤掉
+  const sc = msgScroller();
+  // 没贴在底部时，记录"距底部距离"：往上方插入旧消息后视口不跳
+  const keepBottom = (!state.pinBottom && sc) ? sc.scrollHeight - sc.scrollTop : null;
+  const ordered = state.msgs[chat];
+  for (const m of add.slice().sort(msgOrder)) {
+    if (box.querySelector(`[data-id="${m.id}"]`)) continue;
+    // 找排序中位于它后面、且已在 DOM 里的那条消息作为插入点
+    let ref = null;
+    for (let i = ordered.findIndex(x => x.id === m.id) + 1; i < ordered.length; i++) {
+      ref = box.querySelector(`[data-id="${ordered[i].id}"]`);
+      if (ref) break;
+    }
+    box.insertBefore(renderMsg(m), ref);
+  }
+  if (keepBottom !== null) sc.scrollTop = sc.scrollHeight - keepBottom;
+}
+
 function startLiveStream(chat) {
   if (liveState.chat === chat && liveState.es) return;   // 已在同一个会话订阅
   stopLiveStream();
   liveState.chat = chat;
-  const box0 = state.msgs[chat] || [];
-  const afterId = box0.length ? box0[box0.length - 1].id : 0;
+  // 水位取最大 id，不能取数组最后一条：补漏重扫后数组按时间排，
+  // 最后一条不一定是最新 id。
+  const afterId = (state.msgs[chat] || [])
+    .reduce((mx, m) => Math.max(mx, m.id || 0), 0);
   const es = new EventSource(`/api/messages/stream?chat=${encodeURIComponent(chat)}&after_id=${afterId}`);
   liveState.es = es;
   es.onmessage = (ev) => {
@@ -429,33 +478,25 @@ function startLiveStream(chat) {
     try { d = JSON.parse(ev.data); } catch { return; }
     if (!d || !d.messages) return;
     if (!state.current || state.current.username !== chat) return;
-    const have = new Set((state.msgs[chat] || []).map(m => m.id));
-    const fresh = d.messages.filter(m => !have.has(m.id));
-    if (!fresh.length) return;
-    state.msgs[chat].push(...fresh);
-    // 只有"正在看这个会话的聊天记录"时才插入 DOM（预览/助手视图不打断）
-    const viewingChat = $("#msgList").style.display !== "none"
-      && $("#previewPane").style.display === "none" && !isAssistant();
-    if (viewingChat) {
-      const msgsBox = $("#msgs");
-      const eh = msgsBox.querySelector(".empty-hint");
-      if (eh) eh.remove();              // 空会话提示有了真消息就撤掉
-      const frag = document.createDocumentFragment();
-      fresh.forEach(m => frag.appendChild(renderMsg(m)));
-      msgsBox.appendChild(frag);
-      if (state.pinBottom) scrollMsgsToBottom();
+    const prevLast = (state.msgs[chat] || []).slice(-1)[0];
+    const add = mergeMessages(chat, d.messages);
+    if (!add.length) return;
+    insertMessages(chat, add);
+    const newest = add.reduce((a, b) => (msgOrder(b, a) > 0 ? b : a));
+    if (state.pinBottom && (!prevLast || msgOrder(newest, prevLast) > 0)) {
+      scrollMsgsToBottom();
     }
-    // 会话列表里的最后一条预览 + 排序实时更新
-    const last = fresh[fresh.length - 1];
+    // 会话列表里的最后一条预览 + 排序实时更新（用时间最新的一条，
+    // 补漏重扫补进来的旧消息不能把会话顶下去）
     const s = (state.sessions || []).find(x => x.username === chat);
-    if (s) {
-      s.last_ts = last.ts;
-      s.summary = last.parsed && last.parsed.text ? last.parsed.text.slice(0, 30) : s.summary;
+    if (s && (newest.ts || 0) >= (s.last_ts || 0)) {
+      s.last_ts = newest.ts;
+      s.summary = newest.parsed && newest.parsed.text ? newest.parsed.text.slice(0, 30) : s.summary;
       state.sessions.sort((a, b) => (b.pinned - a.pinned) ||
         ((b.last_ts || 0) - (a.last_ts || 0)));
       if (!state.searchMode) renderSessions($("#searchInput").value);
     }
-    if (typeof onNewMessages === "function") onNewMessages(chat, fresh);
+    if (typeof onNewMessages === "function") onNewMessages(chat, add);
   };
   es.onerror = () => { /* EventSource 自带重连，这里不主动关闭 */ };
 }
@@ -478,21 +519,18 @@ async function loadMessages(username, { initial = false, before = 0 } = {}) {
     if (sc) sc.scrollTop = sc.scrollHeight - oldHeight;
   }
   else {
-    const known = new Set((state.msgs[username] || []).map(m => m.id));
-    const fresh = initial ? data.messages : data.messages.filter(m => !known.has(m.id));
-    if (fresh.length) {
-      const freshFrag = document.createDocumentFragment();
-      fresh.forEach(m => freshFrag.appendChild(renderMsg(m)));
-      box.appendChild(freshFrag);
-    }
-    state.msgs[username] = initial
-      ? data.messages
-      : [...(state.msgs[username] || []), ...fresh];
     if (initial) {
+      const frag = document.createDocumentFragment();
+      data.messages.forEach(m => frag.appendChild(renderMsg(m)));
+      box.appendChild(frag);
+      state.msgs[username] = data.messages;
       scrollMsgsToBottom();              // 进入会话默认停在最新日期
       [80, 300, 800, 1500].forEach(ms => setTimeout(() => {
         if (state.pinBottom) scrollMsgsToBottom();
       }, ms));
+    } else {
+      // 兜底刷新同样按时间合入：补漏重扫补进来的旧消息不能追加到末尾
+      insertMessages(username, mergeMessages(username, data.messages));
     }
   }
   state.hasMore[username] = data.has_more;

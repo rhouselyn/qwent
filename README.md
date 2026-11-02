@@ -61,6 +61,7 @@
 | 自动链接中心 | 聊天里出现过的链接自动归集，可搜索、回看正文、OCR 文字和视频转写结果 |
 | 朋友圈留存 | 正文、图片 OCR、评论、点赞同步入库；作者删除或“三天可见”不影响本地留存 |
 | 实时同步 | 新消息通常 1 秒级进入知识库，可立即搜索和提问 |
+| 通讯录自动同步 | 新加好友、改备注、新会话自动进入通讯录与会话列表；支持中文、拼音全拼和首字母搜索 |
 | 撤回消息留存 | 实时同步会先把新消息入库；对方随后撤回时原文仍保留，界面标注“已撤回”，可继续查看、搜索和引用 |
 | 密钥自愈 | 先用 HMAC 实测已有密钥；失效时扫描运行中的微信进程重新取钥，无需退出 |
 | 本地优先 | 解密、索引、OCR、ASR 全部本地完成；不注入微信、不调用发送接口 |
@@ -183,7 +184,7 @@ python backend/scripts/setup.py --index-url https://pypi.tuna.tsinghua.edu.cn/si
 | 检查环境是否就绪 | `python backend/scripts/doctor.py` |
 | 备份全部数据 | `python backend/scripts/backup_data.py D:\backup\wechat_data.zip` |
 | 恢复备份 | `python backend/scripts/backup_data.py --restore D:\backup\wechat_data.zip` |
-| 补漏重扫 | `python backend/scripts/rescan.py` |
+| 补漏重扫 | `python backend/scripts/rescan.py`（重扫消息，并强制刷新联系人与会话） |
 | 重建向量索引 | `python backend/scripts/build_vectors.py` |
 | 批量 OCR | `python backend/scripts/run_ocr.py` |
 | 批量语音转写 | `python backend/scripts/run_asr.py` |

@@ -18,6 +18,8 @@ rapidocr-onnxruntime==1.4.4
 # 文件预览
 python-docx
 openpyxl
+# 通讯录拼音首字母分组
+pypinyin==0.55.0
 # 仅 m0_frida_hook.py(扫描微信进程密钥)需要;其余功能可不装
 frida==17.24.3
 sqlcipher3==0.6.4; sys_platform == 'win32'
