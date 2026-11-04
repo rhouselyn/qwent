@@ -3402,6 +3402,12 @@ def api_files(q: str = "", n: int = 200, offset: int = 0, chat: str = "",
                     "ts": r["message_create_time"], "title": name, "size": r["size"],
                     "ext": fext, "kind": file_kind(fext)})
     rdb.close()
+    if state == "parsed":
+        out = [x for x in out if x.get("status") == "parsed"]
+    elif state == "missing":
+        out = [x for x in out if x.get("status") == "missing"]
+    elif state == "unprocessed":
+        out = [x for x in out if x.get("status") == "unprocessed"]
     if sort == "old":
         out.sort(key=lambda x: x["ts"] or 0)
     elif sort == "size":

@@ -1254,6 +1254,8 @@ function renderFileShell() {
     <div class="files-toolbar">
       <div class="files-filters">
         <select id="fileChat">${opts(chats, fileView.chat)}</select>
+        <select id="fileState">${opts([["", "全部状态"], ["parsed", "已解析"],
+          ["missing", "未下载/失败"], ["unprocessed", "未处理"]], fileView.state)}</select>
         <select id="fileKind">${opts([["", "全部类型"], ...kindRows], fileView.kind)}</select>
         <select id="fileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], fileView.days)}</select>
         <select id="fileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], fileView.sort)}</select>
@@ -1346,7 +1348,7 @@ async function showFiles(opts = {}) {
   await refreshFiles(true);
   showPane("#fileList");
 }
-const linkView = { platform: "", state: "", days: 0, sort: "new", q: "",
+const linkView = { platform: "", state: "", days: 0, sort: "new", q: "", chat: "",
                    offset: 0, items: [], hasMore: true, loading: false, queue: null };
 let linkQueryTimer = null;
 
@@ -1357,6 +1359,7 @@ function renderLinkShell() {
   box.innerHTML = `
     <div class="files-toolbar">
       <div class="files-filters">
+        <select id="linkChat">${opts([["", "全部会话"], ...fileSessions.slice(0, 150).map(x => [x.username, x.name || x.username])], linkView.chat)}</select>
         <select id="linkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"], ["bili", "B站"],
           ["article", "公众号"], ["generic", "网页"]], linkView.platform)}</select>
         <select id="linkState">${opts([["", "全部状态"], ["parsed", "已解析"],
@@ -1376,7 +1379,7 @@ function renderLinkShell() {
     linkView.sort = $("#linkSort").value;
     refreshLinks(true);
   };
-  ["#linkPlatform", "#linkState", "#linkDays", "#linkSort"].forEach(sel => $(sel).onchange = onChange);
+  ["#linkChat", "#linkPlatform", "#linkState", "#linkDays", "#linkSort"].forEach(sel => $(sel).onchange = onChange);
   $("#linkMore").onclick = () => refreshLinks(false);
 }
 
@@ -1396,8 +1399,8 @@ function renderLinkItems() {
       : l.platform_key === "wxapp" ? `<span class="link-badge">仅卡片信息</span>`
       : l.state === 2 ? `<span class="link-badge fail">暂不支持</span>`
       : `<span class="link-badge">解析中</span>`;
-    d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(l.chat_name)} · ${fmtTime(l.received)} · ${esc(l.platform)}</span> ${badge}</div>
-      <div class="snippet"><span class="file-badge">链接</span> ${esc(l.title)}${l.chars ? ` · ${l.chars} 字` : ""}</div>`;
+    d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(l.chat_name)} · ${fmtTime(l.received)}</span> ${badge}</div>
+      <div class="snippet"><span class="file-badge">${esc(l.platform)}</span> ${esc(l.title)}${l.chars ? ` · ${l.chars} 字` : ""}</div>`;
     d.onclick = () => {
       if (l.url.startsWith("wxapp://")) {
         toast("小程序内容需要在微信里打开，无法抓取正文");
@@ -1430,6 +1433,7 @@ async function refreshLinks(reset = true) {
   const meta = $("#linkMeta");
   if (meta) meta.textContent = "加载中…";
   const qs = new URLSearchParams({ n: "100", offset: String(linkView.offset), sort: linkView.sort });
+  if (linkView.chat) qs.set("chat", linkView.chat);
   if (linkView.platform) qs.set("platform", linkView.platform);
   if (linkView.state) qs.set("state", linkView.state);
   if (linkView.days) qs.set("days", String(linkView.days));
@@ -1451,6 +1455,9 @@ async function refreshLinks(reset = true) {
 }
 
 async function showLinks() {
+  if (!fileSessions) {
+    try { fileSessions = await api("/api/sessions"); } catch { fileSessions = []; }
+  }
   renderLinkShell();
   await refreshLinks(true);
   showPane("#linkList");
