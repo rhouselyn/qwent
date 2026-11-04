@@ -1,0 +1,13 @@
+[package]
+name = "wechat-assistant"
+version = "1.0.0"
+description = "微信知识助手桌面壳"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"

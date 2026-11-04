@@ -333,7 +333,7 @@ function showSessionMenu(x, y, s) {
       ? { label: "取消置顶", fn: () => setPin(s, 0) }
       : { label: "置顶会话", fn: () => setPin(s, 1) },
     { label: "打开会话", fn: () => openChat(s.username, s.name, s.is_group) },
-    { label: "只看该会话的文件", fn: () => { showFiles(""); } },
+    { label: "只看该会话的文件", fn: () => { showFiles({ chat: s.username, q: "" }); } },
     { label: "复制会话标识", fn: () => { navigator.clipboard && navigator.clipboard.writeText(s.username); toast("已复制 " + s.username); } },
   ];
   menu.innerHTML = items.map((it, i) =>
@@ -591,11 +591,13 @@ function renderMsg(m) {
   wrap.className = "msg " + (m.is_sender ? "right" : "left");
   wrap.dataset.id = m.id;
   wrap.appendChild(avatarFor(m));
-  const qa = document.createElement("span");
-  qa.className = "quote-act";
-  qa.textContent = "引用";
-  qa.onclick = () => addQuote(m);
-  wrap.appendChild(qa);
+  // 右键消息 = 加入底部引用栏（替代旧的悬浮"引用"按钮，减少遮挡）
+  wrap.title = "右键加入引用栏";
+  wrap.oncontextmenu = (e) => {
+    e.preventDefault();
+    addQuote(m);
+    toast("已加入引用栏（点 ✕ 可移除）");
+  };
   const col = document.createElement("div"); col.className = "col";
   if (state.current && state.current.is_group && !m.is_sender) {
     const who = document.createElement("div"); who.className = "who"; who.textContent = m.sender_name;
@@ -1233,27 +1235,105 @@ async function showContacts(q = "") {
   }
   showPane("#contactList");
 }
-async function showFiles(q = "") {
+const fileView = { chat: "", kind: "", days: 0, sort: "new", q: "", offset: 0, items: [], hasMore: true, loading: false };
+let fileSessions = null;
+let fileQueryTimer = null;
+const FILE_KIND_LABELS = { doc: "文档", sheet: "表格", slide: "演示", image: "图片",
+                           archive: "压缩包", media: "音视频", other: "其他" };
+
+function renderFileShell() {
   const box = $("#fileList");
-  box.innerHTML = `<div class="qa-empty">加载中…</div>`;
-  const list = await api(`/api/files?q=${encodeURIComponent(q)}&n=200`);
+  const opts = (rows, cur) => rows.map(([v, label]) =>
+    `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
+  const chats = [["", "全部会话"], ...fileSessions.slice(0, 150).map(s => [s.username, s.name || s.username])];
+  box.innerHTML = `
+    <div class="files-toolbar">
+      <div class="files-filters">
+        <select id="fileChat">${opts(chats, fileView.chat)}</select>
+        <select id="fileKind">${opts([["", "全部类型"], ...Object.entries(FILE_KIND_LABELS)], fileView.kind)}</select>
+        <select id="fileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], fileView.days)}</select>
+        <select id="fileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], fileView.sort)}</select>
+      </div>
+      <div class="files-meta" id="fileMeta">加载中…</div>
+    </div>
+    <div id="fileItems"></div>
+    <button id="fileMore" class="mini ghost files-more" style="display:none">加载更多</button>`;
+  const onChange = () => {
+    fileView.chat = $("#fileChat").value;
+    fileView.kind = $("#fileKind").value;
+    fileView.days = +$("#fileDays").value || 0;
+    fileView.sort = $("#fileSort").value;
+    refreshFiles(true);
+  };
+  ["#fileChat", "#fileKind", "#fileDays", "#fileSort"].forEach(sel => $(sel).onchange = onChange);
+  $("#fileMore").onclick = () => refreshFiles(false);
+}
+
+function renderFileItems() {
+  const box = $("#fileItems");
+  if (!box) return;
   box.innerHTML = "";
-  if (!list.length) box.innerHTML = `<div class="qa-empty">没有找到文件消息</div>`;
-  for (const f of list) {
+  if (!fileView.items.length) {
+    box.innerHTML = `<div class="qa-empty">没有找到文件消息。<br>换个会话或类型试试，文件消息同步后会自动出现在这里。</div>`;
+  }
+  for (const f of fileView.items) {
     const d = document.createElement("div");
     d.className = "result-item";
-    d.innerHTML = `<div class="meta">${esc(f.chat_name)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</div>
-      <div class="snippet">📄 ${esc(f.title)}</div>`;
+    const badge = (f.ext || "").replace(".", "").toUpperCase() || FILE_KIND_LABELS[f.kind] || "文件";
+    d.innerHTML = `<div class="meta"><span class="file-badge">${esc(badge)}</span> ${esc(f.chat_name)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</div>
+      <div class="snippet">${esc(f.title)}</div>`;
     d.onclick = () => openFilePreview(f);
     box.appendChild(d);
   }
+  const meta = $("#fileMeta");
+  if (meta) meta.textContent = `${fileView.items.length} 个文件${fileView.hasMore ? " · 还有更多" : ""}`;
+  const more = $("#fileMore");
+  if (more) more.style.display = fileView.hasMore ? "" : "none";
+}
+
+async function refreshFiles(reset = true) {
+  if (fileView.loading) return;
+  if (reset) { fileView.offset = 0; fileView.items = []; }
+  fileView.loading = true;
+  const meta = $("#fileMeta");
+  if (meta) meta.textContent = "加载中…";
+  const qs = new URLSearchParams({ n: "200", offset: String(fileView.offset), sort: fileView.sort });
+  if (fileView.chat) qs.set("chat", fileView.chat);
+  if (fileView.kind) qs.set("kind", fileView.kind);
+  if (fileView.q) qs.set("q", fileView.q);
+  if (fileView.days) qs.set("since", String(Math.floor(Date.now() / 1000) - fileView.days * 86400));
+  try {
+    const list = await api("/api/files?" + qs.toString());
+    fileView.items.push(...list);
+    fileView.offset += list.length;
+    fileView.hasMore = list.length >= 200;
+    renderFileItems();
+  } catch (e) {
+    if (meta) meta.textContent = "加载失败：" + e.message;
+  } finally {
+    fileView.loading = false;
+  }
+}
+
+async function showFiles(opts = {}) {
+  if (typeof opts === "string") opts = { q: opts };
+  Object.assign(fileView, opts);
+  if (!fileSessions) {
+    try { fileSessions = await api("/api/sessions"); } catch { fileSessions = []; }
+  }
+  renderFileShell();
+  await refreshFiles(true);
   showPane("#fileList");
 }
 async function showLinks(q = "") {
   const box = $("#linkList");
   box.innerHTML = `<div class="qa-empty">加载中…</div>`;
-  let list = [];
-  try { list = await api(`/api/links?n=200&q=${encodeURIComponent(q)}`); } catch { list = []; }
+  let list = [], queue = null;
+  try {
+    [list, queue] = await Promise.all([
+      api(`/api/links?n=200&q=${encodeURIComponent(q)}`),
+      api("/api/links/queue").catch(() => null)]);
+  } catch { list = []; }
   box.innerHTML = "";
   if (!list.length) {
     box.innerHTML = `<div class="qa-empty">还没有收到过链接。<br>
@@ -1264,7 +1344,14 @@ async function showLinks(q = "") {
   const head = document.createElement("div");
   head.className = "qa-empty";
   const parsedN = list.filter(x => x.parsed).length;
-  head.textContent = `${list.length} 条链接 · ${parsedN} 条已解析入库`;
+  let extra = "";
+  if (queue) {
+    extra = ` · 待解析 ${queue.pending}`;
+    if (queue.current) extra += ` · 正在解析：${esc(queue.current.slice(0, 60))}`;
+    else if (queue.pending) extra += "（解析器空闲，稍后自动续跑）";
+    if (queue.error) extra += ` · 最近失败：${esc(queue.error.slice(0, 60))}`;
+  }
+  head.textContent = `${list.length} 条链接 · ${parsedN} 条已解析入库${extra}`;
   box.appendChild(head);
   for (const l of list) {
     const d = document.createElement("div");
@@ -1511,8 +1598,9 @@ async function refreshJobs() {
 
 const SETTING_SECTIONS = [
   { id: "model", label: "AI 模型", icon: "✦", desc: "接口与回答方式" },
+  { id: "privacy", label: "隐私与脱敏", icon: "⊘", desc: "发往云端前屏蔽敏感信息" },
+  { id: "bot", label: "机器人", icon: "⇄", desc: "QQ 与微信 ClawBot" },
   { id: "data", label: "数据与同步", icon: "↻", desc: "实时入库与定时任务" },
-  { id: "qqbot", label: "QQ 机器人", icon: "✆", desc: "QQ 消息接本机微信" },
   { id: "index", label: "索引任务", icon: "⌁", desc: "搜索与媒体处理" },
   { id: "about", label: "关于", icon: "i", desc: "状态与本地数据" },
 ];
@@ -1520,6 +1608,11 @@ let settingsSection = "model";
 
 async function showSettings(section) {
   settingsSection = section || settingsSection || "model";
+  // 离开「微信通道」时停掉二维码状态轮询，避免对已卸载的 DOM 反复刷新
+  if (settingsSection !== "bot" && window._ocTimer) {
+    clearInterval(window._ocTimer);
+    window._ocTimer = null;
+  }
   // 设置目录放中栏(与会话列表同列),右侧内容区占满
   showPane("#settingsNav");
   $("#chatEmpty").style.display = "none";
@@ -1542,7 +1635,8 @@ async function showSettings(section) {
   body.innerHTML = `<div class="qa-empty">加载中…</div>`;
 
   if (settingsSection === "model") await renderSettingsModel(body);
-  if (settingsSection === "qqbot") await renderSettingsQQBot(body);
+  if (settingsSection === "privacy") await renderSettingsPrivacy(body);
+  if (settingsSection === "bot") await renderSettingsBot(body);
   if (settingsSection === "data") await renderSettingsData(body);
   if (settingsSection === "index") await renderSettingsIndex(body);
   if (settingsSection === "about") renderSettingsAbout(body, status);
@@ -1590,79 +1684,209 @@ async function renderSettingsModel(body) {
   };
 }
 
-async function renderSettingsQQBot(body) {
-  let c;
-  try { c = await api("/api/qqbot/status"); }
+async function renderSettingsPrivacy(body) {
+  let p;
+  try { p = await api("/api/privacy"); }
   catch (e) { body.innerHTML = `<div class="qa-empty">加载失败: ${esc(e.message)}</div>`; return; }
-  const stateText = !c.enabled ? "未启用"
-    : c.error ? "异常"
-    : c.connected ? `已连接${c.username ? " · " + esc(c.username) : ""}`
-    : c.running ? "连接中…" : "已停止";
-  const stateCls = !c.enabled ? "neutral" : c.error ? "err" : c.connected ? "success" : "warning";
   body.innerHTML = `
-    <div class="settings-page-head"><div><span class="settings-eyebrow">QQ CHANNEL</span><h2>QQ 机器人</h2><p>在 QQ 里直接向本机微信知识库提问。机器人从本机出站连接 QQ 网关，无需公网 IP。</p></div>
-      <span class="settings-status-pill ${stateCls}">${stateText}</span></div>
+    <div class="settings-page-head"><div><span class="settings-eyebrow">OUTBOUND PRIVACY</span><h2>隐私与脱敏</h2><p>发给云端模型前自动替换手机号、身份证、银行卡和邮箱，本机原文与引用不受影响。</p></div>
+      <span class="settings-status-pill ${p.enabled ? "success" : "neutral"}">${p.enabled ? "脱敏已开启" : "脱敏已关闭"}</span></div>
+    <div class="settings-grid"><section class="settings-card">
+      <div class="settings-card-head"><span class="settings-card-icon">⊘</span><div><h3>出站规则</h3><p>仅在调用模型接口时生效，不改动本地入库数据。</p></div></div>
+      <div class="settings-switch-card">
+        <label class="switch-row"><input type="checkbox" id="pvEnabled" ${p.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用脱敏</b><small>关闭后上下文原样发送到模型服务商。</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvPhone" ${p.phone ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>手机号</b><small>替换为 [手机号]</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvIdcard" ${p.idcard ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>身份证号</b><small>替换为 [身份证]</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvBank" ${p.bankcard ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>银行卡号</b><small>替换为 [银行卡]</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvEmail" ${p.email ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>邮箱</b><small>替换为 [邮箱]</small></span></label>
+      </div>
+      <div class="settings-actions"><button id="pvSave">保存设置</button><span id="pvMsg" class="msg" aria-live="polite"></span></div>
+    </section><aside class="settings-side-card"><div class="settings-side-title">说明</div><p>脱敏发生在每次模型请求前，修改后无需重启服务。</p><ul><li>只影响新发出的请求</li><li>检索、引用跳转使用本地原文</li><li>本地 AI 模式同样适用</li></ul></aside></div>`;
+  const rules = ["pvPhone", "pvIdcard", "pvBank", "pvEmail"];
+  const syncDisabled = () => rules.forEach(id => $("#" + id).disabled = !$("#pvEnabled").checked);
+  $("#pvEnabled").onchange = syncDisabled;
+  $("#pvSave").onclick = async () => {
+    const msg = $("#pvMsg");
+    $("#pvSave").disabled = true; $("#pvSave").textContent = "保存中…";
+    try {
+      await api("/api/privacy", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: $("#pvEnabled").checked,
+                               phone: $("#pvPhone").checked,
+                               idcard: $("#pvIdcard").checked,
+                               bankcard: $("#pvBank").checked,
+                               email: $("#pvEmail").checked }) });
+      msg.textContent = "已保存"; msg.className = "msg ok";
+      setTimeout(() => showSettings("privacy"), 600);
+    } catch (e) {
+      msg.textContent = "保存失败: " + e.message; msg.className = "msg err";
+      $("#pvSave").disabled = false; $("#pvSave").textContent = "保存设置";
+    }
+  };
+}
+
+async function renderSettingsBot(body) {
+  if (window._ocTimer) { clearInterval(window._ocTimer); window._ocTimer = null; }
+  let q, oc;
+  try {
+    [q, oc] = await Promise.all([api("/api/qqbot/status"), api("/api/openclaw/status")]);
+  } catch (e) {
+    body.innerHTML = `<div class="qa-empty">加载失败: ${esc(e.message)}</div>`;
+    return;
+  }
+  const qqState = !q.enabled ? "未启用" : q.error ? "异常" : q.connected ? "已连接" : q.running ? "连接中…" : "已停止";
+  body.innerHTML = `
+    <div class="settings-page-head"><div><span class="settings-eyebrow">BOT CHANNELS</span><h2>机器人</h2><p>在微信或 QQ 里直接向本机知识库提问，两个通道可单独开关。</p></div></div>
     <div class="settings-grid"><div class="settings-stack">
-      <section class="settings-card">
-        <div class="settings-card-head"><span class="settings-card-icon">✆</span><div><h3>机器人凭据</h3><p>来自 <a href="https://q.qq.com" target="_blank" rel="noreferrer">q.qq.com</a> → 机器人管理 → 开发设置。</p></div></div>
-        <div class="settings-form">
-          <div class="settings-field"><label for="qqAppId">AppID</label><input id="qqAppId" value="${attrEsc(c.app_id || "")}" placeholder="1906230635"></div>
-          <div class="settings-field"><label for="qqSecret">AppSecret</label><input id="qqSecret" type="password" autocomplete="off" placeholder="${c.has_secret ? attrEsc("已配置 " + c.secret_masked + "（留空则不修改）") : "机器人密钥"}"><small>只保存在本机 config.json，不会上传。</small></div>
-          <div class="settings-switch-card">
-            <label class="switch-row"><input type="checkbox" id="qqEnabled" ${c.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用 QQ 机器人</b><small>开启后本机直连 QQ 网关收发消息。</small></span></label>
-            <label class="switch-row"><input type="checkbox" id="qqGroup" ${c.group_reply ? "checked" : ""}><span class="switch-track"></span><span><b>允许群聊响应</b><small>默认关闭：群成员可以查你的微信记录，谨慎开启。</small></span></label>
-            <label class="switch-row"><input type="checkbox" id="qqExplorer" ${c.default_explorer ? "checked" : ""}><span class="switch-track"></span><span><b>新用户默认探索模式</b><small>同网页端"探索模式"；QQ 里可随时发指令或点菜单切换。</small></span></label>
-            <label class="switch-row"><input type="checkbox" id="qqThinking" ${c.default_thinking ? "checked" : ""}><span class="switch-track"></span><span><b>新用户默认深度思考</b><small>同网页端"深度思考"，使用推理模型，更准更慢。</small></span></label>
-          </div>
+
+      <section class="settings-card" id="ocCard">
+        <div class="settings-card-head"><span class="settings-card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="9" cy="8" rx="6.2" ry="5" fill="#07c160"/><ellipse cx="15.2" cy="14" rx="6.2" ry="5" fill="#3ddc84"/><circle cx="6.8" cy="7.4" r="1" fill="#fff"/><circle cx="11.2" cy="7.4" r="1" fill="#fff"/><circle cx="13.2" cy="13.4" r="1" fill="#fff"/><circle cx="17.2" cy="13.4" r="1" fill="#fff"/></svg></span><div><h3>微信通道</h3><p>扫码接入 ClawBot，微信里直接提问。</p></div></div>
+        <label class="switch-row"><input type="checkbox" id="ocEnabled" ${oc.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用微信通道</b><small>关闭后停止网关，微信里不再回复。</small></span></label>
+        <div class="settings-note" id="ocStatus" style="margin-top:12px">加载中…</div>
+        <div class="settings-actions" style="margin-top:12px;flex-wrap:wrap">
+          <button id="ocLogin" ${oc.enabled ? "" : "disabled"}>扫码登录</button>
+          <button id="ocLoginStop" class="ghost" style="display:none">停止登录</button>
+          <button id="ocGateway" class="ghost" ${oc.enabled ? "" : "disabled"}>重启网关</button>
         </div>
-        <div class="settings-actions"><button id="qqSave">保存并应用</button><button id="qqMenu" class="ghost">一键配置 QQ 菜单</button><span id="qqMsg" class="msg" aria-live="polite"></span></div>
-        ${c.error ? `<div class="settings-note err">${esc(c.error)}</div>` : ""}
-        ${c.last_event ? `<div class="settings-note">最近一条 QQ 消息：${esc(c.last_event)}</div>` : ""}
+        <div id="ocQrWrap" style="display:none">
+          <div class="oc-qr-title">用手机微信扫描二维码</div>
+          <img id="ocQrImg" class="oc-qr-img" alt="微信登录二维码">
+        </div>
+        <div class="settings-note" id="ocLogHint" style="display:none"></div>
       </section>
+
+      <section class="settings-card" id="qqCard">
+        <div class="settings-card-head"><span class="settings-card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12.5" rx="6" ry="7.6" fill="#12b7f5"/><ellipse cx="12" cy="14.6" rx="3.8" ry="5" fill="#fff"/><circle cx="9.6" cy="7" r="1.2" fill="#fff"/><circle cx="14.4" cy="7" r="1.2" fill="#fff"/><circle cx="9.6" cy="7" r=".5" fill="#0b2b44"/><circle cx="14.4" cy="7" r=".5" fill="#0b2b44"/><ellipse cx="12" cy="8.9" rx=".95" ry=".6" fill="#ff9f1a"/></svg></span><div><h3>QQ 机器人</h3><p>通过 QQ 官方机器人协议接入；回答在 QQ 里直接发回。</p></div></div>
+        <label class="switch-row"><input type="checkbox" id="qqEnabled" ${q.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用 QQ 机器人</b><small>仅本人私聊可用；群聊不响应。</small></span></label>
+        <div class="settings-form" style="margin-top:14px">
+          <div class="settings-field"><label for="qqAppId">AppID</label><input id="qqAppId" value="${attrEsc(q.app_id || "")}" placeholder="1906230635"></div>
+          <div class="settings-field"><label for="qqSecret">AppSecret</label><input id="qqSecret" type="password" autocomplete="off" placeholder="${q.has_secret ? attrEsc("已配置 " + q.secret_masked + "（留空则不修改）") : "机器人密钥"}"><small>只保存在本机 config.json，不会上传。</small></div>
+        </div>
+        <div class="settings-actions"><button id="qqSave">保存并应用</button><button id="qqMenu" class="ghost">重新推送菜单</button><span id="qqMsg" class="msg" aria-live="polite"></span></div>
+        <div class="settings-note">状态：${qqState}${q.error ? " · " + esc(q.error) : ""}${q.menu ? " · 菜单：" + (q.menu === "ok" ? "已自动配置" : q.menu === "pushing" ? "推送中…" : "推送失败" + (q.menu_error ? "（" + esc(q.menu_error) + "）" : "")) : ""}</div>
+      </section>
+
     </div>
-    <aside class="settings-side-card"><div class="settings-side-title">操作指南</div>
-      <ol>
-        <li>登录 <a href="https://q.qq.com" target="_blank" rel="noreferrer">q.qq.com</a>，进入机器人「开发设置」，复制 AppID 与 AppSecret。</li>
-        <li>「服务接入 / 消息推送设置」接入方式选择 <b>WebSocket</b>。</li>
-        <li>「事件订阅」勾选 <b>C2C_MESSAGE_CREATE</b>（私聊）；需要群聊再勾 GROUP_AT_MESSAGE_CREATE。</li>
-        <li>「开发体验用户」添加你的 QQ 绑定手机号，否则私聊会显示"服务不可用"。</li>
-        <li>在 QQ 里给机器人发条消息完成授权，回到本页填入凭据并打开开关。</li>
+    <aside class="settings-side-card"><div class="settings-side-title">微信接入</div>
+      <p>点「扫码登录」→ 手机微信扫码并确认 → 微信里会自动出现 ClawBot 联系人，直接发消息即可。</p>
+      <p style="margin-top:8px">登录凭据保存在本机，重启软件或电脑都不需要重新扫码。</p>
+      <div class="settings-side-title" style="margin-top:12px">QQ 接入</div>
+      <ol style="margin:0;padding-left:18px;font-size:12px;line-height:1.85">
+        <li>打开 <a href="https://q.qq.com" target="_blank" rel="noreferrer">q.qq.com</a> 登录，进入「机器人管理」创建或选择机器人。</li>
+        <li>进入「开发设置」，复制 AppID 和 AppSecret（Secret 需点击显示或重置后复制）。</li>
+        <li>「服务接入 / 消息推送设置」选择 WebSocket，不要选 Webhook。</li>
+        <li>「事件订阅」勾选 C2C_MESSAGE_CREATE（私聊），群聊不用勾。</li>
+        <li>「开发体验用户」添加你的 QQ 号或手机号，否则私聊会提示服务不可用。</li>
+        <li>回到本页填入 AppID / AppSecret，打开开关，点「保存并应用」。</li>
+        <li>在 QQ 里给机器人发一条消息完成授权，之后即可直接提问。</li>
       </ol>
-      <div class="settings-side-title" style="margin-top:12px">聊天内指令</div>
-      <p style="font-size:12px;line-height:1.8">/快速问答 与 /探索模式 切换提问方式 · /深度思考 与 /关闭思考 切换推理模型 · /新对话 清空上下文 · /暂停 /继续 · /状态。点上方「一键配置 QQ 菜单」可把 帮助 / 提问方式 / 思考深度 / 新对话 推送为会话底部菜单（等价控制台手工配置）；若推送失败，可在 q.qq.com 管理端「高级设置 → 自定义菜单 / 指令面板」手动添加同样内容。</p>
+      <p style="margin-top:8px"><b>QQ 菜单</b>：保存并应用时会自动把 帮助 / 提问方式 / 思考深度 / 新对话 推送成会话底部按钮（首次启用或更换凭据时）；失败可点「重新推送菜单」。不配也能直接在 QQ 里发指令。</p>
     </aside></div>`;
+
+  /* ---------- QQ ---------- */
   $("#qqSave").onclick = async () => {
     const msg = $("#qqMsg");
     $("#qqSave").disabled = true; $("#qqSave").textContent = "保存中…";
     msg.textContent = ""; msg.className = "msg";
     try {
-      const payload = { app_id: $("#qqAppId").value, enabled: $("#qqEnabled").checked,
-                        group_reply: $("#qqGroup").checked,
-                        default_explorer: $("#qqExplorer").checked,
-                        default_thinking: $("#qqThinking").checked };
+      const payload = { app_id: $("#qqAppId").value, enabled: $("#qqEnabled").checked };
       const sec = $("#qqSecret").value;
       if (sec) payload.app_secret = sec;
       const r = await api("/api/qqbot/config", { method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload) });
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       if (r && r.error) { msg.textContent = "已保存，但连接异常: " + r.error; msg.className = "msg err"; }
       else { msg.textContent = "已保存并应用"; msg.className = "msg ok"; }
     } catch (e) { msg.textContent = "保存失败: " + e.message; msg.className = "msg err"; }
-    finally { $("#qqSave").disabled = false; $("#qqSave").textContent = "保存并应用"; setTimeout(() => showSettings("qqbot"), 1500); }
+    finally { $("#qqSave").disabled = false; $("#qqSave").textContent = "保存并应用";
+      setTimeout(() => showSettings("bot"), 1200); }
   };
   $("#qqMenu").onclick = async () => {
-    const msg = $("#qqMsg");
-    const b = $("#qqMenu");
+    const msg = $("#qqMsg"), b = $("#qqMenu");
     b.disabled = true; b.textContent = "配置中…"; msg.textContent = ""; msg.className = "msg";
     try {
       const r = await api("/api/qqbot/menu", { method: "POST" });
-      if (r && r.ok) { msg.textContent = "菜单已推送到 QQ（重新打开机器人会话可见）"; msg.className = "msg ok"; }
+      if (r && r.ok) { msg.textContent = "菜单已推送到 QQ"; msg.className = "msg ok"; }
       else { msg.textContent = "菜单配置失败: " + ((r && (r.error || r.body)) || "未知错误"); msg.className = "msg err"; }
     } catch (e) { msg.textContent = "菜单配置失败: " + e.message; msg.className = "msg err"; }
-    finally { b.disabled = false; b.textContent = "一键配置 QQ 菜单"; }
+    finally { b.disabled = false; b.textContent = "重新推送菜单"; }
   };
-}
 
+  /* ---------- 微信 ---------- */
+  $("#ocEnabled").onchange = async () => {
+    const want = $("#ocEnabled").checked;
+    $("#ocEnabled").disabled = true;
+    $("#ocStatus").textContent = want ? "正在启用（重启网关约 40 秒）…" : "正在停止…";
+    try {
+      await api("/api/openclaw/toggle", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: want }) });
+      toast(want ? "微信通道已启用" : "微信通道已关闭");
+    } catch (e) { toast("操作失败：" + e.message); $("#ocEnabled").checked = !want; }
+    finally { $("#ocEnabled").disabled = false; setTimeout(() => showSettings("bot"), 800); }
+  };
+
+  const ocStatus = $("#ocStatus");
+  const renderOc = (s) => {
+    if (!document.querySelector("#ocStatus")) return;
+    if (!s.found) {
+      ocStatus.innerHTML = "未检测到 OpenClaw。请先按 README 安装微信渠道（需要 Node 24）。";
+      return;
+    }
+    ocStatus.innerHTML = `网关：<b>${s.gateway ? "运行中" : "未运行"}</b> · 登录：${s.login_running ? "进行中" : "空闲"}`
+      + (s.enabled ? "" : " · 通道已关闭");
+    const on = s.enabled;
+    $("#ocLogin").disabled = !on;
+    $("#ocGateway").disabled = !on;
+    $("#ocLoginStop").style.display = s.login_running ? "" : "none";
+    const qrUrl = s.qr_url || "";
+    const wrap = $("#ocQrWrap"), img = $("#ocQrImg");
+    if (on && s.login_running && qrUrl) {
+      wrap.style.display = "block";
+      const token = (qrUrl.match(/qrcode=([^&]+)/) || [])[1] || qrUrl.slice(-16);
+      const src = "/api/openclaw/qr.png?t=" + encodeURIComponent(token);
+      if (img.getAttribute("src") !== src) img.src = src;
+    } else {
+      wrap.style.display = "none";
+    }
+    const hint = $("#ocLogHint");
+    if (s.login_running) {
+      hint.style.display = "";
+      hint.textContent = qrUrl ? "二维码已显示，用手机微信扫码并在手机上确认。" : "正在生成二维码…";
+    } else {
+      const tail = (s.login_log || "").split("\n")
+        .filter(l => l.trim() && !/[█▀▄]/.test(l)).slice(-1)[0] || "";
+      hint.style.display = tail ? "" : "none";
+      hint.textContent = tail;
+    }
+  };
+  const refreshOc = async () => {
+    try { renderOc(await api("/api/openclaw/status")); }
+    catch (e) { ocStatus.textContent = "状态获取失败: " + e.message; }
+  };
+  $("#ocLogin").onclick = async () => {
+    const b = $("#ocLogin");
+    b.disabled = true; b.textContent = "启动中…";
+    try { await api("/api/openclaw/login", { method: "POST" }); toast("已发起登录，二维码稍后显示"); refreshOc(); }
+    catch (e) { toast(e.message); }
+    finally { b.disabled = false; b.textContent = "扫码登录"; }
+  };
+  $("#ocLoginStop").onclick = async () => {
+    try { await api("/api/openclaw/login/stop", { method: "POST" }); } catch (e) {}
+    refreshOc();
+  };
+  $("#ocGateway").onclick = async () => {
+    const b = $("#ocGateway");
+    b.disabled = true; b.textContent = "重启中…";
+    try {
+      const r = await api("/api/openclaw/gateway", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: "{}" });
+      toast(r.gateway ? "网关已运行" : "网关未响应，请看状态行");
+      refreshOc();
+    } catch (e) { toast(e.message); }
+    b.disabled = false; b.textContent = "重启网关";
+  };
+  refreshOc();
+  window._ocTimer = setInterval(refreshOc, 3000);
+}
 
 async function renderSettingsData(body) {
   let s, a, rt;
@@ -1675,6 +1899,8 @@ async function renderSettingsData(body) {
     <div class="settings-grid"><div class="settings-stack">
       <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">↻</span><div><h3>实时同步</h3><p>发现微信数据库变化后立即入库，轮询作为兜底。</p></div></div>
         <label class="switch-row"><input type="checkbox" id="rtSync" ${rt.realtime ? "checked" : ""}><span class="switch-track"></span><span><b>启用实时同步</b><small>需要微信已登录且密钥有效。</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="rtMedia" ${rt.media_on ? "checked" : ""}><span class="switch-track"></span><span><b>新图片自动 OCR</b><small>只处理最近 7 天的新图片，历史存量在索引任务里补跑。</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="rtAsr" ${rt.asr_on ? "checked" : ""}><span class="switch-track"></span><span><b>新语音自动转写</b><small>只处理最近 7 天的新语音/视频，历史存量在索引任务里补跑。</small></span></label>
         <div class="inline-setting"><label for="rtInterval">兜底轮询</label><div><input id="rtInterval" type="number" min="15" value="${rt.realtime_sec}"> <span>秒</span></div></div><div class="settings-note" id="rtState"></div>
       </section>
       <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">◷</span><div><h3>定时同步</h3><p>定期扫描数据库，适合实时监听不可用时使用。</p></div></div>
@@ -1683,12 +1909,14 @@ async function renderSettingsData(body) {
       <section class="settings-card settings-action-card"><div><h3>手动同步</h3><p>立即扫描一次，适合刚登录微信或需要立刻更新时使用。</p></div><button id="syncBtn" ${s.sync.running ? "disabled" : ""}>${s.sync.running ? "同步中…" : "立即同步一次"}</button><pre>${esc(s.sync.log || "")}</pre></section>
     </div><aside class="settings-side-card"><div class="settings-side-title">同步说明</div><p>实时同步优先处理新消息；历史图片、语音和链接解析可在“索引任务”中补跑。</p><div class="settings-mini-stat"><span>当前状态</span><b>${s.sync.running ? "正在同步" : "空闲"}</b></div></aside></div>`;
   const saveSync = async () => {
-    const controls = [$("#rtSync"), $("#rtInterval"), $("#autoSync"), $("#autoInterval")];
+    const controls = [$("#rtSync"), $("#rtMedia"), $("#rtAsr"), $("#rtInterval"), $("#autoSync"), $("#autoInterval")];
     controls.forEach(x => x.disabled = true);
     try {
       await api("/api/sync/realtime", { method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ realtime: $("#rtSync").checked,
+                               media_ocr: $("#rtMedia").checked,
+                               media_asr: $("#rtAsr").checked,
                                realtime_sec: +$("#rtInterval").value || 60 }) });
       await api("/api/sync/auto", { method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1699,6 +1927,8 @@ async function renderSettingsData(body) {
     } catch (e) { toast("同步设置保存失败：" + e.message); controls.forEach(x => x.disabled = false); }
   };
   $("#rtSync").onchange = saveSync;
+  $("#rtMedia").onchange = saveSync;
+  $("#rtAsr").onchange = saveSync;
   $("#rtInterval").onchange = saveSync;
   $("#autoSync").onchange = saveSync;
   $("#autoInterval").onchange = saveSync;
@@ -1708,10 +1938,12 @@ async function renderSettingsData(body) {
     catch (e) { toast("同步失败：" + e.message); b.disabled = false; b.textContent = "立即同步一次"; }
   };
   const rtState = $("#rtState");
+  const errs = [rt.error, rt.live_err, rt.fast_err].filter(Boolean);
   rtState.textContent = rt.last ? `最近：${rt.last} · 新增 ${rt.added} 条` +
     (rt.media_ocr || rt.media_asr ? ` · OCR ${rt.media_ocr} / 转写 ${rt.media_asr}` : "") +
-    (rt.error ? " · " + rt.error : "") : "尚未运行";
-  rtState.className = "job-state" + (rt.error ? " err" : "");
+    (rt.selfheal ? " · 已触发自愈重扫" : "") +
+    (errs.length ? " · " + errs.join("；") : "") : "尚未运行";
+  rtState.className = "job-state" + (errs.length ? " err" : "");
 }
 
 async function renderSettingsIndex(body) {
@@ -1720,7 +1952,11 @@ async function renderSettingsIndex(body) {
     <div class="job-row">
       <span class="job-icon">${key === "vectors" ? "⌁" : key === "ocr" ? "▧" : key === "asr" ? "◖" : "↗"}</span><span class="job-copy"><b>${label}</b><small>${key === "vectors" ? "提升语义检索效果" : "处理历史存量内容"}</small></span>
       <span class="job-state ${state.running ? "running" : ""}">
-        ${state.running ? "进行中 " + (state.count || "") : (state.done !== undefined ? state.done + (state.total ? "/" + state.total : "") : "")}</span>
+        ${(() => {
+          const total = (state.total === undefined || state.total === null) ? "…" : state.total;
+          const done = (state.done === undefined || state.done === null) ? "…" : state.done;
+          return state.running ? `进行中 ${state.count || 0}/${total}` : `${done}/${total}`;
+        })()}</span>
       <span><button class="mini" data-job="${key}" ${state.running || !canStart ? "disabled" : ""}>开始</button>
       <button class="mini ghost" data-stop="${key}" ${state.running ? "" : "disabled"}>停止</button></span>
     </div>`;
@@ -1738,6 +1974,14 @@ async function renderSettingsIndex(body) {
         <button class="mini" data-rescan="7">最近 7 天</button>
         <button class="mini" data-rescan="30">最近 30 天</button>
       </div></section></div><aside class="settings-side-card"><div class="settings-side-title">自动处理</div><p>新消息的图片、语音和朋友圈链接会在实时同步时自动处理。</p><ul><li>向量索引用于语义检索</li><li>OCR 处理图片文字</li><li>ASR 转写历史语音</li></ul></aside></div>`;
+  if (["asr", "files", "snsocr"].some(k => j[k].total === undefined || j[k].total === null)
+      && settingsSection === "index") {
+    if (window._jobRetry) clearTimeout(window._jobRetry);
+    window._jobRetry = setTimeout(() => {
+      window._jobRetry = null;
+      if (settingsSection === "index") showSettings("index");
+    }, 2500);
+  }
   body.querySelectorAll("[data-job]").forEach(b => b.onclick = async () => {
     b.disabled = true; b.textContent = "启动中…";
     try { await api(`/api/jobs/${b.dataset.job}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); toast("任务已启动"); setTimeout(() => showSettings("index"), 1500); }
@@ -1981,7 +2225,7 @@ async function openFilePreview(f) {
   try { meta = await api("/api/file/meta?" + qs); } catch {}
   const ext = (meta.ext || (name.match(/\.[^.]+$/) || [""])[0]).toLowerCase();
   const head = `<div class="pv-head"><span class="pv-name">${esc(name)}</span>
-      <span class="pv-actions"><a href="/api/file/raw?${qs}" target="_blank">用系统程序打开 ↗</a></span></div>`;
+      <span class="pv-actions">${meta.found ? `<a href="javascript:void(0)" id="revealFile">打开所在位置 ↗</a>` : ""}<a href="/api/file/raw?${qs}" target="_blank">用系统程序打开 ↗</a></span></div>`;
 
   if (!meta.found) {
     $("#pvBody").innerHTML = head +
@@ -2014,6 +2258,16 @@ async function openFilePreview(f) {
         `<div class="qa-empty">预览失败：${esc(e.message)}</div>`;
     }
   }
+  if (meta.found && $("#revealFile")) {
+    $("#revealFile").onclick = async () => {
+      try {
+        await api("/api/file/reveal", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat, id: lid, ts, title: name }) });
+        toast("已在资源管理器中定位文件");
+      } catch (e) { toast("定位失败：" + e.message); }
+    };
+  }
   // 文件有自己的 AI 会话：切到该文件作用域，右侧只显示这个文件的问答
   await enterAiScope(`file:${chat}:${lid}`, name);
   // 右侧自动聚焦到该文件问答
@@ -2037,7 +2291,11 @@ function switchView(v) {
     showPane(state.searchMode && $("#resultList").children.length ? "#resultList" : "#sessionList");
   }
   if (v === "contacts") showContacts();
-  if (v === "files") showFiles();
+  if (v === "files") {
+    $("#searchInput").placeholder = "搜索文件名（选中会话可缩小范围）";
+    showFiles();
+    return;
+  }
   if (v === "links") {
     $("#searchInput").placeholder = "搜索链接标题 / 来源群";
     showLinks();
@@ -2055,13 +2313,20 @@ function switchView(v) {
 $("#searchInput").addEventListener("input", (e) => {
   if (state.view === "links") { showLinks(e.target.value); return; }
   if (state.view === "moments") { showMoments(e.target.value); return; }
+  if (state.view === "files") {
+    fileView.q = e.target.value;
+    clearTimeout(fileQueryTimer);
+    fileQueryTimer = setTimeout(() => refreshFiles(true), 300);
+    return;
+  }
   if (state.view !== "chats") return;
   if (state.searchMode) return;
   renderSessions(e.target.value);
 });
 $("#searchInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && state.view === "chats") globalSearch(e.target.value);
-  if (e.key === "Escape") { e.target.value = ""; globalSearch(""); }
+  if (e.key === "Enter" && state.view === "files") { clearTimeout(fileQueryTimer); refreshFiles(true); }
+  if (e.key === "Escape") { e.target.value = ""; if (state.view === "files") { fileView.q = ""; refreshFiles(true); } else globalSearch(""); }
 });
 document.querySelectorAll(".rail-btn").forEach(b => b.onclick = () => switchView(b.dataset.view));
 $("#backToChat").onclick = () => exitPreview();

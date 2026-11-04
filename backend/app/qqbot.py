@@ -55,6 +55,7 @@ DEFAULT_CONF = {
     "app_secret": "",
     "group_reply": False,
     "citations": False,
+    "wechat_chat": None,              # 锁定某个微信会话为默认上下文；None = 全局
     "default_explorer": False,        # 新用户默认提问方式：探索模式
     "default_thinking": False,        # 新用户默认深度思考
     "max_msg_chars": MAX_MSG_CHARS,
@@ -65,6 +66,7 @@ DEFAULT_CONF = {
 STATUS: dict = {
     "running": False, "connected": False, "username": "", "error": "",
     "last_event": "", "users": 0, "started_at": "",
+    "menu": "", "menu_error": "",
 }
 
 _runner: "QQBotRunner | None" = None
@@ -98,6 +100,15 @@ def apply_config(main_conf: dict) -> None:
                     _runner.stop()
                 _runner = QQBotRunner(q)
                 _runner.start()
+
+
+def shutdown() -> None:
+    """服务退出时断开网关，避免托盘退出后残留连接线程。"""
+    global _runner
+    with _apply_lock:
+        if _runner:
+            _runner.stop()
+            _runner = None
 
 
 # ================================================================ 对话状态
@@ -222,7 +233,8 @@ def chunk_text(text: str, limit: int, max_chunks: int) -> list[str]:
 # ================================================================ 提示词
 
 
-def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dict]:
+def build_prompt(openid: str, question: str, channel: str = "qq",
+                 history: list | None = None) -> tuple[str, int | None, dict, dict]:
     import main as M                     # 延迟导入避免循环依赖
     conf_q = conf_of(M.load_conf())
     state = _load_state()
@@ -237,20 +249,21 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dic
     ent["turns"] = stored[-80:]
     _save_state(state)
 
+    weixin = channel == "weixin"
     qq_lines: list[dict] = []
-    for t in stored[-40:]:
-        who = "用户" if t.get("role") == "user" else "助手"
-        qq_lines.append({"ts": int(t.get("ts") or 0),
-                         "line": f"[{fmt_ts(t.get('ts'))}] QQ·{who}: "
-                                 f"{str(t.get('content') or '')[:600]}"})
+    if not weixin:
+        for t in stored[-40:]:
+            who = "用户" if t.get("role") == "user" else "助手"
+            qq_lines.append({"ts": int(t.get("ts") or 0),
+                             "line": f"[{fmt_ts(t.get('ts'))}] QQ·{who}: "
+                                     f"{str(t.get('content') or '')[:600]}"})
 
     wx_items: list[dict] = []
     try:
-        sessions = [s for s in M.api_sessions() if s.get("cnt")]
-        sessions.sort(key=lambda s: int(s.get("last_ts") or 0), reverse=True)
-        for s in sessions[:5]:
-            rows = M.api_messages(s["username"], limit=12).get("messages") or []
-            name = s.get("name") or s["username"]
+        sessions = {s["username"]: s for s in M.api_sessions() if s.get("cnt")}
+
+        def _emit(username: str, name: str, limit: int) -> None:
+            rows = M.api_messages(username, limit=limit).get("messages") or []
             for m in rows:
                 text = msg_text(m)
                 if not text:
@@ -259,8 +272,20 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dic
                 wx_items.append({
                     "ts": int(m.get("ts") or 0),
                     "line": f"[{fmt_ts(m.get('ts'))}] 微信·{name} {who}: {text}",
-                    "msg": m, "chat": s["username"], "chat_name": name, "who": who,
+                    "msg": m, "chat": username, "chat_name": name, "who": who,
                 })
+
+        locked = str(conf_q.get("wechat_chat") or "").strip()
+        if locked:
+            # 锁定会话：默认上下文只读这一个微信会话（条数更多）
+            s = sessions.get(locked)
+            _emit(locked, (s or {}).get("name") or locked, 30)
+        else:
+            # 全局模式：最近活跃的 5 个会话各取最近几条
+            for u, s in sorted(sessions.values(),
+                               key=lambda x: int(x.get("last_ts") or 0),
+                               reverse=True)[:5]:
+                _emit(u, s.get("name") or u, 12)
     except Exception as exc:  # noqa: BLE001
         log.warning("timeline failed: %s", exc)
 
@@ -274,7 +299,7 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dic
     picked.reverse()
 
     sources: dict[int, dict] = {}
-    if conf_q.get("citations"):
+    if conf_q.get("citations") and not weixin:
         wi = 0
         for item in picked:
             if "msg" in item:
@@ -283,26 +308,54 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dic
                 sources[wi] = item
 
     timeline = "\n".join(x["line"] for x in picked) if picked else "（无近期上下文）"
-    if conf_q.get("citations"):
-        cite_rule = ("时间线里 [W1]、[W2]… 是微信来源，引用时标注对应 [W编号]；"
-                     "工具结果的引用用 [n] 标注。")
+    if weixin:
+        hist = ""
+        if history:
+            rows = []
+            for m in history[-10:]:
+                if not isinstance(m, dict):
+                    continue
+                role = "用户" if m.get("role") == "user" else "助手"
+                c = m.get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c
+                                 if isinstance(x, dict) and x.get("type") == "text")
+                text = str(c or "").strip()
+                if text:
+                    rows.append(f"{role}：{text[:500]}")
+            if rows:
+                hist = "\n\n【对话记录】\n" + "\n".join(rows)
+        prompt = (
+            "你是通过微信（ClawBot）回答用户问题的助手，后端是本机微信知识库。\n"
+            "回答会直接发到微信聊天窗口：用纯文本、口语化，默认 2–5 句、能短则短；"
+            "除非用户明确要求，不要长篇大论、不要 Markdown 表格/代码块、不要输出 [W1] 或 [n] 引用编号。\n"
+            "需要更多细节时可调用工具检索本机微信记录（聊天、图片 OCR、语音转写、文件、链接、"
+            "合并转发都可查）；找不到就直说，不要编造。\n\n"
+            f"【近期时间线】\n{timeline}"
+            f"{hist}\n\n"
+            f"【当前问题】\n{question or '（用户没有输入文字）'}"
+        )
     else:
-        cite_rule = "回答里不要输出 [W1]、[n] 之类的引用编号，直接给结论。"
-    prompt = (
-        "你是通过 QQ 回答用户问题的助手，后端是本机微信知识库。\n"
-        "下面是本机微信账号的近期上下文（按时间正序，跨会话）和之前的 QQ 对话。\n"
-        f"{cite_rule}\n"
-        "需要更多细节时可调用工具检索本机微信记录（聊天、图片 OCR、语音转写、"
-        "文件、链接、合并转发都可查）。找不到就直说，不要编造。\n\n"
-        f"【近期时间线】\n{timeline}\n\n"
-        f"【当前问题】\n{question or '（用户没有输入文字）'}"
-    )
+        if conf_q.get("citations"):
+            cite_rule = ("时间线里 [W1]、[W2]… 是微信来源，引用时标注对应 [W编号]；"
+                         "工具结果的引用用 [n] 标注。")
+        else:
+            cite_rule = "回答里不要输出 [W1]、[n] 之类的引用编号，直接给结论。"
+        prompt = (
+            "你是通过 QQ 回答用户问题的助手，后端是本机微信知识库。\n"
+            "下面是本机微信账号的近期上下文（按时间正序，跨会话）和之前的 QQ 对话。\n"
+            f"{cite_rule}\n"
+            "需要更多细节时可调用工具检索本机微信记录（聊天、图片 OCR、语音转写、"
+            "文件、链接、合并转发都可查）。找不到就直说，不要编造。\n\n"
+            f"【近期时间线】\n{timeline}\n\n"
+            f"【当前问题】\n{question or '（用户没有输入文字）'}"
+        )
     sid = ent.get("session_id")
     if not sid:
         try:
             sid = M.api_ai_session_new(
                 {"scope": conf_q.get("wechat_chat") or "assistant",
-                 "name": f"QQ·{openid[:8]}"})["id"]
+                 "name": ("微信·助手" if weixin else f"QQ·{openid[:8]}")})["id"]
             ent["session_id"] = sid
             _save_state(state)
         except Exception as exc:  # noqa: BLE001
@@ -310,18 +363,100 @@ def build_prompt(openid: str, question: str) -> tuple[str, int | None, dict, dic
     return prompt, sid, sources, ent
 
 
-def ask_wechat(openid: str, question: str) -> str:
+CHANNEL_HELP = """可用指令：
+/帮助  查看这份说明
+/快速问答 或 /快速  少轮检索，回答更快
+/探索模式 或 /探索  多轮检索，适合统计和排查
+/深度思考 或 /思考  使用推理模型，更准但更慢
+/关闭思考  关闭推理模型
+/新对话  清空上下文，重新开始
+/暂停 /继续  暂停或恢复回答
+/状态  查看当前设置
+
+也可以直接发问题，例如「上周产品群讨论的上线时间」；我会检索本机微信记录后回答。"""
+
+
+def channel_command(openid: str, text: str):
+    """微信通道指令；命中返回回复文本，普通问题返回 None。"""
+    raw = (text or "").strip()
+    key = raw.lstrip("/").strip().lower()
+    if not key:
+        return None
+    aliases = {
+        "帮助": "help", "help": "help", "指令": "help", "菜单": "help",
+        "快速问答": "fast", "快速": "fast", "fast": "fast",
+        "探索模式": "explore", "探索": "explore", "explore": "explore",
+        "深度思考": "think_on", "思考": "think_on",
+        "关闭思考": "think_off", "关闭深度思考": "think_off",
+        "新对话": "new", "新会话": "new", "new": "new", "清空": "new",
+        "暂停": "pause", "pause": "pause",
+        "继续": "resume", "resume": "resume",
+        "状态": "status", "status": "status",
+    }
+    act = aliases.get(key)
+    if not act:
+        return None
+    state = _load_state()
+    ent = state.setdefault(openid, {"session_id": None, "turns": [], "paused": False})
+    ent.setdefault("explorer", False)
+    ent.setdefault("thinking", False)
+    ent.setdefault("paused", False)
+    if act == "help":
+        return CHANNEL_HELP
+    if act == "fast":
+        ent["explorer"] = False
+        _save_state(state)
+        return "已切换为快速问答（少轮检索）。"
+    if act == "explore":
+        ent["explorer"] = True
+        _save_state(state)
+        return "已切换为探索模式（多轮检索）。"
+    if act == "think_on":
+        ent["thinking"] = True
+        _save_state(state)
+        return "已开启深度思考（推理模型，回答更准但更慢）。"
+    if act == "think_off":
+        ent["thinking"] = False
+        _save_state(state)
+        return "已关闭深度思考。"
+    if act == "new":
+        ent["session_id"] = None
+        ent["turns"] = []
+        _save_state(state)
+        return "已开启新对话，之前的上下文已清空。"
+    if act == "pause":
+        ent["paused"] = True
+        _save_state(state)
+        return "已暂停回答。需要恢复时发送 /继续。"
+    if act == "resume":
+        ent["paused"] = False
+        _save_state(state)
+        return "已恢复回答，直接提问即可。"
+    if act == "status":
+        return ("当前状态：\n"
+                f"提问方式：{'探索模式' if ent.get('explorer') else '快速问答'}\n"
+                f"深度思考：{'开启' if ent.get('thinking') else '关闭'}\n"
+                f"暂停：{'是' if ent.get('paused') else '否'}\n"
+                f"上下文：{'新对话' if not ent.get('session_id') else '继续上次对话'}")
+    return None
+
+
+def ask_wechat(openid: str, question: str, channel: str = "qq",
+               history: list | None = None) -> str:
     import main as M
-    prompt, sid, sources, ent = build_prompt(openid, question)
+    ent0 = _load_state().get(openid) or {}
+    if ent0.get("paused"):
+        return "已暂停回答。需要恢复时发送 /继续。"
+    prompt, sid, sources, ent = build_prompt(openid, question, channel, history)
     payload = {"question": prompt, "chat": None, "history": [], "agent": True,
-               "explorer": bool(ent.get("explorer")),
-               "thinking": bool(ent.get("thinking"))}
+               "explorer": False if channel == "weixin" else bool(ent.get("explorer")),
+               "thinking": False if channel == "weixin" else bool(ent.get("thinking"))}
     if sid:
         payload["session_id"] = sid
     data = M.api_ask(payload)
     answer = str(data.get("answer") or "").strip()
     conf_q = conf_of(M.load_conf())
-    if conf_q.get("citations") and sources:
+    if channel != "weixin" and conf_q.get("citations") and sources:
         parts = []
         for n in sorted({int(x) for x in re.findall(r"\[W(\d{1,3})\]", answer)}):
             src = sources.get(n)
@@ -334,7 +469,8 @@ def ask_wechat(openid: str, question: str) -> str:
             answer += "\n\n—— 引用 ——\n" + "\n\n".join(parts)
     else:
         answer = strip_citation_markers(answer)
-    log.info("ask openid=%s prompt=%d answer=%d", openid[:8], len(prompt), len(answer))
+    log.info("ask channel=%s openid=%s prompt=%d answer=%d",
+             channel, openid[:8], len(prompt), len(answer))
     return answer
 
 

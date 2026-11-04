@@ -13,6 +13,7 @@ import re
 import queue
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -20,7 +21,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -40,6 +41,7 @@ from chattrace.service.media import MediaService, decode_dat  # noqa: E402
 from textutil import display_text as clean_display, search_text as clean_search  # noqa: E402
 import vector  # noqa: E402
 import agent as agent_mod  # noqa: E402
+import privacy  # noqa: E402
 import sns as sns_mod  # noqa: E402
 
 _vec_local = threading.local()
@@ -929,6 +931,7 @@ def expand_context(con, rows, around: int = 3) -> list[dict]:
 def call_llm(conf, messages_payload):
     import urllib.request
     llm = conf["llm"]
+    messages_payload = privacy.redact_messages(conf, messages_payload)
     body = json.dumps({"model": llm["model"], "messages": messages_payload,
                        "temperature": conf.get("qa", {}).get("temperature", 0.3)}).encode()
     req = urllib.request.Request(
@@ -1478,6 +1481,8 @@ def _warm_models():
 @app.on_event("startup")
 def _on_startup():
     threading.Thread(target=_warm_models, daemon=True).start()
+    # 后台预热任务总数（文件/朋友圈要逐条解析，可能几秒），索引页打开即有 n/m
+    threading.Thread(target=_job_totals_bg, daemon=True).start()
     # 启动先同步一次联系人/会话：修复历史漏导（新增好友/会话没进列表）
     def _dirs_boot():
         try:
@@ -1515,6 +1520,32 @@ def _on_startup():
         qqbot_mod.apply_config(load_conf())
     except Exception as exc:      # noqa: BLE001 QQ 机器人配置异常不影响主服务
         print(f"[qqbot] startup failed: {exc}")
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    """退出时收尾：结束后台解析子进程、断开 QQ 网关、关闭常驻连接。
+
+    各巡检线程是 daemon，进程退出即结束；这里只处理会留下外部进程/连接的资源。
+    """
+    for name, proc in list(_job_procs.items()):
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+        except Exception:      # noqa: BLE001
+            pass
+    for con in list(_live_conns.values()):
+        try:
+            con.close()
+        except Exception:      # noqa: BLE001
+            pass
+    _live_conns.clear()
+    _live_schema.clear()
+    try:
+        import qqbot as qqbot_mod
+        qqbot_mod.shutdown()
+    except Exception:      # noqa: BLE001
+        pass
 
 
 def _register_sns_links(con) -> int:
@@ -1699,6 +1730,516 @@ def api_config_test():
     return {"ok": True, "reply": ans[:60], "model": conf["llm"]["model"]}
 
 
+# ---------------------------------------------------------------- API: 出站脱敏
+@app.get("/api/privacy")
+def api_privacy_get():
+    return privacy.options(load_conf())
+
+
+@app.post("/api/privacy")
+def api_privacy_set(payload: dict):
+    conf = load_conf()
+    p = conf.setdefault("privacy", {})
+    for k in privacy.DEFAULTS:
+        if k in payload:
+            p[k] = bool(payload[k])
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, **privacy.options(conf)}
+
+
+# ---------------------------------------------------------------- API: 微信 Agent 入口（OpenAI 兼容，供 OpenClaw/ClawBot 等接入）
+def _agent_api_conf() -> dict:
+    c = load_conf().get("agent_api") or {}
+    return {"enabled": bool(c.get("enabled")),
+            "key": str(c.get("api_key") or ""),
+            "model": str(c.get("model") or "wechat-kb")}
+
+
+def _agent_api_model(authorization: str) -> str | None:
+    """校验 Bearer Key；通过返回模型名，失败/未开启返回 None。"""
+    a = _agent_api_conf()
+    if not a["enabled"]:
+        return None
+    token = (authorization or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    import hmac as _h
+    if not a["key"] or not _h.compare_digest(token, a["key"]):
+        return None
+    return a["model"]
+
+
+@app.get("/api/agentapi")
+def api_agentapi_get():
+    a = _agent_api_conf()
+    return {"enabled": a["enabled"], "key": a["key"], "model": a["model"],
+            "base_url": "http://127.0.0.1:8721/v1"}
+
+
+@app.post("/api/agentapi")
+def api_agentapi_set(payload: dict):
+    conf = load_conf()
+    a = conf.setdefault("agent_api", {})
+    if "enabled" in payload:
+        a["enabled"] = bool(payload["enabled"])
+    if payload.get("model"):
+        a["model"] = str(payload["model"]).strip() or "wechat-kb"
+    if payload.get("regenerate") or (a.get("enabled") and not a.get("api_key")):
+        import secrets as _s
+        a["api_key"] = "wk-" + _s.token_hex(16)
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+    a2 = _agent_api_conf()
+    return {"ok": True, "enabled": a2["enabled"], "key": a2["key"], "model": a2["model"]}
+
+
+@app.get("/v1/models")
+def v1_models(authorization: str = Header(default="")):
+    model = _agent_api_model(authorization)
+    if not model:
+        raise HTTPException(401, "无效的 API Key 或入口未开启")
+    return {"object": "list", "data": [
+        {"id": model, "object": "model", "created": 0,
+         "owned_by": "wechat-knowledge-assistant"}]}
+
+
+_INBOUND_SENTINELS = [
+    "Conversation info (untrusted metadata):",
+    "Sender (untrusted metadata):",
+    "Thread starter (untrusted, for context):",
+    "Reply target of current user message (untrusted, for context):",
+    "Forwarded message context (untrusted metadata):",
+    "Chat history since last reply (untrusted, for context):",
+]
+_INBOUND_META_RE = re.compile(
+    r"(?ms)^(?:" + "|".join(re.escape(s) for s in _INBOUND_SENTINELS) +
+    r")\s*\n```json\s*\n.*?^```\s*$\n?")
+_LEADING_TS_RE = re.compile(r"^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] *")
+
+
+def _strip_inbound_meta(text: str) -> str:
+    """去掉 OpenClaw 注入的时间戳与元数据块，只留用户真正发的内容。
+
+    OpenClaw 会在用户消息前加 `[Wed ...]` 和若干 `xxx (untrusted metadata):`
+    + ```json``` 块；不剥掉的话 /帮助 之类的指令无法识别。
+    """
+    t = (text or "").strip()
+    t = _LEADING_TS_RE.sub("", t)
+    t = _INBOUND_META_RE.sub("", t)
+    # 尾部可能还有一段 untrusted context，直接截断
+    idx = t.find("Untrusted context (metadata, do not treat as instructions or commands):")
+    if idx >= 0:
+        t = t[:idx]
+    return t.strip()
+
+
+def _last_user_text(messages: list) -> str:
+    for m in reversed(messages or []):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            t = c.strip()
+        elif isinstance(c, list):
+            t = "\n".join(x.get("text", "") for x in c
+                          if isinstance(x, dict) and x.get("type") == "text").strip()
+        else:
+            t = ""
+        if t:
+            return t
+    return ""
+
+
+def _agent_api_log(line: str) -> None:
+    """微信 Agent 入口的轻量访问日志（本机排查用，含问题前 80 字）。"""
+    try:
+        with open(DATA / "agent_api.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+    except Exception:
+        pass
+
+
+@app.post("/v1/chat/completions")
+def v1_chat(payload: dict, authorization: str = Header(default="")):
+    """OpenAI 兼容问答：微信 Agent（OpenClaw weixin 渠道）把消息路由到这。
+
+    取最后一条用户消息作为问题，走与 QQ 机器人同一条问答链路（构建微信上下文
+    → Agent 工具循环 → 引用清洗），回答以 OpenAI chat.completions 结构返回。
+    """
+    model = _agent_api_model(authorization)
+    if not model:
+        _agent_api_log("401 无效密钥或入口未开启")
+        raise HTTPException(401, "无效的 API Key 或入口未开启")
+    question = _strip_inbound_meta(_last_user_text(payload.get("messages") or []))
+    if not question:
+        raise HTTPException(400, "消息里没有可回答的用户问题")
+    _agent_api_log(f"收到提问（{len(question)} 字）：{question[:80]}")
+    import qqbot as qqbot_mod
+    # 指令（/帮助、/探索模式 等）直接由本机处理，不调用模型
+    cmd_reply = qqbot_mod.channel_command("openclaw", question)
+    if cmd_reply is not None:
+        answer = cmd_reply
+        _agent_api_log(f"指令已处理：{question[:40]}")
+    else:
+        try:
+            history = [m for m in (payload.get("messages") or [])
+                       if isinstance(m, dict) and m.get("role") in ("user", "assistant")][:-1]
+            answer = qqbot_mod.ask_wechat("openclaw", question, channel="weixin",
+                                          history=history)
+        except Exception as e:      # noqa: BLE001
+            _agent_api_log(f"问答失败：{type(e).__name__}: {e}")
+            raise HTTPException(500, f"问答失败：{e}")
+        answer = (answer or "").strip() or "（未生成回答，请稍后重试）"
+        _agent_api_log(f"回答完成（{len(answer)} 字）")
+    import secrets as _s
+    cid, now = "chatcmpl-" + _s.token_hex(8), int(time.time())
+
+    if payload.get("stream"):
+        from fastapi.responses import StreamingResponse
+
+        def gen():
+            def chunk(delta, finish=None):
+                return "data: " + json.dumps(
+                    {"id": cid, "object": "chat.completion.chunk", "created": now,
+                     "model": model,
+                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]},
+                    ensure_ascii=False) + "\n\n"
+            yield chunk({"role": "assistant"})
+            for i in range(0, len(answer), 512):
+                yield chunk({"content": answer[i:i + 512]})
+            yield chunk({}, "stop")
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    return {"id": cid, "object": "chat.completion", "created": now, "model": model,
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant", "content": answer},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+
+
+# ---------------------------------------------------------------- API: 微信通道（OpenClaw）在软件内操作
+_OC_LOGIN = {"proc": None, "running": False, "log": ""}
+
+
+def _oc_paths() -> tuple[str, str] | None:
+    """(openclaw.cmd, node24 目录)；home 可在 config.openclaw.home 覆盖。"""
+    c = load_conf().get("openclaw") or {}
+    home = Path(str(c.get("home") or (Path.home() / "openclaw-runtime")))
+    oc = home / "npm" / "openclaw.cmd"
+    node = home / "node24"
+    if oc.exists() and node.exists():
+        return str(oc), str(node)
+    return None
+
+
+def _no_window() -> dict:
+    """Windows 下隐藏子进程控制台，避免设置页操作时弹出黑框。"""
+    if os.name != "nt":
+        return {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {"startupinfo": si, "creationflags": 0x08000000}   # CREATE_NO_WINDOW
+
+
+def _oc_run(args: list[str], timeout: int = 90) -> str:
+    import subprocess
+    p = _oc_paths()
+    if not p:
+        raise HTTPException(400, "未找到 OpenClaw（openclaw-runtime 目录不存在）")
+    oc, node = p
+    env = os.environ.copy()
+    env["PATH"] = node + os.pathsep + env.get("PATH", "")
+    env["npm_config_registry"] = "https://registry.npmmirror.com"
+    try:
+        r = subprocess.run(["cmd", "/c", oc, *args], capture_output=True, text=True,
+                           encoding="utf-8", errors="ignore", timeout=timeout, env=env,
+                           **_no_window())
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "命令超时")
+    return (r.stdout or "") + ("\n" + r.stderr if r.stderr.strip() else "")
+
+
+def _gateway_running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 18789), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _kill_gateways() -> int:
+    """结束残留的 OpenClaw Gateway 进程（换账号/重启时旧实例会占着端口）。
+
+    只匹配 node.exe 且命令行同时含 openclaw 与 gateway/dist/index.js，避免误杀
+    恰好命令行里带这两个词的终端/脚本。
+    """
+    killed = 0
+    try:
+        import psutil
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                name = (p.info.get("name") or "").lower()
+                if name not in {"node.exe", "node"}:
+                    continue
+                cmd = " ".join(p.info.get("cmdline") or [])
+                low = cmd.lower()
+                if "openclaw" in low and ("gateway" in low or "dist/index.js" in low):
+                    p.kill()
+                    killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:      # noqa: BLE001
+        pass
+    return killed
+
+
+def _restart_gateway() -> bool:
+    """干净重启：先杀残留实例，再启动计划任务（隐藏窗口），轮询到端口就绪。"""
+    _kill_gateways()
+    time.sleep(2)
+    env = None
+    try:
+        subprocess.run(["schtasks", "/Run", "/TN", "OpenClaw Gateway"],
+                       capture_output=True, timeout=30, env=env, **_no_window())
+    except Exception:      # noqa: BLE001
+        pass
+    for _ in range(40):
+        if _gateway_running():
+            return True
+        time.sleep(1)
+    return False
+
+
+_OCPROBE = {"ts": 0.0, "text": "", "busy": False}
+
+
+def _probe_channels_bg() -> None:
+    """后台探活：CLI 可能要几十秒，不能阻塞设置页的状态轮询。"""
+    if _OCPROBE["busy"]:
+        return
+    _OCPROBE["busy"] = True
+    try:
+        _OCPROBE["text"] = _oc_run(["channels", "status", "--probe"], timeout=90).strip()
+    except Exception as e:      # noqa: BLE001
+        _OCPROBE["text"] = f"探测失败：{e}"
+    finally:
+        _OCPROBE["ts"] = time.time()
+        _OCPROBE["busy"] = False
+
+
+@app.get("/api/openclaw/status")
+def api_openclaw_status():
+    found = bool(_oc_paths())
+    probe = _OCPROBE
+    if found and not probe["busy"] and time.time() - probe["ts"] > 30:
+        threading.Thread(target=_probe_channels_bg, daemon=True).start()
+    # 登录器除了字符二维码，还会打印一条 liteapp 链接（含 qrcode 令牌）。
+    # 页面用这条链接生成真正的二维码图片，避免字符画的像素间隙扫不出来。
+    qr_url = ""
+    for line in reversed((_OC_LOGIN["log"] or "").splitlines()):
+        m = re.search(r"https://liteapp\.weixin\.qq\.com/[^\s\"'<>]+", line)
+        if m:
+            qr_url = m.group(0)
+            break
+    a = load_conf().get("agent_api") or {}
+    return {"found": found, "gateway": _gateway_running(),
+            "enabled": bool(a.get("enabled")),
+            "probe": probe["text"] if found else "",
+            "login_running": _OC_LOGIN["running"],
+            "qr_url": qr_url,
+            "login_log": _OC_LOGIN["log"][-3000:]}
+
+
+@app.post("/api/openclaw/toggle")
+def api_openclaw_toggle(payload: dict):
+    """机器人设置里的「启用微信通道」开关：开=写配置并重启网关，关=停网关。"""
+    want = bool(payload.get("enabled"))
+    conf = load_conf()
+    a = conf.setdefault("agent_api", {})
+    a["enabled"] = want
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+    if want:
+        _ensure_oc_config()
+        ok = _restart_gateway()
+        return {"ok": True, "enabled": True, "gateway": ok}
+    killed = _kill_gateways()
+    return {"ok": True, "enabled": False, "gateway": _gateway_running(),
+            "output": f"已停止 {killed} 个网关进程"}
+
+
+_QR_CACHE: dict[str, bytes] = {}
+
+
+@app.get("/api/openclaw/qr.png")
+def api_openclaw_qr():
+    """把当前登录二维码链接渲染成图片（黑白、带静区），比字符画可靠。"""
+    url = ""
+    for line in reversed((_OC_LOGIN["log"] or "").splitlines()):
+        m = re.search(r"https://liteapp\.weixin\.qq\.com/[^\s\"'<>]+", line)
+        if m:
+            url = m.group(0)
+            break
+    if not url:
+        raise HTTPException(404, "还没有可用的登录二维码")
+    png = _QR_CACHE.get(url)
+    if png is None:
+        try:
+            import qrcode
+            from io import BytesIO
+            img = qrcode.make(url, box_size=10, border=3)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            png = buf.getvalue()
+        except Exception as e:      # noqa: BLE001
+            raise HTTPException(500, f"二维码生成失败：{e}")
+        _QR_CACHE.clear()      # 令牌每次刷新都会变，只留最新一张
+        _QR_CACHE[url] = png
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/openclaw/gateway")
+def api_openclaw_gateway(payload: dict):
+    action = str(payload.get("action") or "restart")
+    if action == "restart":
+        ok = _restart_gateway()
+        return {"ok": True, "gateway": ok, "output": "网关已重启" if ok else "网关未就绪"}
+    if action == "stop":
+        killed = _kill_gateways()
+        return {"ok": True, "gateway": _gateway_running(), "output": f"已结束 {killed} 个网关进程"}
+    raise HTTPException(400, "action 仅支持 restart/stop")
+
+
+@app.post("/api/openclaw/login")
+def api_openclaw_login():
+    """启动微信扫码登录：二维码会以字符画形式流式输出到登录日志。"""
+    import subprocess
+    p = _oc_paths()
+    if not p:
+        raise HTTPException(400, "未找到 OpenClaw（openclaw-runtime 目录不存在）")
+    if _OC_LOGIN["running"]:
+        raise HTTPException(409, "登录流程已在进行中")
+    _ensure_oc_config()      # 扫码前自动写好 provider/密钥，页面无需任何输入框
+    oc, node = p
+    env = os.environ.copy()
+    env["PATH"] = node + os.pathsep + env.get("PATH", "")
+    env["npm_config_registry"] = "https://registry.npmmirror.com"
+
+    def _pump(proc):
+        try:
+            for line in proc.stdout:
+                _OC_LOGIN["log"] = (_OC_LOGIN["log"] + line)[-6000:]
+        except Exception:
+            pass
+        finally:
+            _OC_LOGIN["running"] = False
+            _OC_LOGIN["log"] += "\n[登录进程已退出]"
+            try:
+                # 扫码成功后账号才会写进配置；重启网关才能为它启动消息监听
+                ok = _restart_gateway()
+                _OC_LOGIN["log"] += "\n[已自动重启网关]" if ok else "\n[自动重启网关未就绪]"
+            except Exception as e:      # noqa: BLE001
+                _OC_LOGIN["log"] += f"\n[自动重启网关失败：{e}]"
+
+    _OC_LOGIN["log"] = ""
+    _OC_LOGIN["running"] = True
+    try:
+        proc = subprocess.Popen(["cmd", "/c", oc, "channels", "login",
+                                 "--channel", "openclaw-weixin"],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="ignore",
+                                bufsize=1, env=env, **_no_window())
+    except Exception as e:      # noqa: BLE001
+        _OC_LOGIN["running"] = False
+        raise HTTPException(500, f"启动登录失败：{e}")
+    _OC_LOGIN["proc"] = proc
+    threading.Thread(target=_pump, args=(proc,), daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/openclaw/login/stop")
+def api_openclaw_login_stop():
+    proc = _OC_LOGIN.get("proc")
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+    return {"ok": True}
+
+
+@app.post("/api/openclaw/pairing")
+def api_openclaw_pairing(payload: dict):
+    code = str(payload.get("code") or "").strip()
+    if not code:
+        raise HTTPException(400, "请输入配对码")
+    out = _oc_run(["pairing", "approve", "openclaw-weixin", code], timeout=60)
+    return {"ok": True, "output": out[-1200:]}
+
+
+@app.post("/api/openclaw/apply")
+def _ensure_oc_config() -> dict:
+    """把本助手写入 OpenClaw 配置（provider/主模型/网关 token/插件允许），返回 {model,key}。
+
+    设置页不再让用户填任何字段：扫码登录前自动调用一次即可。
+    """
+    import secrets as _s
+    conf = load_conf()
+    a = conf.setdefault("agent_api", {})
+    a["enabled"] = True
+    a.setdefault("model", "wechat-kb")
+    if not a.get("api_key"):
+        a["api_key"] = "wk-" + _s.token_hex(16)
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg_path = Path.home() / ".openclaw" / "openclaw.json"
+    if not cfg_path.exists():
+        raise HTTPException(400, "未检测到 OpenClaw（~/.openclaw/openclaw.json 不存在），"
+                                 "请先按 README 安装微信渠道")
+    try:
+        oc = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as e:      # noqa: BLE001
+        raise HTTPException(500, f"读取 OpenClaw 配置失败：{e}")
+
+    gw = oc.setdefault("gateway", {})
+    gw.setdefault("mode", "local")
+    auth = gw.setdefault("auth", {})
+    if not auth.get("token"):
+        auth["token"] = "ocw-" + _s.token_hex(12)
+    plugins = oc.setdefault("plugins", {})
+    allow = plugins.setdefault("allow", [])
+    if "openclaw-weixin" not in allow:
+        allow.append("openclaw-weixin")
+    models = oc.setdefault("models", {})
+    models["mode"] = "merge"
+    providers = models.setdefault("providers", {})
+    providers["wechatkb"] = {
+        "baseUrl": "http://127.0.0.1:8721/v1",
+        "apiKey": a["api_key"],
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "models": [{"id": a["model"], "name": "微信知识助手"}],
+    }
+    agents = oc.setdefault("agents", {})
+    defaults = agents.setdefault("defaults", {})
+    model_cfg = defaults.setdefault("model", {})
+    model_cfg["primary"] = f"wechatkb/{a['model']}"
+    try:
+        cfg_path.write_text(json.dumps(oc, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:      # noqa: BLE001
+        raise HTTPException(500, f"写入 OpenClaw 配置失败：{e}")
+    return {"model": a["model"], "key": a["api_key"]}
+
+
+@app.post("/api/openclaw/apply")
+def api_openclaw_apply():
+    """一键写入并重启（保留给命令行/高级用法）。"""
+    info = _ensure_oc_config()
+    ok = _restart_gateway()
+    return {"ok": True, "gateway": ok, "output": "网关已重启" if ok else "网关未就绪",
+            "model": info["model"], "key": info["key"]}
+
+
+
 # ---------------------------------------------------------------- API: 文件预览与文件问答
 FILE_EXTS_TEXT = {".txt", ".md", ".csv", ".log", ".json", ".py", ".js", ".ts", ".html",
                   ".xml", ".yml", ".yaml", ".ini", ".sql", ".java", ".c", ".cpp", ".h"}
@@ -1768,7 +2309,7 @@ def extract_text(path: Path, limit: int = 20000) -> str:
                 if sum(len(x) for x in parts) > limit:
                     break
             return "\n".join(parts)[:limit]
-        if ext in (".docx", ".doc"):
+        if ext in (".docx",):
             import docx as _docx
             d = _docx.Document(str(path))
             txt = "\n".join(p.text for p in d.paragraphs)
@@ -1776,6 +2317,20 @@ def extract_text(path: Path, limit: int = 20000) -> str:
                 for row in tbl.rows[:30]:
                     txt += "\n| " + " | ".join(c.text.strip() for c in row.cells) + " |"
             return txt[:limit]
+        if ext in (".pptx", ".pptm"):
+            import zipfile
+            with zipfile.ZipFile(str(path)) as z:
+                slides = sorted(
+                    (n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
+                    key=lambda s: int(re.search(r"slide(\d+)\.xml$", s).group(1)))
+                out = []
+                for i, sn in enumerate(slides[:40]):
+                    xml = z.read(sn).decode("utf-8", "ignore")
+                    texts = [html.unescape(t) for t in re.findall(r"<a:t>(.*?)</a:t>", xml, re.S)]
+                    out.append(f"[第{i+1}页]\n" + "\n".join(texts))
+                    if sum(len(x) for x in out) > limit:
+                        break
+            return "\n".join(out)[:limit]
         if ext in (".xlsx", ".xlsm"):
             import openpyxl
             wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
@@ -1915,9 +2470,10 @@ def api_file_meta(chat: str, local_id: int, ts: int, name: str):
         msg_id = None
     p = locate_file(chat, local_id, ts, name)
     if not p:
-        return {"found": False, "name": name, "msg_id": msg_id}
+        return {"found": False, "name": name, "msg_id": msg_id, "path_exists": False}
     return {"found": True, "name": p.name,
             "size": p.stat().st_size, "ext": p.suffix.lower(), "msg_id": msg_id,
+            "path_exists": True,
             "previewable": p.suffix.lower() in FILE_EXTS_TEXT | {".pdf"} |
                            {".png", ".jpg", ".jpeg", ".gif", ".webp"}}
 
@@ -1948,8 +2504,31 @@ def api_file_text(chat: str, local_id: int, ts: int, name: str, limit: int = 200
     return {"name": fname, "text": text[:limit]}
 
 
+@app.post("/api/file/reveal")
+def api_file_reveal(payload: dict):
+    """在资源管理器中定位文件（仅本机服务，端口只监听 127.0.0.1）。"""
+    import subprocess
+    chat = str(payload.get("chat") or "")
+    name = str(payload.get("title") or payload.get("name") or "")
+    p = locate_file(chat, int(payload.get("id") or 0), int(payload.get("ts") or 0), name)
+    if not p:
+        raise HTTPException(404, "文件不在本地（可能已被清理或未下载）")
+    try:
+        subprocess.Popen(["explorer.exe", f"/select,{p}"])
+    except Exception as e:      # noqa: BLE001
+        raise HTTPException(500, f"打开所在位置失败：{e}")
+    return {"ok": True}
+
+
+_FAKE_IP_NETS = [ipaddress.ip_network("198.18.0.0/15")]   # Clash/Surge fake-IP DNS 段
+
+
 def _validate_external_url(url: str) -> str:
-    """校验外部抓取地址，拒绝本机/内网目标，避免链接代理成为 SSRF。"""
+    """校验外部抓取地址，拒绝本机/内网目标，避免链接代理成为 SSRF。
+
+    198.18.0.0/15 是 Clash 系代理的 fake-IP 段：系统 DNS 开 TUN 时所有域名都
+    解析成它，按保留地址一票否决会把全部外链抓取拒掉（OpenClaw 同款豁免）。
+    """
     u = urllib.parse.urlparse(str(url or "").strip())
     if u.scheme not in {"http", "https"} or not u.hostname:
         raise HTTPException(400, "只支持 http/https 链接")
@@ -1965,8 +2544,9 @@ def _validate_external_url(url: str) -> str:
             ip = ipaddress.ip_address(addr.split("%", 1)[0])
         except ValueError:
             continue
-        if not ip.is_global:
-            raise HTTPException(400, "不允许访问内网或保留地址")
+        if ip.is_global or any(ip in net for net in _FAKE_IP_NETS):
+            continue
+        raise HTTPException(400, "不允许访问内网或保留地址")
     return u.geturl()
 
 
@@ -2386,8 +2966,17 @@ def _link_worker_loop():
             _LINK_WORKER["current"] = url[:80]
             kind = detect(url)
             if kind == "generic":
-                # 公众号/普通网页：走原有的正文抓取（不需要 OCR/ASR）
-                d = fetch_article(url)
+                # 公众号/普通网页：走原有的正文抓取（不需要 OCR/ASR）。
+                # fetch_article 会对坏链抛 HTTPException（如 SSRF 校验失败），
+                # 必须落成 state=2，否则该链接永远留在"解析中"被无限重试。
+                try:
+                    d = fetch_article(url)
+                except Exception as fe:      # noqa: BLE001
+                    con = db(); _ensure_link_tables(con)
+                    con.execute("UPDATE chat_link SET state=2 WHERE url=?", (url,))
+                    con.commit(); con.close()
+                    _LINK_WORKER["error"] = f"{url[:60]}：{type(fe).__name__}"
+                    continue
                 ok = bool((d.get("text") or "").strip()) and not d.get("error")
                 con = db(); _ensure_link_tables(con)
                 con.execute("UPDATE chat_link SET state=? WHERE url=?", (1 if ok else 2, url))
@@ -2533,29 +3122,104 @@ def api_links(n: int = 200, q: str = ""):
     return out
 
 
+@app.get("/api/links/queue")
+def api_links_queue():
+    """链接解析队列概况：待解析条数与当前正在解析的 URL（诊断"一直解析中"用）。"""
+    con = db()
+    _ensure_link_tables(con)
+    pending = con.execute(
+        "SELECT COUNT(*) FROM chat_link l LEFT JOIN link_cache c ON c.url=l.url "
+        "WHERE IFNULL(l.state,0)=0 AND IFNULL(c.text,'')=''").fetchone()[0]
+    failed = con.execute("SELECT COUNT(*) FROM chat_link WHERE state=2").fetchone()[0]
+    con.close()
+    th = _LINK_WORKER.get("thread")
+    return {"pending": pending, "failed": failed,
+            "thread_alive": bool(th and th.is_alive()),
+            "queued": _LINK_QUEUE.qsize(),
+            "current": _LINK_WORKER.get("current") or "",
+            "last_done": _LINK_WORKER.get("last") or "",
+            "error": _LINK_WORKER.get("error") or ""}
+
+
+FILE_KINDS = {
+    "doc": {".pdf", ".doc", ".docx", ".txt", ".md", ".rtf", ".odt"},
+    "sheet": {".xls", ".xlsx", ".xlsm", ".csv"},
+    "slide": {".ppt", ".pptx", ".pptm"},
+    "image": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic"},
+    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"},
+    "media": {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".amr",
+              ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".silk"},
+}
+
+
+def file_kind(ext: str) -> str:
+    ext = (ext or "").lower()
+    for kind, exts in FILE_KINDS.items():
+        if ext in exts:
+            return kind
+    return "other"
+
+
+def _file_name(packed_info) -> str:
+    fields = pb_fields(packed_info)
+    if not fields:
+        return ""
+    inner = pb_fields(fields[0][1])
+    for tag, val in (inner or fields):
+        if tag == 1 and val:
+            return val.decode("utf-8", "ignore")
+    return ""
+
+
 @app.get("/api/files")
-def api_files(q: str = "", n: int = 200):
+def api_files(q: str = "", n: int = 200, offset: int = 0, chat: str = "",
+              ext: str = "", kind: str = "", since: int = 0, until: int = 0,
+              sort: str = "new"):
     rdb = resource_db()
     if not rdb:
         return []
+    n = max(1, min(n, 500))
+    offset = max(0, offset)
     con = db()
     chat_ids = {r[0]: r[1] for r in rdb.execute("SELECT rowid, user_name FROM ChatName2Id")}
-    rows = rdb.execute("""
-        SELECT i.chat_id, i.message_local_id, i.message_create_time, d.size, d.packed_info
-        FROM MessageResourceInfo i JOIN MessageResourceDetail d ON d.message_id = i.message_id
-        WHERE i.message_local_type & 4294967295 = 49 AND length(d.packed_info) > 2
-        ORDER BY i.message_create_time DESC LIMIT 3000""").fetchall()
+    where = ["i.message_local_type & 4294967295 = 49", "length(d.packed_info) > 2"]
+    args: list[Any] = []
+    if chat:
+        ids = [rid for rid, uname in chat_ids.items() if uname == chat]
+        if not ids:
+            con.close()
+            rdb.close()
+            return []
+        where.append("i.chat_id IN (" + ",".join("?" for _ in ids) + ")")
+        args.extend(ids)
+    if since:
+        where.append("i.message_create_time >= ?")
+        args.append(int(since))
+    if until:
+        where.append("i.message_create_time <= ?")
+        args.append(int(until))
+    # 文件名/扩展名只能在解析 packed_info 后过滤：带这些条件时多取一些候选，
+    # 否则最近 3000 条里可能一个都匹配不上。仍设上限，避免每键一次全表解析。
+    filtered = bool(q or ext or kind)
+    cap = min(8000 if filtered else max(3000, (offset + n) * 2), 12000)
+    sql = ("SELECT i.chat_id, i.message_local_id, i.message_create_time, d.size, d.packed_info "
+           "FROM MessageResourceInfo i JOIN MessageResourceDetail d ON d.message_id = i.message_id "
+           "WHERE " + " AND ".join(where) + " ORDER BY i.message_create_time DESC LIMIT ?")
+    rows = rdb.execute(sql, [*args, cap]).fetchall()
+    wanted_ext = (ext or "").strip().lower()
+    if wanted_ext and not wanted_ext.startswith("."):
+        wanted_ext = "." + wanted_ext
     out = []
     for r in rows:
-        fields = pb_fields(r["packed_info"])
-        name = ""
-        if fields:
-            inner = pb_fields(fields[0][1])
-            for tag, val in (inner or fields):
-                if tag == 1 and val:
-                    name = val.decode("utf-8", "ignore")
-                    break
-        if not name or (q and q.lower() not in name.lower()):
+        name = _file_name(r["packed_info"])
+        if not name:
+            continue
+        fext = Path(name).suffix.lower()
+        if q and q.lower() not in name.lower():
+            continue
+        if wanted_ext and fext != wanted_ext:
+            continue
+        if kind and file_kind(fext) != kind:
             continue
         username = chat_ids.get(r["chat_id"], "")
         cname = con.execute(
@@ -2563,10 +3227,16 @@ def api_files(q: str = "", n: int = 200):
             (username,)).fetchone()
         out.append({"id": r["message_local_id"], "chat": username,
                     "chat_name": cname[0] if cname else username,
-                    "ts": r["message_create_time"], "title": name, "size": r["size"]})
-        if len(out) >= n:
-            break
-    return out
+                    "ts": r["message_create_time"], "title": name, "size": r["size"],
+                    "ext": fext, "kind": file_kind(fext)})
+    con.close()
+    rdb.close()
+    if sort == "old":
+        out.sort(key=lambda x: x["ts"] or 0)
+    elif sort == "size":
+        out.sort(key=lambda x: x["size"] or 0, reverse=True)
+    return out[offset:offset + n]
+
 
 
 # ---------------------------------------------------------------- API: QQ 机器人
@@ -2583,10 +3253,12 @@ def api_qqbot_status():
                              else ("已配置" if secret else ""),
             "group_reply": bool(conf.get("group_reply")),
             "citations": bool(conf.get("citations")),
+            "wechat_chat": str(conf.get("wechat_chat") or ""),
             "default_explorer": bool(conf.get("default_explorer")),
             "default_thinking": bool(conf.get("default_thinking")),
             "running": st.get("running"), "connected": st.get("connected"),
             "username": st.get("username"), "error": st.get("error"),
+            "menu": st.get("menu"), "menu_error": st.get("menu_error"),
             "last_event": st.get("last_event"), "users": st.get("users")}
 
 
@@ -2594,10 +3266,14 @@ def api_qqbot_status():
 def api_qqbot_config(payload: dict):
     conf = load_conf()
     q = conf.setdefault("qqbot", {})
+    old = dict(q)
     if "app_id" in payload:
         q["app_id"] = str(payload.get("app_id") or "").strip()
     if payload.get("app_secret"):
         q["app_secret"] = str(payload["app_secret"]).strip()
+    if "wechat_chat" in payload:
+        v = str(payload.get("wechat_chat") or "").strip()
+        q["wechat_chat"] = v or None
     for k in ("enabled", "group_reply", "citations",
               "default_explorer", "default_thinking"):
         if k in payload:
@@ -2606,8 +3282,34 @@ def api_qqbot_config(payload: dict):
                       encoding="utf-8")
     import qqbot as qqbot_mod
     qqbot_mod.apply_config(load_conf())
+
+    # 首次启用或改了凭据时，自动推送底部菜单，省去手动点按钮
+    need_menu = bool(q.get("enabled") and q.get("app_id") and q.get("app_secret")) and (
+        not old.get("enabled")
+        or old.get("app_id") != q.get("app_id")
+        or old.get("app_secret") != q.get("app_secret")
+        or qqbot_mod.STATUS.get("menu") not in ("ok", "pushing"))
+    if need_menu:
+        qqbot_mod.STATUS["menu"] = "pushing"
+
+        def _push_menu():
+            try:
+                r = qqbot_mod.set_menu(qqbot_mod.conf_of(load_conf()))
+                if r.get("ok"):
+                    qqbot_mod.STATUS["menu"] = "ok"
+                    qqbot_mod.STATUS["menu_error"] = ""
+                else:
+                    qqbot_mod.STATUS["menu"] = "fail"
+                    qqbot_mod.STATUS["menu_error"] = str(
+                        r.get("error") or r.get("body") or "未知错误")[:200]
+            except Exception as e:      # noqa: BLE001
+                qqbot_mod.STATUS["menu"] = "fail"
+                qqbot_mod.STATUS["menu_error"] = f"{type(e).__name__}: {e}"[:200]
+        threading.Thread(target=_push_menu, daemon=True).start()
+
     st = qqbot_mod.status()
-    return {"ok": True, "running": st.get("running"), "error": st.get("error")}
+    return {"ok": True, "running": st.get("running"), "error": st.get("error"),
+            "menu": st.get("menu"), "menu_error": st.get("menu_error")}
 
 
 @app.post("/api/qqbot/menu")
@@ -3623,7 +4325,7 @@ def _run_job(name: str, script: str, extra: list[str] | None = None):
             [sys.executable, str(Path(__file__).resolve().parent.parent / "scripts" / script)]
             + (extra or []),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            encoding="utf-8", errors="ignore", bufsize=1)
+            encoding="utf-8", errors="ignore", bufsize=1, **_no_window())
         _job_procs[name] = proc
         for line in proc.stdout:
             line = line.rstrip()
@@ -3916,9 +4618,17 @@ def api_realtime_get():
     media = _realtime.get("media") or {}
     return {"realtime": bool(st.get("realtime")),
             "realtime_sec": int(st.get("realtime_sec", 60)),
+            "fast_realtime": bool(st.get("fast_realtime", True)),
+            "vec_realtime": bool(st.get("vec_realtime", True)),
+            "media_on": bool(st.get("media_ocr", True)),
+            "asr_on": bool(st.get("media_asr", True)),
             "last": _realtime["last"], "added": _realtime["added"],
             "media_ocr": media.get("ocr", 0), "media_asr": media.get("asr", 0),
-            "error": _realtime["error"], "tick": _realtime["tick"]}
+            "error": _realtime["error"],
+            "live_err": _realtime.get("live_err"),
+            "fast_err": _realtime.get("fast_err"),
+            "selfheal": _realtime.get("selfheal"),
+            "tick": _realtime["tick"]}
 
 
 @app.post("/api/sync/realtime")
@@ -3933,6 +4643,10 @@ def api_realtime_set(payload: dict):
         st["media_ocr"] = bool(payload["media_ocr"])
     if "media_asr" in payload:
         st["media_asr"] = bool(payload["media_asr"])
+    if "fast_realtime" in payload:
+        st["fast_realtime"] = bool(payload["fast_realtime"])
+    if "vec_realtime" in payload:
+        st["vec_realtime"] = bool(payload["vec_realtime"])
     CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True, "realtime": bool(st.get("realtime")),
             "realtime_sec": int(st.get("realtime_sec", 60))}

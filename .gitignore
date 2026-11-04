@@ -29,6 +29,13 @@ refs/ChatTrace/REFERENCES.md
 *.log
 *.lock
 
+# ===== 桌面壳构建产物 =====
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/build.log
+desktop/assets/
+微信知识助手.exe
+
 # ===== Python =====
 __pycache__/
 *.py[cod]
@@ -42,3 +49,10 @@ Desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# ===== 本机微信通道(OpenClaw)脚本,含用户目录硬编码路径 =====
+微信通道-扫码登录.bat
+微信通道-启动网关.bat
+
+# ===== ZCode 会话数据 =====
+.zcode/

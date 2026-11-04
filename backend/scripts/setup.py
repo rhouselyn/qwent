@@ -236,7 +236,7 @@ def _build_from_wechat() -> bool:
                         "--out", str(PROJECT / "data" / "knowledge.db")],
                        cwd=str(HERE))
     if r.returncode != 0:
-        _mark(False, "导入失败 — 重跑本脚本可断点续传")
+        _mark(False, "导入失败 — 已处理进度保留，重跑本脚本可断点续传")
         return False
     _mark(True, "建库完成(向量索引在下一步处理)")
     # 新人首批自动解析开关:服务启动后按顺序后台执行

@@ -1,0 +1,13 @@
+{
+  "name": "wechat-assistant-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "微信知识助手桌面壳：托盘常驻 + 自动拉起本机服务",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build --no-bundle"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

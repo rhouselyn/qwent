@@ -66,8 +66,13 @@ def _validate_remote_url(url: str) -> str:
         addresses = {info[4][0] for info in socket.getaddrinfo(host, u.port, type=socket.SOCK_STREAM)}
     except socket.gaierror as exc:
         raise ValueError("链接域名无法解析") from exc
-    if any(not ipaddress.ip_address(a.split("%", 1)[0]).is_global for a in addresses):
-        raise ValueError("不允许访问内网或保留地址")
+    # 198.18.0.0/15 是 Clash 系代理 fake-IP DNS 段：TUN 模式下所有域名都解析成它，
+    # 不能按保留地址拒绝（否则开着代理时全部外链抓取都会失败）。
+    fake_nets = [ipaddress.ip_network("198.18.0.0/15")]
+    for a in addresses:
+        ip = ipaddress.ip_address(a.split("%", 1)[0])
+        if not ip.is_global and not any(ip in net for net in fake_nets):
+            raise ValueError("不允许访问内网或保留地址")
     return u.geturl()
 
 

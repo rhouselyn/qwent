@@ -18,6 +18,8 @@ rapidocr-onnxruntime==1.4.4
 # 文件预览
 python-docx
 openpyxl
+# 微信通道扫码登录二维码渲染
+qrcode==7.4.2
 # 通讯录拼音首字母分组
 pypinyin==0.55.0
 # QQ 机器人（设置页开启后本机直连 QQ 网关收发消息）

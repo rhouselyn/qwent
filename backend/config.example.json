@@ -16,13 +16,33 @@
     "model": "BAAI/bge-m3"
   },
   "qa": {
-    "max_context_messages": 30,
+    "max_context": 30,
     "temperature": 0.3,
-    "recent_hours": 24
+    "recent_hours": 24,
+    "context_around": 3
+  },
+  "privacy": {
+    "enabled": true,
+    "phone": true,
+    "idcard": true,
+    "bankcard": true,
+    "email": true
+  },
+  "agent_api": {
+    "enabled": false,
+    "api_key": "",
+    "model": "wechat-kb"
   },
   "sync": {
     "realtime": true,
-    "realtime_sec": 60
+    "realtime_sec": 60,
+    "fast_realtime": true,
+    "media_ocr": true,
+    "media_asr": true,
+    "vec_realtime": true,
+    "auto": false,
+    "interval_min": 30,
+    "sns_interval_sec": 120
   },
   "qqbot": {
     "enabled": false,

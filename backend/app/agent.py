@@ -18,6 +18,8 @@ MAX_STEPS_CHAT = 4
 MAX_STEPS_GLOBAL = 6
 MAX_REFS = 120   # 兜底上限；返回前会先按答案实际引用的编号过滤，不会截掉被引用的来源
 
+import privacy  # noqa: E402  出站脱敏，设置页可逐项关闭
+
 
 def _cited_refs(answer: str, seen: dict) -> list[dict]:
     """只返回答案里真正引用了的 [n] 对应的来源，保持原编号。
@@ -1101,6 +1103,7 @@ def friendly_err(exc) -> str:
 
 def _call_llm(conf, messages, tools):
     llm = conf["llm"]
+    messages = privacy.redact_messages(conf, messages)
     payload = {"model": _pick_model(conf), "messages": messages,
                "temperature": conf.get("qa", {}).get("temperature", 0.2)}
     if tools:
@@ -1125,6 +1128,7 @@ def _call_llm(conf, messages, tools):
 def _stream_llm(conf, messages, tools=None):
     """流式调用，逐段 yield ("delta", text)；结束时 yield ("done", full_text)。"""
     llm = conf["llm"]
+    messages = privacy.redact_messages(conf, messages)
     payload = {"model": _pick_model(conf), "messages": messages,
                "temperature": conf.get("qa", {}).get("temperature", 0.2),
                "stream": True}

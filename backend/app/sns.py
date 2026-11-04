@@ -362,10 +362,15 @@ def _isaac_keystream(key: str, size: int) -> bytes | None:
     with _isaac_lock:
         try:
             if _isaac_proc is None or _isaac_proc.poll() is not None:
+                kw = {}
+                if os.name == "nt":
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    kw = {"startupinfo": si, "creationflags": 0x08000000}
                 _isaac_proc = subprocess.Popen(
                     ["node", str(_wasm_dir / "ks_daemon.js")],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL)
+                    stderr=subprocess.DEVNULL, **kw)
             req = f"{key} {size}\n".encode()
             _isaac_proc.stdin.write(req)
             _isaac_proc.stdin.flush()

@@ -1268,3 +1268,73 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
   .mode-segment label { min-width: 88px; padding-inline: 7px; }
 }
 .ai-sessions-panel .drawer-head > span:first-child { white-space: nowrap; }
+
+/* 文件中心：筛选条与类型徽标 */
+.files-toolbar { position: sticky; top: 0; z-index: 2; padding: 10px 12px 8px;
+  background: rgba(251, 252, 253, .96); border-bottom: 1px solid #eef1f4; }
+.files-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.files-filters select { height: 30px; padding: 0 8px; border: 1px solid #e1e6ea; border-radius: 8px;
+  background: #fff; color: #3f464e; font-size: 12px; max-width: 150px; outline: none; }
+.files-filters select:focus { border-color: rgba(7, 193, 96, .5); }
+.files-meta { margin-top: 7px; color: #8b929b; font-size: 11px; }
+.file-badge { display: inline-block; min-width: 30px; margin-right: 4px; padding: 0 5px;
+  border-radius: 4px; background: #eef2f5; color: #6c747e; font-size: 10px; line-height: 17px;
+  text-align: center; border: 1px solid #e4e9ed; }
+.files-more { margin: 10px 14px 16px; }
+
+/* ===== 精简版 composer 与引用样式（2026-11-04）===== */
+.composer-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-column > .composer-wrap .composer-toolbar { max-width: 960px; margin: 0 auto 8px; }
+.assistant-composer-wrap .composer-toolbar { max-width: 900px; margin: 0 auto 8px; }
+.composer-toolbar .ghost-btn-slim {
+  margin-left: auto; min-height: 26px; padding: 3px 11px !important;
+  border-radius: 999px; font-size: 11px; display: inline-flex; align-items: center;
+}
+.mode-segment.slim-segment { border-radius: 999px; }
+.mode-segment.slim-segment label { min-width: 0; grid-template-columns: auto auto; padding: 5px 12px; }
+.mode-segment.slim-segment label span { font-size: 11px; }
+
+.quote-bar { align-items: center; padding: 6px 14px 0; }
+.quote-bar-title { color: #397255; font-weight: 600; }
+.quote-list { max-height: 66px; overflow: auto; }
+.quote-chip { background: #f2faf5; border-color: #d8e5dc; color: #397255; border-radius: 999px; }
+.quote-chip .quote-x { color: #7c8b84; margin-left: 2px; cursor: pointer; }
+.quote-chip .quote-x:hover { color: #c2410c; }
+
+.refs-wrap { margin-top: 7px; }
+.refs-toggle {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px;
+  border: 1px solid #d8e5dc; border-radius: 999px; background: #f2faf5;
+  color: #397255; font-size: 11px; font-weight: 600;
+}
+.refs-toggle:hover { background: #e8f6ee; text-decoration: none; }
+.ref-item { border-radius: 10px; padding: 5px 8px; background: #fbfcfd; }
+.src-files { margin-top: 6px; }
+.aa-snippet { margin: 12px 0 0; padding: 12px 14px; background: #f6f8f9; border: 1px solid #e4e9ec;
+  border-radius: 10px; font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  line-height: 1.6; overflow: auto; max-height: 300px; white-space: pre; color: #33414b; }
+
+/* 微信扫码二维码：整块展示、无滚动条，行高必须为 1 才能让半块字符拼成连续方块 */
+.oc-qr-title { margin-top: 16px; color: #59636d; font-size: 12px; font-weight: 650; }
+.oc-qr-img {
+  display: block; width: 280px; height: 280px; margin: 10px 0 0; padding: 10px;
+  background: #fff; border: 1px solid #e3e8ec; border-radius: 12px;
+  image-rendering: pixelated; -webkit-user-drag: none;
+}
+
+/* 设置页内联按钮（复制/重新生成/放行）：不被输入框挤压换行 */
+.settings-field > div { align-items: center; }
+.settings-field button { flex: 0 0 auto; min-height: 38px; padding: 0 16px; white-space: nowrap; }
+
+/* 设置页按钮统一：主操作绿色实心 + ghost 白底绿描边（含 mini 小号） */
+#settingsFull button {
+  border: 0; background: #07c160; color: #fff; border-radius: 9px;
+  min-height: 36px; padding: 8px 15px; font-size: 13px; font-weight: 600;
+  cursor: pointer; margin: 0;
+}
+#settingsFull button.ghost { background: #fff; color: #397255; border: 1px solid #cfe6d8; }
+#settingsFull button:not(:disabled):hover { filter: brightness(.97); }
+#settingsFull button:disabled { opacity: .5; cursor: default; }
+#settingsFull button.mini { min-height: 30px; padding: 5px 11px; font-size: 12px; border-radius: 8px; }
+#settingsFull button.mini.ghost { color: #397255; border: 1px solid #cfe6d8; }
+.settings-card-icon svg { width: 18px; height: 18px; display: block; }

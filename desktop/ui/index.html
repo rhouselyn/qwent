@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微信知识助手</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; place-items: center; background: #f3f5f7; color: #1f2329;
+         font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .card { width: min(460px, 82vw); padding: 34px 34px 30px; background: #fbfcfd;
+          border: 1px solid #e7eaee; border-radius: 16px; box-shadow: 0 10px 30px rgba(31,35,41,.06); }
+  .logo { width: 56px; height: 56px; border-radius: 14px; background: #07c160; color: #fff;
+          display: grid; place-items: center; font-size: 22px; font-weight: 600; letter-spacing: 1px; }
+  h1 { margin: 18px 0 8px; font-size: 20px; font-weight: 600; }
+  p { margin: 6px 0; color: #6c747e; font-size: 13px; line-height: 1.8; }
+  .hint { margin-top: 18px; padding-top: 14px; border-top: 1px solid #eef1f4; color: #8b929b; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">微</div>
+    <h1>微信知识助手正在启动</h1>
+    <p id="bootState">正在拉起本机服务，就绪后自动进入主界面。</p>
+    <p>若长时间停留在本页，说明服务没有起来，按顺序检查：</p>
+    <p>1) 是否已运行 <b>一键配置.bat</b>（装依赖、建库、下模型）；<br>
+       2) 直接双击 <b>启动助手.bat</b> 看报错；<br>
+       3) 端口 8721 被占用时，浏览器直接访问 <b>http://127.0.0.1:8721</b> 即可。</p>
+    <div class="hint">数据只保存在本机 data 目录；关闭这个窗口不会退出，程序会留在托盘。</div>
+  </div>
+</body>
+</html>

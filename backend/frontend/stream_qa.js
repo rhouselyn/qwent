@@ -35,7 +35,8 @@ function attachSourceFiles(turnEl, refs) {
     chip.className = "src-chip";
     const title = r.title || r.snippet || "文件";
     const isImg = /\.(png|jpe?g|gif|webp|bmp)$/i.test(title);
-    chip.textContent = `${isImg ? "🖼" : "📄"} ${title}${r.size ? " · " + fmtSize(r.size) : ""}`;
+    const kindLabel = isImg ? "[图片]" : "[文件]";
+    chip.textContent = `${kindLabel} ${title}${r.size ? " · " + fmtSize(r.size) : ""}`;
     chip.title = "点击打开源文件";
     chip.onclick = () => openFilePreview({
       chat: r.chat, id: r.local_id || 0, ts: r.ts || 0,
