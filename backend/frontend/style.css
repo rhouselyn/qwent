@@ -1341,3 +1341,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .file-state { font-size: 10px; color: #8b929b; }
 .file-state.ok { color: #079b4e; }
 .file-state.warn { color: #c2410c; }
+
+/* 网页正文预览：标题区改为排版式标题，长标题自然折行不再挤成小字 */
+.pv-head { padding: 14px 20px 10px; flex-direction: column; align-items: flex-start;
+  gap: 6px; border-bottom: none; }
+.pv-name { font-weight: 650; font-size: 17px; line-height: 1.45;
+  word-break: break-word; color: #1f2329; }
+.pv-actions { align-self: flex-start; }
+.pv-head + .pv-text { border-top: 1px solid #f0f1f3; padding-top: 18px;
+  font-family: "Microsoft YaHei", sans-serif; font-size: 13.5px; }

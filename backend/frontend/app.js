@@ -2247,10 +2247,11 @@ async function openLinkPreview(url, title) {
         t.classList.toggle("big", +t.dataset.i === i));
     };
   } else {
-    $("#chatTitle").textContent = (d && d.title) || title;
-    $("#chatMeta").textContent = `${d ? d.chars : 0} 字 · ${url.slice(0, 60)}`;
+    const showTitle = (d && d.title) || title || "网页正文";
+    $("#chatTitle").textContent = showTitle;
+    $("#chatMeta").textContent = `${d ? d.chars : 0} 字 · 网页`;
     $("#pvBody").innerHTML =
-      `<div class="pv-head"><span class="pv-name">${esc((d && d.title) || title)}</span>
+      `<div class="pv-head"><span class="pv-name">${esc(showTitle)}</span>
         <span class="pv-actions"><a href="${esc(url)}" target="_blank" rel="noopener">在浏览器打开 ↗</a></span>
        </div><pre class="pv-text">${esc((d && d.text) || "")}</pre>`;
   }

@@ -4451,6 +4451,7 @@ def fetch_article(url: str, force: bool = False) -> dict:
             text = body.get_text(chr(10), strip=True)
 
     text = re.sub(chr(10) + "{3,}", chr(10) + chr(10), text).strip()[:60000]
+    title = (title or "").strip()[:120]
     # 质量校验：替换符/控制字符占比过高说明是二进制或编码错误
     _bad = sum(1 for ch in text[:4000] if ch == chr(65533) or (ord(ch) < 9))
     if text.lstrip().startswith(("{", "[")) or len(text.strip()) < 200:
@@ -4472,6 +4473,8 @@ def fetch_article(url: str, force: bool = False) -> dict:
 @app.get("/api/link/meta")
 def api_link_meta(url: str, force: int = 0):
     d = fetch_article(url, bool(force))
+    if d.get("title") and len(d["title"]) > 60:
+        d["title"] = d["title"][:120] + "…"
     return {"url": d["url"], "title": d.get("title", ""), "chars": d.get("chars", 0),
             "cached": d.get("cached", False), "error": d.get("error")}
 
