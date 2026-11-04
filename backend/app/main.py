@@ -2109,6 +2109,24 @@ def api_openclaw_status():
             "login_log": _OC_LOGIN["log"][-3000:]}
 
 
+@app.post("/api/links/retry-failed")
+def api_links_retry():
+    """把解析失败的链接重置为待解析（fake-IP 修复后可重试）。"""
+    con = db()
+    _ensure_link_tables(con)
+    n = con.execute("UPDATE chat_link SET state=0 WHERE state=2").rowcount
+    con.commit()
+    con.close()
+    # 往队列塞一批让 worker 马上开始
+    if n:
+        con2 = db()
+        rows = con2.execute("SELECT url FROM chat_link WHERE state=0 ORDER BY msg_ts DESC LIMIT 5").fetchall()
+        con2.close()
+        for (u,) in rows:
+            _LINK_QUEUE.put(u)
+    return {"ok": True, "reset": n}
+
+
 @app.post("/api/openclaw/toggle")
 def api_openclaw_toggle(payload: dict):
     """机器人设置里的「启用微信通道」开关：开=写配置并重启网关，关=停网关。"""
@@ -3185,8 +3203,23 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
     if chat:
         where.append("l.chat = ?")
         args.append(chat)
-    filtered = bool(q or platform or state)
-    cap = min(2000 if filtered else max(800, (offset + n) * 2), 2500)
+    # 平台筛选下沉到 SQL（LIMIT 内可能没有目标平台的链接）
+    if platform:
+        plat_map_sql = {"xhs": "%xiaohongshu%", "bili": "%bilibili%",
+                        "article": "%mp.weixin.qq.com%"}
+        if platform == "bili":
+            where.append("(l.url LIKE '%bilibili%' OR l.url LIKE '%b23.tv%')")
+        elif platform in plat_map_sql:
+            where.append("l.url LIKE ?")
+            args.append(plat_map_sql[platform])
+        elif platform == "wxapp":
+            where.append("l.url LIKE 'wxapp://%'")
+        else:
+            where.append("l.url NOT LIKE '%xiaohongshu%' AND l.url NOT LIKE '%bilibili%'"
+                         " AND l.url NOT LIKE '%b23.tv%' AND l.url NOT LIKE '%mp.weixin.qq.com%'"
+                         " AND l.url NOT LIKE 'wxapp://%'")
+    filtered = bool(q or state or days or chat)
+    cap = min(2500, max(3000, (offset + n) * 3)) if (platform or filtered) else max(800, (offset + n) * 2)
     rows = con.execute("""
         SELECT l.url, l.chat, l.msg_id, l.msg_ts, l.title, l.platform, l.state,
                c.title AS c_title, c.kind AS c_kind, LENGTH(IFNULL(c.text,'')) AS c_len,
@@ -3209,14 +3242,14 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
         parsed = (r["c_len"] or 0) > 0
         raw_kind = (r["platform"] or "").strip()
         u = r["url"]
-        if raw_kind in _PLAT_MAP:
-            plat_key = raw_kind
-        elif "xiaohongshu" in u:
+        if "xiaohongshu" in u:
             plat_key = "xhs"
         elif "bilibili" in u or "b23.tv" in u:
             plat_key = "bili"
         elif "mp.weixin.qq.com" in u:
             plat_key = "article"
+        elif raw_kind in _PLAT_MAP:
+            plat_key = raw_kind
         else:
             plat_key = "generic"
         if platform and plat_key != platform:
@@ -3241,6 +3274,23 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
     con.close()
     if sort == "old":
         out.sort(key=lambda x: x["received"] or 0)
+    if platform == "article":
+        rej = {"link_ok": 0, "dedup": 0, "plat": 0, "state": 0, "q": 0, "ok": 0}
+        for r in rows:
+            if not _link_ok(r["url"], r["title"] or ""):
+                rej["link_ok"] += 1; continue
+            if r["url"] in seen_urls:
+                rej["dedup"] += 1; continue
+            raw_kind = (r["platform"] or "").strip()
+            u = r["url"]
+            if raw_kind in _PLAT_MAP: pk = raw_kind
+            elif "xiaohongshu" in u: pk = "xhs"
+            elif "bilibili" in u or "b23.tv" in u: pk = "bili"
+            elif "mp.weixin.qq.com" in u: pk = "article"
+            else: pk = "generic"
+            if platform and pk != platform:
+                rej["plat"] += 1; continue
+            rej["ok"] += 1
     return out[offset:offset + n]
 
 

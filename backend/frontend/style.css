@@ -60,8 +60,10 @@ body {
 
 .result-item { padding: 10px 14px; border-bottom: 1px solid #f0f0f2; cursor: pointer; }
 .result-item:hover { background: #ececee; }
-.result-item .meta { font-size: 11px; color: #9a9aa0; margin-bottom: 3px; }
-.result-item .snippet { font-size: 13px; line-height: 1.5; }
+.result-item .meta { font-size: 11px; color: #9a9aa0; margin-bottom: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-item .snippet { font-size: 13px; line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-item .snippet b { color: #c2410c; }
 
 /* 右栏 */
@@ -1368,3 +1370,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .switch-row .sw-copy b i { font-style: normal; font-weight: 500; font-size: 11px;
   color: #079b4e; background: #eefaf2; border: 1px solid #cfe6d8; border-radius: 4px;
   padding: 0 5px; line-height: 17px; }
+
+/* meta 行：截断区+徽标区分离，徽标不被省略 */
+.result-item .meta { display: flex; align-items: center; gap: 6px; }
+.result-item .meta .meta-trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.result-item .meta .file-badge, .result-item .meta .link-badge,
+.result-item .meta .file-state { flex: 0 0 auto; }
