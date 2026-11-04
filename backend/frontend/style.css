@@ -1010,6 +1010,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .settings-field small, .switch-row small { color: #9aa2aa; font-size: 11px; line-height: 1.45; }
 .settings-switch-card { padding: 12px; border: 1px solid #edf0f2; border-radius: 11px; background: #fafcfb; }
 .switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+/* 开关卡紧凑化：主开关一行占满，子项两列网格，说明文字短灰字放标题右侧 */
+.settings-switch-card .switch-row + .switch-row,
+.settings-switch-card .switch-row:not(:first-child) { padding-top: 10px; margin-top: 10px;
+  border-top: 1px solid #f2f4f6; }
+.switch-row .sw-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.switch-row .sw-copy b { font-size: 13px; font-weight: 600; color: #1f2329;
+  display: flex; align-items: center; gap: 8px; }
+.switch-row .sw-copy .sw-hint { font-size: 11px; color: #9aa2aa; line-height: 1.4; }
 .switch-row input { position: absolute; opacity: 0; pointer-events: none; }
 .switch-track { width: 36px; height: 21px; flex: 0 0 36px; border-radius: 99px; background: #d9dfe3; position: relative; transition: background .18s; }
 .switch-track::after { content: ""; position: absolute; width: 17px; height: 17px; left: 2px; top: 2px; border-radius: 50%; background: white; box-shadow: 0 1px 3px #0002; transition: transform .18s; }
@@ -1342,11 +1350,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .file-state.ok { color: #079b4e; }
 .file-state.warn { color: #c2410c; }
 
-/* 网页正文预览：标题区改为排版式标题，长标题自然折行不再挤成小字 */
+/* 网页正文预览：顶栏单行省略标题，正文区排版式大标题 */
 .pv-head { padding: 14px 20px 10px; flex-direction: column; align-items: flex-start;
   gap: 6px; border-bottom: none; }
 .pv-name { font-weight: 650; font-size: 17px; line-height: 1.45;
-  word-break: break-word; color: #1f2329; }
+  word-break: break-word; color: #1f2329;
+  max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pv-actions { align-self: flex-start; }
 .pv-head + .pv-text { border-top: 1px solid #f0f1f3; padding-top: 18px;
   font-family: "Microsoft YaHei", sans-serif; font-size: 13.5px; }
+/* 顶栏聊天标题同样单行省略，防止长文章标题挤爆头部 */
+.chat-header .chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: min(52vw, 560px); }
+
+/* 开关说明里的占位标签样式（如 [手机号]） */
+.switch-row .sw-copy b i { font-style: normal; font-weight: 500; font-size: 11px;
+  color: #079b4e; background: #eefaf2; border: 1px solid #cfe6d8; border-radius: 4px;
+  padding: 0 5px; line-height: 17px; }

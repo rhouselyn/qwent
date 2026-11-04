@@ -1782,11 +1782,11 @@ async function renderSettingsPrivacy(body) {
     <div class="settings-grid"><section class="settings-card">
       <div class="settings-card-head"><span class="settings-card-icon">⊘</span><div><h3>出站规则</h3><p>仅在调用模型接口时生效，不改动本地入库数据。</p></div></div>
       <div class="settings-switch-card">
-        <label class="switch-row"><input type="checkbox" id="pvEnabled" ${p.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用脱敏</b><small>关闭后上下文原样发送到模型服务商。</small></span></label>
-        <label class="switch-row"><input type="checkbox" id="pvPhone" ${p.phone ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>手机号</b><small>替换为 [手机号]</small></span></label>
-        <label class="switch-row"><input type="checkbox" id="pvIdcard" ${p.idcard ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>身份证号</b><small>替换为 [身份证]</small></span></label>
-        <label class="switch-row"><input type="checkbox" id="pvBank" ${p.bankcard ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>银行卡号</b><small>替换为 [银行卡]</small></span></label>
-        <label class="switch-row"><input type="checkbox" id="pvEmail" ${p.email ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span><b>邮箱</b><small>替换为 [邮箱]</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvEnabled" ${p.enabled ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>启用脱敏</b><span class="sw-hint">关闭后上下文原样发送到模型服务商</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvPhone" ${p.phone ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span class="sw-copy"><b>手机号<i>[手机号]</i></b><span class="sw-hint">发送前替换</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvIdcard" ${p.idcard ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span class="sw-copy"><b>身份证号<i>[身份证]</i></b><span class="sw-hint">发送前替换</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvBank" ${p.bankcard ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span class="sw-copy"><b>银行卡号<i>[银行卡]</i></b><span class="sw-hint">发送前替换</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="pvEmail" ${p.email ? "checked" : ""} ${p.enabled ? "" : "disabled"}><span class="switch-track"></span><span class="sw-copy"><b>邮箱<i>[邮箱]</i></b><span class="sw-hint">发送前替换</span></span></label>
       </div>
       <div class="settings-actions"><button id="pvSave">保存设置</button><span id="pvMsg" class="msg" aria-live="polite"></span></div>
     </section><aside class="settings-side-card"><div class="settings-side-title">说明</div><p>脱敏发生在每次模型请求前，修改后无需重启服务。</p><ul><li>只影响新发出的请求</li><li>检索、引用跳转使用本地原文</li><li>本地 AI 模式同样适用</li></ul></aside></div>`;
@@ -1986,10 +1986,13 @@ async function renderSettingsData(body) {
     <div class="settings-page-head"><div><span class="settings-eyebrow">DATA PIPELINE</span><h2>数据与同步</h2><p>控制消息入库节奏，确保知识库保持最新。</p></div><span class="settings-status-pill ${rt.realtime ? "success" : "neutral"}">${rt.realtime ? "实时同步中" : "实时同步已关闭"}</span></div>
     <div class="settings-grid"><div class="settings-stack">
       <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">↻</span><div><h3>实时同步</h3><p>发现微信数据库变化后立即入库，轮询作为兜底。</p></div></div>
-        <label class="switch-row"><input type="checkbox" id="rtSync" ${rt.realtime ? "checked" : ""}><span class="switch-track"></span><span><b>启用实时同步</b><small>需要微信已登录且密钥有效。</small></span></label>
-        <label class="switch-row"><input type="checkbox" id="rtMedia" ${rt.media_on ? "checked" : ""}><span class="switch-track"></span><span><b>新图片自动 OCR</b><small>只处理最近 7 天的新图片，历史存量在索引任务里补跑。</small></span></label>
-        <label class="switch-row"><input type="checkbox" id="rtAsr" ${rt.asr_on ? "checked" : ""}><span class="switch-track"></span><span><b>新语音自动转写</b><small>只处理最近 7 天的新语音/视频，历史存量在索引任务里补跑。</small></span></label>
-        <div class="inline-setting"><label for="rtInterval">兜底轮询</label><div><input id="rtInterval" type="number" min="15" value="${rt.realtime_sec}"> <span>秒</span></div></div><div class="settings-note" id="rtState"></div>
+        <div class="settings-switch-card">
+          <label class="switch-row"><input type="checkbox" id="rtSync" ${rt.realtime ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>启用实时同步</b><span class="sw-hint">需要微信已登录且密钥有效</span></span></label>
+          <label class="switch-row"><input type="checkbox" id="rtMedia" ${rt.media_on ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>新图片自动 OCR</b><span class="sw-hint">仅最近 7 天新图片，历史在索引任务补跑</span></span></label>
+          <label class="switch-row"><input type="checkbox" id="rtAsr" ${rt.asr_on ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>新语音自动转写</b><span class="sw-hint">仅最近 7 天新语音/视频，历史在索引任务补跑</span></span></label>
+          <div class="inline-setting"><label for="rtInterval">兜底轮询</label><div><input id="rtInterval" type="number" min="15" value="${rt.realtime_sec}"> <span>秒</span></div></div>
+        </div>
+        <div class="settings-note" id="rtState"></div>
       </section>
       <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">◷</span><div><h3>定时同步</h3><p>定期扫描数据库，适合实时监听不可用时使用。</p></div></div>
         <label class="switch-row"><input type="checkbox" id="autoSync" ${a.auto ? "checked" : ""}><span class="switch-track"></span><span><b>启用定时同步</b><small>每 <input class="inline-number" id="autoInterval" type="number" min="5" value="${a.interval_min}"> 分钟执行一次。</small></span></label><div class="settings-note">${a.last ? "上次运行：" + esc(a.last) : "尚未运行"}</div>
