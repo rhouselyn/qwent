@@ -750,7 +750,7 @@ function renderBubbleContent(m, p) {
     }
     case "link": {
       el.className = "card";
-      el.innerHTML = `🔗 <span class="t">${esc(p.title || "[链接]")}</span>` +
+      el.innerHTML = `<span class="t">[链接] ${esc(p.title || "")}</span>` +
         (p.des ? `<div class="d">${esc(p.des)}</div>` : "") +
         (p.url ? `<div class="u">${esc(p.url)}</div>` : "") +
         (p.url ? '<div class="go">点击阅读正文 ↗</div>' : "");
@@ -1398,7 +1398,7 @@ function renderLinkItems() {
       : `<span class="link-badge">解析中</span>`;
     d.innerHTML = `<div class="meta">${esc(l.chat_name)} · ${fmtTime(l.received)} ·
         <span class="link-plat">${esc(l.platform)}</span> ${badge}</div>
-      <div class="snippet">🔗 ${esc(l.title)}${l.chars ? ` · ${l.chars} 字` : ""}</div>`;
+      <div class="snippet"><span class="file-badge">链接</span> ${esc(l.title)}${l.chars ? ` · ${l.chars} 字` : ""}</div>`;
     d.onclick = () => {
       if (l.url.startsWith("wxapp://")) {
         toast("小程序内容需要在微信里打开，无法抓取正文");
@@ -1491,7 +1491,7 @@ async function showMoments(q = "", reset = true) {
     const media = [
       p.n_img ? `🖼 ${p.n_img}${p.n_local ? `<span class="sns-local">·${p.n_local}</span>` : ""}` : "",
       p.n_vid ? `🎬 ${p.n_vid}` : "",
-      p.n_links ? `🔗 ${p.n_links}` : "",
+      p.n_links ? `${p.n_links} 篇链接` : "",
       p.n_comments ? `💬 ${p.n_comments}` : ""].filter(Boolean).join(" ");
     d.innerHTML = `<div class="sns-item-main">
         <div class="meta">${esc(p.author_name || p.author)} · ${fmtTime(p.ts)} ${media}</div>
@@ -1553,7 +1553,7 @@ async function openMomentDetail(tid) {
   if (p.text) html += `<pre class="pv-text sns-text">${esc(p.text)}</pre>`;
   for (const l of (p.links || [])) {
     html += `<div class="sns-link" data-url="${esc(l.url)}">
-      <span class="sns-link-ico">🔗</span>
+      <span class="sns-link-ico"></span>
       <span class="sns-link-body"><span class="sns-link-title">${esc(l.title || l.url)}</span>
       <span class="sns-link-url">${esc(l.url.slice(0, 80))}</span></span>
       <span class="sns-link-go">读正文 ↗</span></div>`;
@@ -1741,7 +1741,7 @@ async function renderSettingsModel(body) {
         <div class="settings-field"><label for="cfgBase">接口地址</label><input id="cfgBase" value="${attrEsc(c.base_url)}" placeholder="https://api.example.com/v1"><small>通常以 /v1 结尾，需包含完整协议。</small></div>
         <div class="settings-field"><label for="cfgModel">模型名</label><input id="cfgModel" value="${attrEsc(c.model)}" placeholder="deepseek-chat"></div>
         <div class="settings-field"><label for="cfgKey">API Key</label><input id="cfgKey" type="password" autocomplete="off" placeholder="${c.has_key ? attrEsc("已配置 " + c.key_masked + "（留空则不修改）") : "sk-..."}"><small>密钥只保存在本机，不会展示完整内容。</small></div>
-        <div class="settings-switch-card"><label class="switch-row"><input type="checkbox" id="cfgThinking" ${c.thinking ? "checked" : ""}><span class="switch-track"></span><span><b>启用深度思考</b><small>适合复杂检索、归纳和多步推理。</small></span></label>
+        <div class="settings-switch-card"><label class="switch-row"><input type="checkbox" id="cfgThinking" ${c.thinking ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>启用深度思考</b><span class="sw-hint">适合复杂检索、归纳和多步推理</span></span></label>
           <div class="settings-field nested-field"><label for="cfgThinkingModel">推理模型</label><input id="cfgThinkingModel" value="${attrEsc(c.thinking_model || "")}" placeholder="deepseek-reasoner"></div></div>
       </div>
       <div class="settings-actions"><button id="saveCfg">保存配置</button><button id="testCfg" class="ghost">测试连接</button><span id="cfgMsg" class="msg" aria-live="polite"></span></div>
@@ -1829,7 +1829,7 @@ async function renderSettingsBot(body) {
 
       <section class="settings-card" id="ocCard">
         <div class="settings-card-head"><span class="settings-card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="9" cy="8" rx="6.2" ry="5" fill="#07c160"/><ellipse cx="15.2" cy="14" rx="6.2" ry="5" fill="#3ddc84"/><circle cx="6.8" cy="7.4" r="1" fill="#fff"/><circle cx="11.2" cy="7.4" r="1" fill="#fff"/><circle cx="13.2" cy="13.4" r="1" fill="#fff"/><circle cx="17.2" cy="13.4" r="1" fill="#fff"/></svg></span><div><h3>微信通道</h3><p>扫码接入 ClawBot，微信里直接提问。</p></div></div>
-        <label class="switch-row"><input type="checkbox" id="ocEnabled" ${oc.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用微信通道</b><small>关闭后停止网关，微信里不再回复。</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="ocEnabled" ${oc.enabled ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>启用微信通道</b><span class="sw-hint">关闭后停止网关，微信里不再回复</span></span></label>
         <div class="settings-note" id="ocStatus" style="margin-top:12px">加载中…</div>
         <div class="settings-actions" style="margin-top:12px;flex-wrap:wrap">
           <button id="ocLogin" ${oc.enabled ? "" : "disabled"}>扫码登录</button>
@@ -1845,7 +1845,7 @@ async function renderSettingsBot(body) {
 
       <section class="settings-card" id="qqCard">
         <div class="settings-card-head"><span class="settings-card-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12.5" rx="6" ry="7.6" fill="#12b7f5"/><ellipse cx="12" cy="14.6" rx="3.8" ry="5" fill="#fff"/><circle cx="9.6" cy="7" r="1.2" fill="#fff"/><circle cx="14.4" cy="7" r="1.2" fill="#fff"/><circle cx="9.6" cy="7" r=".5" fill="#0b2b44"/><circle cx="14.4" cy="7" r=".5" fill="#0b2b44"/><ellipse cx="12" cy="8.9" rx=".95" ry=".6" fill="#ff9f1a"/></svg></span><div><h3>QQ 机器人</h3><p>通过 QQ 官方机器人协议接入；回答在 QQ 里直接发回。</p></div></div>
-        <label class="switch-row"><input type="checkbox" id="qqEnabled" ${q.enabled ? "checked" : ""}><span class="switch-track"></span><span><b>启用 QQ 机器人</b><small>仅本人私聊可用；群聊不响应。</small></span></label>
+        <label class="switch-row"><input type="checkbox" id="qqEnabled" ${q.enabled ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>启用 QQ 机器人</b><span class="sw-hint">仅本人私聊可用；群聊不响应</span></span></label>
         <div class="settings-form" style="margin-top:14px">
           <div class="settings-field"><label for="qqAppId">AppID</label><input id="qqAppId" value="${attrEsc(q.app_id || "")}" placeholder="1906230635"></div>
           <div class="settings-field"><label for="qqSecret">AppSecret</label><input id="qqSecret" type="password" autocomplete="off" placeholder="${q.has_secret ? attrEsc("已配置 " + q.secret_masked + "（留空则不修改）") : "机器人密钥"}"><small>只保存在本机 config.json，不会上传。</small></div>
@@ -1995,7 +1995,10 @@ async function renderSettingsData(body) {
         <div class="settings-note" id="rtState"></div>
       </section>
       <section class="settings-card"><div class="settings-card-head"><span class="settings-card-icon">◷</span><div><h3>定时同步</h3><p>定期扫描数据库，适合实时监听不可用时使用。</p></div></div>
-        <label class="switch-row"><input type="checkbox" id="autoSync" ${a.auto ? "checked" : ""}><span class="switch-track"></span><span><b>启用定时同步</b><small>每 <input class="inline-number" id="autoInterval" type="number" min="5" value="${a.interval_min}"> 分钟执行一次。</small></span></label><div class="settings-note">${a.last ? "上次运行：" + esc(a.last) : "尚未运行"}</div>
+        <div class="settings-switch-card">
+          <label class="switch-row"><input type="checkbox" id="autoSync" ${a.auto ? "checked" : ""}><span class="switch-track"></span><span class="sw-copy"><b>启用定时同步</b><span class="sw-hint">每 <input class="inline-number" id="autoInterval" type="number" min="5" value="${a.interval_min}"> 分钟执行一次</span></span></label>
+        </div>
+        <div class="settings-note">${a.last ? "上次运行：" + esc(a.last) : "尚未运行"}</div>
       </section>
       <section class="settings-card settings-action-card"><div><h3>手动同步</h3><p>立即扫描一次，适合刚登录微信或需要立刻更新时使用。</p></div><button id="syncBtn" ${s.sync.running ? "disabled" : ""}>${s.sync.running ? "同步中…" : "立即同步一次"}</button><pre>${esc(s.sync.log || "")}</pre></section>
     </div><aside class="settings-side-card"><div class="settings-side-title">同步说明</div><p>实时同步优先处理新消息；历史图片、语音和链接解析可在“索引任务”中补跑。</p><div class="settings-mini-stat"><span>当前状态</span><b>${s.sync.running ? "正在同步" : "空闲"}</b></div></aside></div>`;
