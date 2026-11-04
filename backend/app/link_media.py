@@ -32,7 +32,7 @@ UA_DESKTOP = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 MAX_IMAGES = 12           # 单篇最多 OCR 的图片数
-MAX_VIDEO_SECONDS = 900   # 视频最多转写前 15 分钟
+MAX_VIDEO_SECONDS = 86400   # 视频全量转写（24h 上限实际等于不截断）
 MAX_DOWNLOAD = 260 * 1024 * 1024
 HTTP_TIMEOUT = 25
 
@@ -478,7 +478,7 @@ def compose_text(res: dict) -> str:
     if parts.get("asr"):
         head = "【视频语音转写】"
         if res.get("truncated"):
-            head += "（仅前 %d 分钟）" % (MAX_VIDEO_SECONDS // 60)
+            head += "（音频过长仅保留前段）"
         out.append(head + chr(10) + parts["asr"])
     if not out:
         out.append("（未提取到正文内容）")
