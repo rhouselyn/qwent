@@ -1454,3 +1454,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 
 /* 隐藏旧的 composer-toolbar 边框（旧 CSS 覆盖） */
 .composer-modes, .mode-segment.slim-segment, .mode-segment.mode-segment-check { display: contents; }
+
+/* ＋ 新会话图标按钮：发送按钮左侧 */
+.icon-btn { min-height: 38px; min-width: 38px; padding: 0; border-radius: 9px;
+  border: 1px solid #dbe3e8; background: #f6f8f9; color: #59636d;
+  font-size: 17px; font-weight: 500; cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; line-height: 1; }
+.icon-btn:hover { background: #edf0f2; color: #397255; }
+.chat-column > .composer-wrap .composer-actions .icon-btn,
+.assistant-composer-wrap .composer-actions .icon-btn { min-height: 38px; }

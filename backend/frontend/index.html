@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#07c160">
 <title>微信知识助手</title>
-<link rel="stylesheet" href="style.css?v=57">
+<link rel="stylesheet" href="style.css?v=58">
 </head>
 <body>
 <div class="app">
@@ -77,14 +77,13 @@
               <label class="scope-toggle" id="scopeToggleWrap"
                      title="勾选：只在当前会话/文件内检索提问；取消勾选：全局检索全部聊天记录">
                 <input type="checkbox" id="scopeToggle" checked>
-                <span id="scopeLabel">当前会话</span>
+                <span id="scopeLabel">仅当前会话内提问</span>
               </label>
             </div>
             <label class="tool-pill" title="快速问答：工具调用上限本会话 4 步、全局 6 步"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速问答</span></label>
             <label class="tool-pill" title="探索模式：工具调用上限本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span></label>
             <label class="tool-pill tool-pill-toggle" title="深度思考：切换推理模型，复杂问题更准但更慢"><input type="checkbox" id="thinkToggle"><span>深度思考</span></label>
             <span class="toolbar-spacer"></span>
-            <button id="newSessionBtn" class="tool-pill tool-action" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
             <input type="checkbox" id="exploreToggle" class="mode-state" aria-hidden="true" tabindex="-1">
           </div>
           <div class="composer">
@@ -92,6 +91,7 @@
               <textarea id="input" rows="1" placeholder="输入你想查询的问题…" title="Enter 发送 · Shift+Enter 换行；在消息上右键可加入引用"></textarea>
             </div>
             <div class="composer-actions">
+              <button id="newSessionBtn" class="icon-btn" title="新建 AI 会话">＋</button>
               <button id="sendBtn">发送</button>
             </div>
           </div>
@@ -124,13 +124,13 @@
             <label class="tool-pill" title="探索模式：工具调用上限本会话 8 步、全局 12 步"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span></label>
             <label class="tool-pill tool-pill-toggle" title="深度思考：切换推理模型"><input type="checkbox" id="assistantThink"><span>深度思考</span></label>
             <span class="toolbar-spacer"></span>
-            <button id="assistantNew" class="tool-pill tool-action" title="新建 AI 会话">＋ 新会话</button>
           </div>
           <div class="composer assistant-composer">
             <div class="input-shell">
               <textarea id="assistantInput" rows="1" placeholder="输入想了解的问题…" title="Enter 发送 · Shift+Enter 换行"></textarea>
             </div>
             <div class="composer-actions">
+              <button id="assistantNew" class="icon-btn" title="新建 AI 会话">＋</button>
               <button id="assistantSend">发送</button>
             </div>
           </div>

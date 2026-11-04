@@ -819,11 +819,7 @@ function updateScopeBar() {
   if (!bar) return;
   if (isAssistant() || !state.current) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
-  $("#scopeLabel").textContent = previewFile
-    ? `仅在文件「${previewFile.title || "当前文件"}」内提问`
-    : previewLink
-    ? `仅在「${$("#chatTitle").textContent || "本文"}」内提问`
-    : `仅在「${state.current.name || state.current.username}」内提问`;
+  $("#scopeLabel").textContent = "仅当前会话内提问";
 }
 function updateDrawerScope() {
   const scoped = $("#scopeToggle").checked;
