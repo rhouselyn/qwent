@@ -783,7 +783,6 @@ function renderQuoteBar() {
   const bar = $("#quoteBar");
   if (!state.quoted.length) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
-  $("#quoteCount").textContent = `(${state.quoted.length} 条)`;
   $("#quoteList").innerHTML = state.quoted.map((q, i) =>
     `<span class="quote-chip" title="${esc(q.text)}" data-i="${i}">
        <span class="quote-chip-text">${i + 1}. ${esc(q.who)}: ${esc(q.text.slice(0, 40))}</span>
