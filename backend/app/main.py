@@ -3346,7 +3346,7 @@ def _file_name(packed_info) -> str:
 @app.get("/api/files")
 def api_files(q: str = "", n: int = 200, offset: int = 0, chat: str = "",
               ext: str = "", kind: str = "", since: int = 0, until: int = 0,
-              sort: str = "new"):
+              sort: str = "new", state: str = ""):
     rdb = resource_db()
     if not rdb:
         return []

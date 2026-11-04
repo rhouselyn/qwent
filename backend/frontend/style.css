@@ -60,8 +60,7 @@ body {
 
 .result-item { padding: 10px 14px; border-bottom: 1px solid #f0f0f2; cursor: pointer; }
 .result-item:hover { background: #ececee; }
-.result-item .meta { font-size: 11px; color: #9a9aa0; margin-bottom: 3px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-item .meta { font-size: 11px; color: #9a9aa0; margin-bottom: 3px; }
 .result-item .snippet { font-size: 13px; line-height: 1.5;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-item .snippet b { color: #c2410c; }
@@ -1463,3 +1462,43 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .icon-btn:hover { background: #edf0f2; color: #397255; }
 .chat-column > .composer-wrap .composer-actions .icon-btn,
 .assistant-composer-wrap .composer-actions .icon-btn { min-height: 38px; }
+
+/* mode-segment slim 恢复互斥容器边框 */
+.mode-segment.slim-segment { display: inline-flex; align-items: stretch;
+  border: 1px solid #dbe3e8; border-radius: 8px; background: #fafbfb; overflow: hidden; }
+.mode-segment.slim-segment label { position: relative; display: inline-flex; align-items: center;
+  min-width: 0; padding: 4px 12px; color: #6f7b84; cursor: pointer; font-size: 11.5px;
+  font-weight: 600; user-select: none; }
+.mode-segment.slim-segment label + label { border-left: 1px solid #dbe3e8; }
+.mode-segment.slim-segment input { position: absolute; opacity: 0; pointer-events: none; }
+.mode-segment.slim-segment label:has(input:checked) { color: #087c43; background: #e4f5ea; }
+.mode-segment.slim-segment label:hover:not(:has(input:checked)) { background: #f0f2f4; }
+
+/* ＋号按钮：白色方形 */
+.icon-btn { min-height: 38px; min-width: 38px; padding: 0; border-radius: 8px;
+  border: 1px solid #dbe3e8; background: #fff; color: #59636d;
+  font-size: 18px; font-weight: 400; cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; line-height: 1; }
+.icon-btn:hover { background: #f0f2f4; color: #397255; }
+
+/* meta 行：状态标签不被省略 */
+.result-item .meta { display: flex; align-items: center; gap: 6px; overflow: visible; }
+.result-item .meta .meta-trunc { overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; min-width: 0; flex: 1; }
+.result-item .meta .file-badge, .result-item .meta .link-badge,
+.result-item .meta .file-state { flex: 0 0 auto; white-space: nowrap; }
+.file-state { font-size: 11px; flex: 0 0 auto; }
+.file-state.ok { color: #079b4e; }
+.file-state.warn { color: #c2410c; }
+
+
+/* ＋号按钮强制白色方形 */
+.composer .icon-btn, .composer-actions .icon-btn {
+  background: #fff !important; color: #59636d !important;
+  border: 1px solid #dbe3e8 !important; border-radius: 8px !important;
+  min-width: 38px !important; min-height: 38px !important;
+  padding: 0 !important; font-weight: 400 !important;
+}
+.composer .icon-btn:hover, .composer-actions .icon-btn:hover {
+  background: #f0f2f4 !important; color: #397255 !important;
+}

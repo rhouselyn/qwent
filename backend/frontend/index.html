@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#07c160">
 <title>微信知识助手</title>
-<link rel="stylesheet" href="style.css?v=58">
+<link rel="stylesheet" href="style.css?v=60">
 </head>
 <body>
 <div class="app">
@@ -80,8 +80,10 @@
                 <span id="scopeLabel">仅当前会话内提问</span>
               </label>
             </div>
-            <label class="tool-pill" title="快速问答：工具调用上限本会话 4 步、全局 6 步"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速问答</span></label>
-            <label class="tool-pill" title="探索模式：工具调用上限本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span></label>
+            <div class="mode-segment slim-segment" role="radiogroup" aria-label="提问方式">
+              <label title="快速问答：工具调用上限本会话 4 步、全局 6 步"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速问答</span></label>
+              <label title="探索模式：工具调用上限本会话 8 步、全局 12 步"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span></label>
+            </div>
             <label class="tool-pill tool-pill-toggle" title="深度思考：切换推理模型，复杂问题更准但更慢"><input type="checkbox" id="thinkToggle"><span>深度思考</span></label>
             <span class="toolbar-spacer"></span>
             <input type="checkbox" id="exploreToggle" class="mode-state" aria-hidden="true" tabindex="-1">
@@ -120,8 +122,10 @@
                 <input type="checkbox" id="assistantScopeToggle" checked><span id="assistantScopeToggleText">仅本会话</span><b id="assistantScopeName"></b>
               </label>
             </div>
-            <label class="tool-pill" title="快速问答：工具调用上限本会话 4 步、全局 6 步"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速问答</span></label>
-            <label class="tool-pill" title="探索模式：工具调用上限本会话 8 步、全局 12 步"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span></label>
+            <div class="mode-segment slim-segment" role="radiogroup" aria-label="AI 助手提问方式">
+              <label title="快速问答"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速问答</span></label>
+              <label title="探索模式"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span></label>
+            </div>
             <label class="tool-pill tool-pill-toggle" title="深度思考：切换推理模型"><input type="checkbox" id="assistantThink"><span>深度思考</span></label>
             <span class="toolbar-spacer"></span>
           </div>
