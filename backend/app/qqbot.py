@@ -182,6 +182,12 @@ def msg_text(msg: dict, cap: int = 400) -> str:
         text += f" {parsed['url']}"
     if parsed.get("des") and parsed["des"] not in text:
         text += f" {parsed['des'][:200]}"
+    # appmsg 解析失败时会剩下整段 XML，直接塞进时间线会污染上下文
+    if "<msg" in text or "<?xml" in text:
+        mt = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", text, re.S)
+        md = re.search(r"<des>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</des>", text, re.S)
+        label = (mt.group(1).strip() if mt else "") or (md.group(1).strip() if md else "")
+        text = ("[消息] " + label) if label else re.sub(r"<[^>]{1,200}>", " ", text)
     return re.sub(r"\s+", " ", text).strip()[:cap]
 
 
@@ -329,7 +335,7 @@ def build_prompt(openid: str, question: str, channel: str = "qq",
             "你是通过微信（ClawBot）回答用户问题的助手，后端是本机微信知识库。\n"
             "回答会直接发到微信聊天窗口：用纯文本、口语化，默认 2–5 句、能短则短；"
             "除非用户明确要求，不要长篇大论、不要 Markdown 表格/代码块、不要输出 [W1] 或 [n] 引用编号。\n"
-            "需要更多细节时可调用工具检索本机微信记录（聊天、图片 OCR、语音转写、文件、链接、"
+            "需要更多细节时可调用工具检索本机微信记录（聊天、图片 OCR、语音转写、文件、链接、朋友圈、"
             "合并转发都可查）；找不到就直说，不要编造。\n\n"
             f"【近期时间线】\n{timeline}"
             f"{hist}\n\n"
@@ -346,7 +352,7 @@ def build_prompt(openid: str, question: str, channel: str = "qq",
             "下面是本机微信账号的近期上下文（按时间正序，跨会话）和之前的 QQ 对话。\n"
             f"{cite_rule}\n"
             "需要更多细节时可调用工具检索本机微信记录（聊天、图片 OCR、语音转写、"
-            "文件、链接、合并转发都可查）。找不到就直说，不要编造。\n\n"
+            "文件、链接、朋友圈、合并转发都可查）。找不到就直说，不要编造。\n\n"
             f"【近期时间线】\n{timeline}\n\n"
             f"【当前问题】\n{question or '（用户没有输入文字）'}"
         )

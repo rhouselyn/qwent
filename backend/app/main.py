@@ -1104,7 +1104,8 @@ def api_ask(payload: dict):
                 ans = call_llm(conf, msgs)
             except Exception as e:
                 mode = "retrieval"
-                ans = "[调用模型失败：%s]%s%s" % (str(e)[:120], chr(10), chr(10)) + body[:3000]
+                ans = ("[模型接口暂时不可用：网络或代理异常（%s）。"
+                       "文件已读取，但暂时无法生成回答，请稍后重试。]" % str(e)[:100])
         else:
             ans = "**[未配置 API Key —— 以下为文件提取内容]**" + chr(10) + chr(10) + body[:4000]
         ensure_qa_table(con)
@@ -1172,7 +1173,9 @@ def api_ask(payload: dict):
             ans = call_llm(conf, msgs)
         except Exception as e:
             mode = "retrieval"
-            ans = "[调用模型失败：" + str(e)[:120] + "]\n\n" + context[:3000]
+            ans = ("[模型接口暂时不可用：网络或代理异常（%s）。"
+                   "已检索到 %d 段相关记录，但暂时无法生成回答；"
+                   "请检查网络/代理后重试。]" % (str(e)[:100], len(blocks)))
     else:
         # 检索模式：只给前 5 段摘录，完整内容交给「引用来源」折叠区
         ans = ("**检索模式（未配置 API Key）：命中 %d 段对话**，以下为前 5 段摘录。"

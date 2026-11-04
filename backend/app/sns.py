@@ -839,7 +839,7 @@ def search_moments(con, query: str, author: str = "", days: int = 0,
             if len(out) >= limit:
                 break
     if not query.strip():
-        rows = con.execute("SELECT * FROM sns_post p" + where +
+        rows = con.execute("SELECT * FROM sns_post p WHERE 1=1" + where +
                            " ORDER BY ts DESC LIMIT ?", (*params, limit)).fetchall()
         out = {}
         for r in rows:

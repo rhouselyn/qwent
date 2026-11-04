@@ -828,11 +828,12 @@ def t_recent_messages(args):
 
 
 def t_search_moments(args):
-    """检索朋友圈（正文关键词 + OCR 图片文字 + 语义向量），支持作者/天数过滤。"""
+    """检索朋友圈（正文关键词 + OCR 图片文字 + 语义向量），支持作者/天数过滤。
+
+    query 留空时按时间倒序返回最近的朋友圈，用于「最近朋友圈发生了啥」。
+    """
     import sns as sns_mod
     query = str(args.get("query") or "")
-    if not query.strip():
-        return {"error": "query 不能为空"}
     con = _db()
     try:
         items = sns_mod.search_moments(con, query,
@@ -968,13 +969,14 @@ TOOLS = {
                        "query": {"type": "string"}, "limit": {"type": "integer"}}}),
     "search_moments": (t_search_moments,
                        "检索朋友圈（关键词匹配正文与图片 OCR 文字，弱结果时语义向量兜底），"
-                       "可按 author（名字/微信号）与 days（最近 N 天）过滤。"
-                       "回答「某人朋友圈发过什么/谁提到过某事」用它。",
+                       "可按 author（名字/微信号）与 days（最近 N 天）过滤；"
+                       "query 留空则按时间倒序返回最近的朋友圈。"
+                       "回答「最近朋友圈发生了什么/某人朋友圈发过什么/谁提到过某事」用它。",
                        {"type": "object", "properties": {
-                           "query": {"type": "string"},
+                           "query": {"type": "string", "description": "关键词，可留空看最近"},
                            "author": {"type": "string", "description": "作者名关键词，可省略"},
                            "days": {"type": "integer", "description": "限定最近 N 天，可省略"},
-                           "limit": {"type": "integer"}}, "required": ["query"]}),
+                           "limit": {"type": "integer"}}}),
     "get_moment": (t_get_moment,
                    "读取单条朋友圈全文：正文、每张图的 OCR 文字、视频时长、评论与点赞数。"
                    "tid 来自 search_moments。",
