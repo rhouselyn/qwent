@@ -287,6 +287,27 @@ def t_message_context(args):
     return {"chat": m["chat_user"], "focus_id": mid, "messages": data}
 
 
+def _file_text_info(con, chat: str, local_id) -> tuple[bool, int]:
+    """(file_text 是否有记录, 正文字数)；无记录=还没处理，空记录=未下载/解析失败。"""
+    try:
+        r = con.execute("SELECT LENGTH(IFNULL(text,'')) FROM file_text WHERE key=?",
+                        (f"{chat}:{int(local_id or 0)}",)).fetchone()
+    except Exception:      # noqa: BLE001
+        return False, 0
+    if not r:
+        return False, 0
+    return True, int(r[0] or 0)
+
+
+def _file_status(con, chat: str, local_id) -> dict:
+    exists, chars = _file_text_info(con, chat, local_id)
+    if chars > 0:
+        return {"status": "parsed", "chars": chars}
+    if exists:
+        return {"status": "missing", "chars": 0}
+    return {"status": "unprocessed", "chars": 0}
+
+
 def t_list_files(args):
     """列出收发的文件：优先用微信资源映射表（真实文件名），可按会话/名字/时间过滤。"""
     import main as M
@@ -322,9 +343,10 @@ def t_list_files(args):
                     break
         if not name or (q and q.lower() not in name.lower()):
             continue
+        st = _file_status(con, username, r["message_local_id"])
         out.append({"chat": username, "chat_name": _chat_name(con, username),
                     "local_id": r["message_local_id"], "ts": ts, "time": _fmt(ts),
-                    "title": name, "size": r["size"]})
+                    "title": name, "size": r["size"], **st})
         if len(out) >= limit:
             break
     con.close()
@@ -337,9 +359,16 @@ def t_read_file(args):
     p = locate_file(args.get("chat", ""), int(args.get("local_id") or 0),
                     int(args.get("ts") or 0), args.get("name", ""))
     if not p:
-        return {"error": "文件不在本地磁盘"}
+        return {"status": "missing",
+                "error": "文件未下载到本机（可能已被微信清理或尚未下载），无法读取正文"}
     text = extract_text(p, min(int(args.get("max_chars") or 12000), 30000))
-    return {"name": p.name, "size": p.stat().st_size, "chars": len(text), "text": text}
+    if text.startswith("[解析失败"):
+        return {"status": "parse_failed", "error": "文件已下载但无法解析正文",
+                "detail": text[:200]}
+    if not text.strip():
+        return {"status": "empty", "error": "文件已下载，但没有可提取的文字"}
+    return {"name": p.name, "size": p.stat().st_size, "chars": len(text),
+            "status": "parsed", "text": text}
 
 
 def t_overview(args):
@@ -715,7 +744,8 @@ def t_rag_search(args):
                     continue
                 if ql in f["title"].lower() and f["title"] not in seen_names:
                     seen_names.add(f["title"])
-                    files.append({**f, "chat_name": _chat_name(con, f["chat"])})
+                    st = _file_status(con, f["chat"], f["local_id"])
+                    files.append({**f, "chat_name": _chat_name(con, f["chat"]), **st})
                     if len(files) >= k:
                         break
     # 4) 朋友圈（正文 + 图片 OCR 文字；FTS + 语义兜底）
@@ -1002,6 +1032,9 @@ SYSTEM_PROMPT = """你是用户的微信记录分析助手，可以调用工具�
    不要用 retrieve 去找几个月前的内容。
 5. 需要精确统计（多少个群/多少条消息/谁发言最多）必须用 overview_stats 或 chat_stats。
 6. 需要文件内容：rag_search(scope="files") 找文件 → read_file 读正文；
+   文件条目带 status：parsed=正文已提取，missing=未下载或解析失败，unprocessed=还没处理。
+   **status 不是 parsed 时不要假装读过内容**；read_file 返回 missing/parse_failed/empty
+   就如实告诉用户「文件未下载/无法解析」，不要编造正文。
    单个文件超过 5MB 时只读前 8000 字，不要反复整文件读取。
 7. 需要公众号文章：rag_search(scope="links") 或 find_links → read_link 取全文；
    想知道"群里发过哪些文章/什么时候发的"用 list_chat_links。

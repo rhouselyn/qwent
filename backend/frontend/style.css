@@ -1338,3 +1338,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 #settingsFull button.mini { min-height: 30px; padding: 5px 11px; font-size: 12px; border-radius: 8px; }
 #settingsFull button.mini.ghost { color: #397255; border: 1px solid #cfe6d8; }
 .settings-card-icon svg { width: 18px; height: 18px; display: block; }
+.file-state { font-size: 10px; color: #8b929b; }
+.file-state.ok { color: #079b4e; }
+.file-state.warn { color: #c2410c; }

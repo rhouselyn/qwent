@@ -3335,13 +3335,105 @@ def api_files(q: str = "", n: int = 200, offset: int = 0, chat: str = "",
                     "chat_name": cname[0] if cname else username,
                     "ts": r["message_create_time"], "title": name, "size": r["size"],
                     "ext": fext, "kind": file_kind(fext)})
-    con.close()
     rdb.close()
     if sort == "old":
         out.sort(key=lambda x: x["ts"] or 0)
     elif sort == "size":
         out.sort(key=lambda x: x["size"] or 0, reverse=True)
-    return out[offset:offset + n]
+    page = out[offset:offset + n]
+    # 标记每个文件的正文是否已成功提取（file_text 缓存；空文本=未下载/解析失败）
+    keys = [f"{x['chat']}:{x['id']}" for x in page]
+    status = {}
+    if keys:
+        try:
+            for i in range(0, len(keys), 500):
+                chunk = keys[i:i + 500]
+                rows = con.execute(
+                    "SELECT key, LENGTH(IFNULL(text,'')) FROM file_text WHERE key IN (" +
+                    ",".join("?" for _ in chunk) + ")", chunk).fetchall()
+                for k, n in rows:
+                    status[k] = int(n or 0)
+        except sqlite3.OperationalError:
+            status = {}
+    for x in page:
+        k = f"{x['chat']}:{x['id']}"
+        chars = status.get(k)
+        if chars is None:
+            x.update(parsed=False, chars=0, status="unprocessed")
+        elif chars > 0:
+            x.update(parsed=True, chars=chars, status="parsed")
+        else:
+            x.update(parsed=False, chars=0, status="missing")
+    con.close()
+    return page
+
+
+_file_stats_cache = {"ts": 0.0, "data": {}}
+
+
+@app.get("/api/files/stats")
+def api_files_stats():
+    """文件中心统计：总数 / 成功提取正文 / 未下载或解析失败，按类型分组。"""
+    now = time.time()
+    if now - _file_stats_cache["ts"] < 300 and _file_stats_cache["data"]:
+        return _file_stats_cache["data"]
+    rdb = resource_db()
+    if not rdb:
+        return {"total": 0, "parsed": 0, "unparsed": 0, "kinds": {}}
+    con = db()
+    chat_ids = {r[0]: r[1] for r in rdb.execute(
+        "SELECT rowid, user_name FROM ChatName2Id")}
+    texts = {}
+    try:
+        for k, n in con.execute("SELECT key, LENGTH(IFNULL(text,'')) FROM file_text"):
+            texts[k] = int(n or 0)
+    except sqlite3.OperationalError:
+        pass
+    rows = rdb.execute(
+        "SELECT i.chat_id, i.message_local_id, d.packed_info "
+        "FROM MessageResourceInfo i JOIN MessageResourceDetail d "
+        "ON d.message_id = i.message_id "
+        "WHERE i.message_local_type & 4294967295 = 49 AND length(d.packed_info) > 2"
+    ).fetchall()
+    kinds = {k: {"total": 0, "parsed": 0, "missing": 0, "unprocessed": 0}
+             for k in ("doc", "sheet", "slide", "image", "archive", "media", "other")}
+    total = parsed = missing = unprocessed = 0
+    seen = set()
+    for r in rows:
+        name = _file_name(r["packed_info"])
+        if not name:
+            continue
+        username = chat_ids.get(r["chat_id"], "")
+        key = f"{username}:{r['message_local_id']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        fext = Path(name).suffix.lower()
+        kind = file_kind(fext)
+        kd = kinds.setdefault(kind, {"total": 0, "parsed": 0,
+                                     "missing": 0, "unprocessed": 0})
+        kd["total"] += 1
+        total += 1
+        if key in texts:
+            if texts[key] > 0:
+                kd["parsed"] += 1
+                parsed += 1
+            else:
+                kd["missing"] += 1
+                missing += 1
+        else:
+            kd["unprocessed"] += 1
+            unprocessed += 1
+    con.close()
+    rdb.close()
+    data = {"total": total, "parsed": parsed, "missing": missing,
+            "unprocessed": unprocessed, "unparsed": total - parsed,
+            "kinds": kinds}
+    _file_stats_cache.update(ts=now, data=data)
+    return data
+
+
+# ---------------------------------------------------------------- API: QQ 机器人
 
 
 

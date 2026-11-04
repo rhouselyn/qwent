@@ -1235,7 +1235,7 @@ async function showContacts(q = "") {
   }
   showPane("#contactList");
 }
-const fileView = { chat: "", kind: "", days: 0, sort: "new", q: "", offset: 0, items: [], hasMore: true, loading: false };
+const fileView = { chat: "", kind: "", days: 0, sort: "new", q: "", offset: 0, items: [], hasMore: true, loading: false, stats: null };
 let fileSessions = null;
 let fileQueryTimer = null;
 const FILE_KIND_LABELS = { doc: "文档", sheet: "表格", slide: "演示", image: "图片",
@@ -1246,11 +1246,15 @@ function renderFileShell() {
   const opts = (rows, cur) => rows.map(([v, label]) =>
     `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
   const chats = [["", "全部会话"], ...fileSessions.slice(0, 150).map(s => [s.username, s.name || s.username])];
+  const kindRows = Object.entries(FILE_KIND_LABELS).map(([k, label]) => {
+    const st = fileView.stats && fileView.stats.kinds && fileView.stats.kinds[k];
+    return [k, st ? `${label} ${st.parsed}/${st.total}` : label];
+  });
   box.innerHTML = `
     <div class="files-toolbar">
       <div class="files-filters">
         <select id="fileChat">${opts(chats, fileView.chat)}</select>
-        <select id="fileKind">${opts([["", "全部类型"], ...Object.entries(FILE_KIND_LABELS)], fileView.kind)}</select>
+        <select id="fileKind">${opts([["", "全部类型"], ...kindRows], fileView.kind)}</select>
         <select id="fileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], fileView.days)}</select>
         <select id="fileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], fileView.sort)}</select>
       </div>
@@ -1280,13 +1284,27 @@ function renderFileItems() {
     const d = document.createElement("div");
     d.className = "result-item";
     const badge = (f.ext || "").replace(".", "").toUpperCase() || FILE_KIND_LABELS[f.kind] || "文件";
-    d.innerHTML = `<div class="meta"><span class="file-badge">${esc(badge)}</span> ${esc(f.chat_name)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</div>
+    const state = f.parsed ? "已解析" : (f.status === "missing" ? "未下载/解析失败" : "未处理");
+    const stateCls = f.parsed ? "file-state ok" : "file-state warn";
+    d.innerHTML = `<div class="meta"><span class="file-badge">${esc(badge)}</span> ${esc(f.chat_name)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}
+        · <span class="${stateCls}">${state}</span></div>
       <div class="snippet">${esc(f.title)}</div>`;
     d.onclick = () => openFilePreview(f);
     box.appendChild(d);
   }
   const meta = $("#fileMeta");
-  if (meta) meta.textContent = `${fileView.items.length} 个文件${fileView.hasMore ? " · 还有更多" : ""}`;
+  if (meta) {
+    let statsText = "";
+    const st = fileView.stats;
+    if (st) {
+      if (fileView.kind && st.kinds && st.kinds[fileView.kind]) {
+        const k = st.kinds[fileView.kind];
+        statsText = `${FILE_KIND_LABELS[fileView.kind] || "当前类型"} 已解析 ${k.parsed}/${k.total} · `;
+      }
+      statsText += `全部 已解析 ${st.parsed}/${st.total}（未下载/失败 ${st.missing || 0} · 未处理 ${st.unprocessed || 0}）`;
+    }
+    meta.textContent = `${fileView.items.length} 个文件${statsText ? " · " + statsText : ""}${fileView.hasMore ? " · 还有更多" : ""}`;
+  }
   const more = $("#fileMore");
   if (more) more.style.display = fileView.hasMore ? "" : "none";
 }
@@ -1320,6 +1338,9 @@ async function showFiles(opts = {}) {
   Object.assign(fileView, opts);
   if (!fileSessions) {
     try { fileSessions = await api("/api/sessions"); } catch { fileSessions = []; }
+  }
+  if (!fileView.stats) {
+    try { fileView.stats = await api("/api/files/stats"); } catch { fileView.stats = null; }
   }
   renderFileShell();
   await refreshFiles(true);
