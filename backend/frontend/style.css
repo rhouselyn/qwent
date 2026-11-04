@@ -1376,3 +1376,81 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .result-item .meta .meta-trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 .result-item .meta .file-badge, .result-item .meta .link-badge,
 .result-item .meta .file-state { flex: 0 0 auto; }
+
+/* ===== 重新设计的 composer 工具栏与引用块 ===== */
+
+/* 引用块：独立 block，绿色左边框指示，和选项行视觉分离 */
+.quote-block {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 6px 14px 0; padding: 8px 12px;
+  background: #f0faf4; border-left: 3px solid #07c160;
+  border-radius: 0 10px 10px 0;
+}
+.quote-chips { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; min-width: 0; }
+.quote-chips:empty::after { content: ""; }
+.quote-dismiss { flex: 0 0 auto; cursor: pointer; color: #9aa2aa; font-size: 13px;
+  padding: 2px 4px; margin-top: 2px; }
+.quote-dismiss:hover { color: #c2410c; }
+
+/* 工具栏：单行 flex，pill 形式 */
+.composer-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 0 14px; margin: 6px 0 0;
+}
+.chat-column > .composer-wrap .composer-toolbar { max-width: 960px; margin: 6px auto 0; }
+.assistant-composer-wrap .composer-toolbar { max-width: 900px; margin: 6px auto 0; }
+
+/* 范围 pill */
+.scope-pill { display: inline-flex; align-items: center; }
+.scope-pill .assistant-scope-select, .scope-pill .scope-toggle {
+  display: inline-flex; align-items: center; min-height: 26px; padding: 2px 10px;
+  border: 1px solid #dbe3e8; border-radius: 999px; background: #f6f8f9;
+  color: #59636d; font-size: 11px; cursor: pointer; outline: none;
+}
+.scope-pill .assistant-scope-select:focus { border-color: rgba(7,193,96,.4); }
+.scope-pill .scope-toggle input { width: 13px; height: 13px; margin: 0 4px 0 0; accent-color: #07a957; }
+.chat-column > .composer-wrap .scope-pill .scope-toggle {
+  border: 1px solid #dbe3e8; border-radius: 999px; background: #f6f8f9;
+  padding: 2px 10px; gap: 5px; color: #59636d; font-size: 11px; font-weight: 500;
+}
+.chat-column > .composer-wrap .scope-pill .scope-toggle:has(input:checked) {
+  color: #087c43; background: #eefaf2; border-color: #b8dcc6;
+}
+.chat-column > .composer-wrap .scope-pill .scope-toggle:has(input:not(:checked)) {
+  color: #65717a; background: #f5f6f7; border-color: #e1e5e8;
+}
+.chat-column > .composer-wrap .scope-pill .scope-toggle input { accent-color: #07a957; }
+
+/* 模式/思考 pill：无容器边框，各自独立圆角 */
+.tool-pill {
+  display: inline-flex; align-items: center; min-height: 26px; padding: 3px 11px;
+  border: 1px solid transparent; border-radius: 999px; background: transparent;
+  color: #6f7b84; font-size: 11.5px; font-weight: 600; cursor: pointer;
+  user-select: none; transition: background .15s, color .15s, border-color .15s;
+}
+.tool-pill input { position: absolute; opacity: 0; pointer-events: none; }
+.tool-pill:hover { background: #f0f2f4; }
+.tool-pill:has(input:checked) { color: #087c43; background: #e4f5ea; border-color: #c3e4cd; }
+.tool-pill-toggle::before { content: "○"; margin-right: 4px; font-size: 10px; color: #b0b8bd; }
+.tool-pill-toggle:has(input:checked) { color: #087c43; background: #e4f5ea; border-color: #c3e4cd; }
+.tool-pill-toggle:has(input:checked)::before { content: "●"; color: #07a957; }
+
+.toolbar-spacer { flex: 1; }
+.tool-action { color: #59636d !important; font-weight: 500; border: 1px solid #dbe3e8 !important;
+  background: #f6f8f9 !important; }
+.tool-action:hover { background: #edf0f2 !important; }
+
+/* 引用 chip */
+.quote-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; background: #fff; border: 1px solid #d0e4d6; color: #397255;
+  border-radius: 6px; padding: 2px 6px; max-width: 260px;
+}
+.quote-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 1 1 auto; }
+.quote-chip .quote-x { color: #8b929b; cursor: pointer; font-weight: 400;
+  padding: 0 2px; border-radius: 3px; }
+.quote-chip .quote-x:hover { color: #c2410c; background: #f0f0f0; }
+
+/* 隐藏旧的 composer-toolbar 边框（旧 CSS 覆盖） */
+.composer-modes, .mode-segment.slim-segment, .mode-segment.mode-segment-check { display: contents; }

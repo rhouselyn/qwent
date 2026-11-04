@@ -68,30 +68,23 @@
           </div>
         </div>
         <footer class="composer-wrap">
-          <div id="quoteBar" class="quote-bar" style="display:none">
-            <div class="quote-bar-body">
-              <div class="quote-bar-title">引用 <span id="quoteCount"></span></div>
-              <div id="quoteList" class="quote-list"></div>
-            </div>
-            <span id="quoteClear" class="quote-clear" title="取消引用">✕</span>
-          </div>
-          <div id="scopeBar" class="scope-bar" style="display:none">
-            <span class="scope-caption">范围</span>
-            <label class="scope-toggle" id="scopeToggleWrap"
-                   title="勾选：只在当前会话/文件内检索提问；取消勾选：全局检索全部聊天记录">
-              <input type="checkbox" id="scopeToggle" checked>
-              <span id="scopeLabel">仅在当前会话内提问</span>
-            </label>
+          <div id="quoteBar" class="quote-block" style="display:none">
+            <div class="quote-chips" id="quoteList"></div>
+            <span id="quoteClear" class="quote-dismiss" title="清空全部引用">✕</span>
           </div>
           <div class="composer-toolbar">
-            <div class="composer-modes mode-segment slim-segment" role="radiogroup" aria-label="提问方式">
-              <label title="快速问答：工具调用上限本会话 4 步、全局 6 步，检索轮次较少"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速问答</span></label>
-              <label title="探索模式：工具调用上限本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span></label>
+            <div id="scopeBar" class="scope-pill" style="display:none">
+              <label class="scope-toggle" id="scopeToggleWrap"
+                     title="勾选：只在当前会话/文件内检索提问；取消勾选：全局检索全部聊天记录">
+                <input type="checkbox" id="scopeToggle" checked>
+                <span id="scopeLabel">当前会话</span>
+              </label>
             </div>
-            <div class="mode-segment mode-segment-check slim-segment" role="group" aria-label="思考深度">
-              <label title="深度思考：切换推理模型，复杂问题更准但更慢"><input type="checkbox" id="thinkToggle"><span>深度思考</span></label>
-            </div>
-            <button id="newSessionBtn" class="ghost-btn ghost-btn-slim" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
+            <label class="tool-pill" title="快速问答：工具调用上限本会话 4 步、全局 6 步"><input type="radio" id="fastMode" name="chatAskMode" checked><span>快速问答</span></label>
+            <label class="tool-pill" title="探索模式：工具调用上限本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="exploreMode" name="chatAskMode"><span>探索模式</span></label>
+            <label class="tool-pill tool-pill-toggle" title="深度思考：切换推理模型，复杂问题更准但更慢"><input type="checkbox" id="thinkToggle"><span>深度思考</span></label>
+            <span class="toolbar-spacer"></span>
+            <button id="newSessionBtn" class="tool-pill tool-action" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
             <input type="checkbox" id="exploreToggle" class="mode-state" aria-hidden="true" tabindex="-1">
           </div>
           <div class="composer">
@@ -118,24 +111,20 @@
         </div>
         <div id="assistantConv" class="qa-list"></div>
         <footer class="composer-wrap assistant-composer-wrap">
-          <div class="scope-bar assistant-scope-bar">
-            <span class="scope-caption">范围</span>
-            <select id="assistantScopeSelect" class="assistant-scope-select" aria-label="选择回答范围">
-              <option value="assistant">全部聊天记录</option>
-            </select>
-            <label class="scope-toggle" id="assistantScopeWrap" title="勾选后只在这个范围内检索" style="display:none">
-              <input type="checkbox" id="assistantScopeToggle" checked><span id="assistantScopeToggleText">仅本会话</span><b id="assistantScopeName"></b>
-            </label>
-          </div>
           <div class="composer-toolbar">
-            <div class="composer-modes mode-segment slim-segment" role="radiogroup" aria-label="AI 助手提问方式">
-              <label title="快速问答：工具调用上限本会话 4 步、全局 6 步，检索轮次较少"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速问答</span></label>
-              <label title="探索模式：工具调用上限本会话 8 步、全局 12 步，适合统计、枚举和跨时段排查"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span></label>
+            <div class="scope-pill assistant-scope-pill">
+              <select id="assistantScopeSelect" class="assistant-scope-select" aria-label="选择回答范围">
+                <option value="assistant">全部聊天记录</option>
+              </select>
+              <label class="scope-toggle" id="assistantScopeWrap" title="勾选后只在这个范围内检索" style="display:none">
+                <input type="checkbox" id="assistantScopeToggle" checked><span id="assistantScopeToggleText">仅本会话</span><b id="assistantScopeName"></b>
+              </label>
             </div>
-            <div class="mode-segment mode-segment-check slim-segment" role="group" aria-label="AI 助手思考深度">
-              <label title="深度思考：切换推理模型，复杂问题更准但更慢"><input type="checkbox" id="assistantThink"><span>深度思考</span></label>
-            </div>
-            <button id="assistantNew" class="ghost-btn ghost-btn-slim" title="在当前范围新建一个 AI 会话">＋ 新会话</button>
+            <label class="tool-pill" title="快速问答：工具调用上限本会话 4 步、全局 6 步"><input type="radio" id="assistantFastMode" name="assistantAskMode" checked><span>快速问答</span></label>
+            <label class="tool-pill" title="探索模式：工具调用上限本会话 8 步、全局 12 步"><input type="radio" id="assistantExploreMode" name="assistantAskMode"><span>探索模式</span></label>
+            <label class="tool-pill tool-pill-toggle" title="深度思考：切换推理模型"><input type="checkbox" id="assistantThink"><span>深度思考</span></label>
+            <span class="toolbar-spacer"></span>
+            <button id="assistantNew" class="tool-pill tool-action" title="新建 AI 会话">＋ 新会话</button>
           </div>
           <div class="composer assistant-composer">
             <div class="input-shell">
