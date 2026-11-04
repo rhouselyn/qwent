@@ -1325,35 +1325,49 @@ async function showFiles(opts = {}) {
   await refreshFiles(true);
   showPane("#fileList");
 }
-async function showLinks(q = "") {
+const linkView = { platform: "", state: "", days: 0, sort: "new", q: "",
+                   offset: 0, items: [], hasMore: true, loading: false, queue: null };
+let linkQueryTimer = null;
+
+function renderLinkShell() {
   const box = $("#linkList");
-  box.innerHTML = `<div class="qa-empty">加载中…</div>`;
-  let list = [], queue = null;
-  try {
-    [list, queue] = await Promise.all([
-      api(`/api/links?n=200&q=${encodeURIComponent(q)}`),
-      api("/api/links/queue").catch(() => null)]);
-  } catch { list = []; }
+  const opts = (rows, cur) => rows.map(([v, label]) =>
+    `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
+  box.innerHTML = `
+    <div class="files-toolbar">
+      <div class="files-filters">
+        <select id="linkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"], ["bili", "B站"],
+          ["article", "公众号"], ["generic", "网页"]], linkView.platform)}</select>
+        <select id="linkState">${opts([["", "全部状态"], ["parsed", "已解析"],
+          ["pending", "解析中"], ["failed", "暂不支持"]], linkView.state)}</select>
+        <select id="linkDays">${opts([[0, "不限时间"], [7, "最近 7 天"],
+          [30, "最近 30 天"], [365, "最近一年"]], linkView.days)}</select>
+        <select id="linkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], linkView.sort)}</select>
+      </div>
+      <div class="files-meta" id="linkMeta">加载中…</div>
+    </div>
+    <div id="linkItems"></div>
+    <button id="linkMore" class="mini ghost files-more" style="display:none">加载更多</button>`;
+  const onChange = () => {
+    linkView.platform = $("#linkPlatform").value;
+    linkView.state = $("#linkState").value;
+    linkView.days = +$("#linkDays").value || 0;
+    linkView.sort = $("#linkSort").value;
+    refreshLinks(true);
+  };
+  ["#linkPlatform", "#linkState", "#linkDays", "#linkSort"].forEach(sel => $(sel).onchange = onChange);
+  $("#linkMore").onclick = () => refreshLinks(false);
+}
+
+function renderLinkItems() {
+  const box = $("#linkItems");
+  if (!box) return;
   box.innerHTML = "";
-  if (!list.length) {
-    box.innerHTML = `<div class="qa-empty">还没有收到过链接。<br>
-      聊天里出现的小红书/B站/公众号链接会自动解析并存下来。</div>`;
-    showPane("#linkList");
-    return;
+  if (!linkView.items.length) {
+    box.innerHTML = `<div class="qa-empty">没有符合条件的链接。<br>
+      换个平台/状态或时间范围试试；聊天里的链接会自动登记并解析。</div>`;
   }
-  const head = document.createElement("div");
-  head.className = "qa-empty";
-  const parsedN = list.filter(x => x.parsed).length;
-  let extra = "";
-  if (queue) {
-    extra = ` · 待解析 ${queue.pending}`;
-    if (queue.current) extra += ` · 正在解析：${esc(queue.current.slice(0, 60))}`;
-    else if (queue.pending) extra += "（解析器空闲，稍后自动续跑）";
-    if (queue.error) extra += ` · 最近失败：${esc(queue.error.slice(0, 60))}`;
-  }
-  head.textContent = `${list.length} 条链接 · ${parsedN} 条已解析入库${extra}`;
-  box.appendChild(head);
-  for (const l of list) {
+  for (const l of linkView.items) {
     const d = document.createElement("div");
     d.className = "result-item";
     const badge = l.parsed
@@ -1366,6 +1380,52 @@ async function showLinks(q = "") {
     d.onclick = () => openLinkPreview(l.url, l.title);
     box.appendChild(d);
   }
+  const meta = $("#linkMeta");
+  if (meta) {
+    const parsedN = linkView.items.filter(x => x.parsed).length;
+    let extra = "";
+    const q = linkView.queue;
+    if (q) {
+      extra = ` · 待解析 ${q.pending}`;
+      if (q.current) extra += ` · 正在解析：${esc(q.current.slice(0, 40))}`;
+      if (q.error) extra += ` · 最近失败：${esc(q.error.slice(0, 40))}`;
+    }
+    meta.textContent = `${linkView.items.length} 条链接 · ${parsedN} 条已解析${extra}`;
+  }
+  const more = $("#linkMore");
+  if (more) more.style.display = linkView.hasMore ? "" : "none";
+}
+
+async function refreshLinks(reset = true) {
+  if (linkView.loading) return;
+  if (reset) { linkView.offset = 0; linkView.items = []; }
+  linkView.loading = true;
+  const meta = $("#linkMeta");
+  if (meta) meta.textContent = "加载中…";
+  const qs = new URLSearchParams({ n: "100", offset: String(linkView.offset), sort: linkView.sort });
+  if (linkView.platform) qs.set("platform", linkView.platform);
+  if (linkView.state) qs.set("state", linkView.state);
+  if (linkView.days) qs.set("days", String(linkView.days));
+  if (linkView.q) qs.set("q", linkView.q);
+  try {
+    const [list, queue] = await Promise.all([
+      api("/api/links?" + qs.toString()),
+      api("/api/links/queue").catch(() => null)]);
+    linkView.items.push(...list);
+    linkView.offset += list.length;
+    linkView.hasMore = list.length >= 100;
+    linkView.queue = queue;
+    renderLinkItems();
+  } catch (e) {
+    if (meta) meta.textContent = "加载失败：" + e.message;
+  } finally {
+    linkView.loading = false;
+  }
+}
+
+async function showLinks() {
+  renderLinkShell();
+  await refreshLinks(true);
   showPane("#linkList");
 }
 
@@ -2311,7 +2371,12 @@ function switchView(v) {
   if (v === "settings") showSettings();
 }
 $("#searchInput").addEventListener("input", (e) => {
-  if (state.view === "links") { showLinks(e.target.value); return; }
+  if (state.view === "links") {
+    linkView.q = e.target.value;
+    clearTimeout(linkQueryTimer);
+    linkQueryTimer = setTimeout(() => refreshLinks(true), 300);
+    return;
+  }
   if (state.view === "moments") { showMoments(e.target.value); return; }
   if (state.view === "files") {
     fileView.q = e.target.value;
@@ -2326,7 +2391,13 @@ $("#searchInput").addEventListener("input", (e) => {
 $("#searchInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && state.view === "chats") globalSearch(e.target.value);
   if (e.key === "Enter" && state.view === "files") { clearTimeout(fileQueryTimer); refreshFiles(true); }
-  if (e.key === "Escape") { e.target.value = ""; if (state.view === "files") { fileView.q = ""; refreshFiles(true); } else globalSearch(""); }
+  if (e.key === "Enter" && state.view === "links") { clearTimeout(linkQueryTimer); refreshLinks(true); }
+  if (e.key === "Escape") {
+    e.target.value = "";
+    if (state.view === "files") { fileView.q = ""; refreshFiles(true); }
+    else if (state.view === "links") { linkView.q = ""; refreshLinks(true); }
+    else globalSearch("");
+  }
 });
 document.querySelectorAll(".rail-btn").forEach(b => b.onclick = () => switchView(b.dataset.view));
 $("#backToChat").onclick = () => exitPreview();

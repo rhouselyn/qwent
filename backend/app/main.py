@@ -2963,8 +2963,23 @@ def _ensure_link_tables(con):
     con.execute("CREATE INDEX IF NOT EXISTS idx_chat_link_ts ON chat_link(msg_ts)")
 
 
+_JUNK_LINK_PARTS = ("mp.weixin.qq.com/mp/waerrpage",
+                    "support.weixin.qq.com/update",
+                    "weixin.qq.com/connect/infopage")
+_JUNK_TITLE_PARTS = ("[调用模型失败", "[模型暂时不可用", "[模型接口暂时不可用")
+
+
+def _link_ok(url: str, title: str = "") -> bool:
+    """过滤微信升级/错误提示页和模型报错文本，避免它们混进链接中心。"""
+    u = (url or "").lower()
+    t = title or ""
+    return not any(p in u for p in _JUNK_LINK_PARTS) and         not any(p in t for p in _JUNK_TITLE_PARTS)
+
+
 def _queue_link(url: str, chat: str, msg_id: int, msg_ts: int, title: str, platform: str):
     """收到消息即登记的链接：写 chat_link 并入解析队列（已解析过的直接跳过）。"""
+    if not _link_ok(url, title):
+        return
     con = db()
     _ensure_link_tables(con)
     con.execute("INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,title,platform,queued) "
@@ -3084,6 +3099,8 @@ def _backfill_chat_links(limit_msgs: int = 8000, enqueue_newest: int = 30):
     n = 0
     for r in rows:
         for url, title in _extract_links(r["content"]):
+            if not _link_ok(url, title):
+                continue
             cur = con.execute("SELECT 1 FROM chat_link WHERE url=?", (url,)).fetchone()
             if cur:
                 continue
@@ -3141,10 +3158,20 @@ def api_avatar(u: str):
 
 
 @app.get("/api/links")
-def api_links(n: int = 200, q: str = ""):
+def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
+              state: str = "", days: int = 0, sort: str = "new", chat: str = ""):
     """链接中心：聊天里出现过的链接（收到即登记，后台解析入库）。"""
     con = db()
     _ensure_link_tables(con)
+    where, args = ["1=1"], []
+    if days:
+        where.append("l.msg_ts >= ?")
+        args.append(int(time.time()) - max(1, days) * 86400)
+    if chat:
+        where.append("l.chat = ?")
+        args.append(chat)
+    filtered = bool(q or platform or state)
+    cap = min(2000 if filtered else max(800, (offset + n) * 2), 2500)
     rows = con.execute("""
         SELECT l.url, l.chat, l.msg_id, l.msg_ts, l.title, l.platform, l.state,
                c.title AS c_title, c.kind AS c_kind, LENGTH(IFNULL(c.text,'')) AS c_len,
@@ -3152,31 +3179,53 @@ def api_links(n: int = 200, q: str = ""):
                     ELSE (SELECT COALESCE(NULLIF(display_name,''), username) FROM chat
                           WHERE username = l.chat) END AS chat_name
         FROM chat_link l LEFT JOIN link_cache c ON c.url=l.url
-        ORDER BY l.msg_ts DESC LIMIT ?""", (max(50, min(n, 500)),)).fetchall()
-    out = []
+        WHERE """ + " AND ".join(where) + """
+        ORDER BY l.msg_ts DESC LIMIT ?""", (*args, cap)).fetchall()
     _PLAT_MAP = {"xhs": "小红书", "bili": "哔哩哔哩", "article": "公众号", "generic": "网页"}
+    out = []
+    seen_urls = set()
     for r in rows:
+        if not _link_ok(r["url"], r["title"] or ""):
+            continue
+        if r["url"] in seen_urls:
+            continue
+        seen_urls.add(r["url"])
         parsed = (r["c_len"] or 0) > 0
         raw_kind = (r["platform"] or "").strip()
-        plat = _PLAT_MAP.get(raw_kind)
-        if not plat:
-            u = r["url"]
-            plat = ("小红书" if "xiaohongshu" in u else
-                    "哔哩哔哩" if ("bilibili" in u or "b23.tv" in u) else
-                    "公众号" if "mp.weixin.qq.com" in u else (raw_kind or "网页"))
-        out.append({"url": r["url"],
-                    "title": (r["c_title"] or r["title"] or r["url"][:70])[:80],
-                    "platform": plat,
-                    "received": r["msg_ts"] or 0, "chat": r["chat"],
-                    "chat_name": r["chat_name"] or r["chat"],
-                    "msg_id": r["msg_id"], "parsed": parsed, "state": r["state"] or 0,
-                    "chars": r["c_len"] or 0})
+        u = r["url"]
+        if raw_kind in _PLAT_MAP:
+            plat_key = raw_kind
+        elif "xiaohongshu" in u:
+            plat_key = "xhs"
+        elif "bilibili" in u or "b23.tv" in u:
+            plat_key = "bili"
+        elif "mp.weixin.qq.com" in u:
+            plat_key = "article"
+        else:
+            plat_key = "generic"
+        if platform and plat_key != platform:
+            continue
+        if state == "parsed" and not parsed:
+            continue
+        if state == "failed" and (r["state"] or 0) != 2:
+            continue
+        if state == "pending" and (parsed or (r["state"] or 0) == 2):
+            continue
+        item = {"url": u,
+                "title": (r["c_title"] or r["title"] or u[:70])[:80],
+                "platform": _PLAT_MAP.get(plat_key, raw_kind or "网页"),
+                "platform_key": plat_key,
+                "received": r["msg_ts"] or 0, "chat": r["chat"],
+                "chat_name": r["chat_name"] or r["chat"],
+                "msg_id": r["msg_id"], "parsed": parsed, "state": r["state"] or 0,
+                "chars": r["c_len"] or 0}
+        if q and q.lower() not in (item["title"] + item["chat_name"] + item["platform"]).lower():
+            continue
+        out.append(item)
     con.close()
-    if q:
-        ql = q.lower()
-        out = [x for x in out
-               if ql in (x["title"] + x["chat_name"] + x["platform"]).lower()]
-    return out
+    if sort == "old":
+        out.sort(key=lambda x: x["received"] or 0)
+    return out[offset:offset + n]
 
 
 @app.get("/api/links/queue")
