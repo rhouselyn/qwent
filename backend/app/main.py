@@ -928,6 +928,61 @@ def expand_context(con, rows, around: int = 3) -> list[dict]:
     return blocks
 
 
+def _model_error_text(exc) -> str:
+    """把模型调用异常翻译成用户能看懂的原因，避免把 SSL/DNS 原文抛给用户。"""
+    s = str(exc)
+    low = s.lower()
+    if "ssl" in low or "unexpected_eof" in low or "certificate" in low:
+        return ("模型接口连不上：TLS 握手失败。通常是代理/VPN 未连通、节点失效，"
+                "或公司网络拦截了外网 HTTPS；请检查网络后重试。")
+    if "timed out" in low or "timeout" in low:
+        return "模型接口响应超时。网络较慢或模型服务繁忙，请稍后重试。"
+    if "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low:
+        return "模型接口拒绝访问：请检查设置页的 API Key 和模型权限。"
+    if "429" in low or "rate limit" in low:
+        return "模型接口限流：请稍等片刻，或降低提问频率。"
+    if "getaddrinfo" in low or "name or service not known" in low or "nodename" in low:
+        return "模型服务域名解析失败：当前 DNS/代理不可用，请检查网络设置。"
+    if "connection refused" in low or "connection reset" in low or "econnreset" in low:
+        return "模型接口连接被拒绝或重置：请检查代理/VPN 是否正常。"
+    return "模型接口调用失败：" + s.replace("urlopen error ", "")[:120]
+
+
+def _question_core(text: str) -> str:
+    """从送给 Agent 的完整 prompt 里取出真正的问题（离线兜底判断意图用）。"""
+    m = re.search(r"【当前问题】\s*(.+)$", text or "", re.S)
+    return (m.group(1) if m else text or "").strip()
+
+
+def _offline_answer(question: str, ctx_lines: list[str], con, exc) -> str:
+    """模型不可用时的离线兜底：解释原因，并给本地检索结果（朋友圈优先）。"""
+    head = "[模型暂时不可用] " + _model_error_text(exc)
+    core = _question_core(question)
+    if any(k in core for k in ("朋友圈", "动态", "moments", "moment")):
+        try:
+            import sns as sns_mod
+            items = sns_mod.search_moments(con, "", days=30, limit=8)
+            if items:
+                rows = []
+                for it in items:
+                    ts = time.strftime("%m-%d %H:%M", time.localtime(it.get("ts") or 0))
+                    who = it.get("who") or it.get("author_name") or "朋友圈"
+                    text = re.sub(r"\s+", " ", it.get("text") or "")[:160]
+                    rows.append(f"• {ts} {who}：{text}")
+                return (head + "\n\n以下为本地检索到的最近朋友圈（未经 AI 归纳）：\n"
+                        + "\n".join(rows))
+        except Exception:      # noqa: BLE001
+            pass
+    if ctx_lines:
+        rows = []
+        for line in ctx_lines[:5]:
+            clean = re.sub(r"\s+", " ", line)
+            rows.append("• " + clean[:300])
+        return (head + "\n\n以下为本地检索到的相关记录（未经 AI 归纳）：\n"
+                + "\n".join(rows))
+    return head + "\n\n没有检索到可用的本地记录；请检查网络/代理后重试。"
+
+
 def call_llm(conf, messages_payload):
     import urllib.request
     llm = conf["llm"]
@@ -1104,8 +1159,9 @@ def api_ask(payload: dict):
                 ans = call_llm(conf, msgs)
             except Exception as e:
                 mode = "retrieval"
-                ans = ("[模型接口暂时不可用：网络或代理异常（%s）。"
-                       "文件已读取，但暂时无法生成回答，请稍后重试。]" % str(e)[:100])
+                ans = ("[模型暂时不可用] " + _model_error_text(e) +
+                       chr(10) + chr(10) +
+                       "文件已读取，但暂时无法生成回答；可在预览面板直接查看正文。")
         else:
             ans = "**[未配置 API Key —— 以下为文件提取内容]**" + chr(10) + chr(10) + body[:4000]
         ensure_qa_table(con)
@@ -1173,9 +1229,7 @@ def api_ask(payload: dict):
             ans = call_llm(conf, msgs)
         except Exception as e:
             mode = "retrieval"
-            ans = ("[模型接口暂时不可用：网络或代理异常（%s）。"
-                   "已检索到 %d 段相关记录，但暂时无法生成回答；"
-                   "请检查网络/代理后重试。]" % (str(e)[:100], len(blocks)))
+            ans = _offline_answer(q, ctx_lines, con, e)
     else:
         # 检索模式：只给前 5 段摘录，完整内容交给「引用来源」折叠区
         ans = ("**检索模式（未配置 API Key）：命中 %d 段对话**，以下为前 5 段摘录。"
@@ -1890,7 +1944,7 @@ def v1_chat(payload: dict, authorization: str = Header(default="")):
                                           history=history)
         except Exception as e:      # noqa: BLE001
             _agent_api_log(f"问答失败：{type(e).__name__}: {e}")
-            raise HTTPException(500, f"问答失败：{e}")
+            raise HTTPException(500, "问答处理失败，请稍后重试（本机已记录错误日志）。")
         answer = (answer or "").strip() or "（未生成回答，请稍后重试）"
         _agent_api_log(f"回答完成（{len(answer)} 字）")
     import secrets as _s
