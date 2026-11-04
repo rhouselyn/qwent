@@ -1358,7 +1358,7 @@ function renderLinkShell() {
     <div class="files-toolbar">
       <div class="files-filters">
         <select id="linkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"], ["bili", "B站"],
-          ["article", "公众号"], ["generic", "网页"]], linkView.platform)}</select>
+          ["article", "公众号"], ["generic", "网页"], ["wxapp", "小程序"]], linkView.platform)}</select>
         <select id="linkState">${opts([["", "全部状态"], ["parsed", "已解析"],
           ["pending", "解析中"], ["failed", "暂不支持"]], linkView.state)}</select>
         <select id="linkDays">${opts([[0, "不限时间"], [7, "最近 7 天"],
@@ -1393,12 +1393,19 @@ function renderLinkItems() {
     d.className = "result-item";
     const badge = l.parsed
       ? `<span class="link-badge ok">已解析</span>`
+      : l.platform_key === "wxapp" ? `<span class="link-badge">仅卡片信息</span>`
       : l.state === 2 ? `<span class="link-badge fail">暂不支持</span>`
       : `<span class="link-badge">解析中</span>`;
     d.innerHTML = `<div class="meta">${esc(l.chat_name)} · ${fmtTime(l.received)} ·
         <span class="link-plat">${esc(l.platform)}</span> ${badge}</div>
       <div class="snippet">🔗 ${esc(l.title)}${l.chars ? ` · ${l.chars} 字` : ""}</div>`;
-    d.onclick = () => openLinkPreview(l.url, l.title);
+    d.onclick = () => {
+      if (l.url.startsWith("wxapp://")) {
+        toast("小程序内容需要在微信里打开，无法抓取正文");
+        return;
+      }
+      openLinkPreview(l.url, l.title);
+    };
     box.appendChild(d);
   }
   const meta = $("#linkMeta");
@@ -2177,6 +2184,7 @@ function normalizeUrl(u) {
 }
 
 async function openLinkPreview(url, title) {
+  if (url.startsWith("wxapp://")) { toast("小程序内容需要在微信里打开，无法抓取正文"); return; }
   url = normalizeUrl(url);      // 消息里的链接带 &amp;，与缓存键必须一致
   showChatPane();
   $("#assistantPane").style.display = "none";

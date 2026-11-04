@@ -2931,6 +2931,14 @@ def _extract_links(content: str) -> list[tuple[str, str]]:
     if mt:
         title = mt.group(1).strip()
     out = []
+    # 小程序卡片没有可抓取的网页正文；登记成 wxapp:// 仅保留标题/描述
+    if "<appid>" in c:
+        ma = re.search(r"<appid>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</appid>", c, re.S)
+        mp = re.search(r"<pagepath>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</pagepath>", c, re.S)
+        if ma and ma.group(1).strip():
+            appid = ma.group(1).strip()
+            page = mp.group(1).strip() if mp else ""
+            out.append((f"wxapp://{appid}/{page}", title or "小程序卡片"))
     for u in re.findall(r"https?://[^\s\"'<>()\[\]]+", c):
         u = _h.unescape(u).strip(".,'\"")
         kind = _detect(u)
@@ -2982,14 +2990,20 @@ def _queue_link(url: str, chat: str, msg_id: int, msg_ts: int, title: str, platf
         return
     con = db()
     _ensure_link_tables(con)
-    con.execute("INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,title,platform,queued) "
-                "VALUES(?,?,?,?,?,?,0)", (url, chat, msg_id, msg_ts, (title or "")[:120], platform))
+    is_mini = url.startswith("wxapp://")
+    con.execute("INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,title,platform,"
+                "queued,state) VALUES(?,?,?,?,?,?,0,?)",
+                (url, chat, msg_id, msg_ts, (title or "")[:120], platform,
+                 2 if is_mini else 0))
     con.commit()
     con.close()
-    _LINK_QUEUE.put(url)
+    if not is_mini:
+        _LINK_QUEUE.put(url)
 
 
 def _refresh_platform(url: str) -> str:
+    if url.startswith("wxapp://"):
+        return "wxapp"
     from link_media import detect
     return detect(url)
 
@@ -3104,10 +3118,11 @@ def _backfill_chat_links(limit_msgs: int = 8000, enqueue_newest: int = 30):
             cur = con.execute("SELECT 1 FROM chat_link WHERE url=?", (url,)).fetchone()
             if cur:
                 continue
-            con.execute("INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,title,platform)"
-                        " VALUES(?,?,?,?,?,?)",
+            con.execute("INSERT OR IGNORE INTO chat_link(url,chat,msg_id,msg_ts,title,"
+                        "platform,state) VALUES(?,?,?,?,?,?,?)",
                         (url, r["chat_user"], r["id"], r["ts"] or 0,
-                         (title or "")[:120], _refresh_platform(url)))
+                         (title or "")[:120], _refresh_platform(url),
+                         2 if url.startswith("wxapp://") else 0))
             n += 1
     con.execute("INSERT OR REPLACE INTO meta VALUES('links_backfilled','1')")
     con.commit()
@@ -3181,7 +3196,8 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
         FROM chat_link l LEFT JOIN link_cache c ON c.url=l.url
         WHERE """ + " AND ".join(where) + """
         ORDER BY l.msg_ts DESC LIMIT ?""", (*args, cap)).fetchall()
-    _PLAT_MAP = {"xhs": "小红书", "bili": "哔哩哔哩", "article": "公众号", "generic": "网页"}
+    _PLAT_MAP = {"xhs": "小红书", "bili": "哔哩哔哩", "article": "公众号",
+                 "generic": "网页", "wxapp": "小程序"}
     out = []
     seen_urls = set()
     for r in rows:
@@ -4318,6 +4334,21 @@ def fetch_platform_link(url: str, force: bool = False) -> dict:
 
 
 
+def _fetch_error_text(exc) -> str:
+    """把抓取异常翻成可读原因（和模型错误一样，不把 SSL 原文丢给用户）。"""
+    s = str(exc)
+    low = s.lower()
+    if "ssl" in low or "unexpected_eof" in low or "certificate" in low:
+        return "抓取失败：TLS 握手失败，通常是代理/VPN 不通或站点被网络拦截"
+    if "timed out" in low or "timeout" in low:
+        return "抓取失败：连接超时"
+    if "getaddrinfo" in low or "name or service not known" in low:
+        return "抓取失败：域名解析失败（DNS/代理异常）"
+    if "connection" in low and ("refused" in low or "reset" in low or "aborted" in low):
+        return "抓取失败：连接被拒绝或重置"
+    return f"抓取失败：{type(exc).__name__} {s[:80]}"
+
+
 def fetch_article(url: str, force: bool = False) -> dict:
     """抓取公众号/网页正文（带缓存）。小红书/B站走深度解析（OCR/字幕/ASR）。"""
     from bs4 import BeautifulSoup
@@ -4342,7 +4373,13 @@ def fetch_article(url: str, force: bool = False) -> dict:
     try:
         resp = _safe_external_get(url, timeout=20, headers={
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36")})
+                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6"})
+        if resp.status_code >= 400:
+            con.close()
+            return {"url": url, "title": "", "text": "", "chars": 0,
+                    "error": f"目标站点返回 HTTP {resp.status_code}"
+                             "（可能需要登录或触发了反爬）"}
         # 编码：优先页面声明的 charset，其次响应头，最后 utf-8
         # （apparent_encoding 在微信文章上会猜成 Windows-1254 导致乱码）
         head_bytes = resp.content[:3000].decode("latin-1", "ignore")
@@ -4363,7 +4400,7 @@ def fetch_article(url: str, force: bool = False) -> dict:
         html = resp.text
     except Exception as e:
         con.close()
-        return {"url": url, "error": f"抓取失败：{type(e).__name__} {str(e)[:80]}",
+        return {"url": url, "error": _fetch_error_text(e),
                 "title": "", "text": "", "chars": 0}
 
     soup = BeautifulSoup(html, "lxml")
@@ -4382,10 +4419,36 @@ def fetch_article(url: str, force: bool = False) -> dict:
         og = soup.select_one('meta[property="og:title"]')
         title = (og.get("content") if og else "") or (soup.title.get_text(strip=True)
                                                       if soup.title else "")
-        for bad in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
-            bad.decompose()
-        body = (soup.select_one("article") or soup.select_one("main") or soup.body or soup)
-        text = body.get_text(chr(10), strip=True)
+        text = ""
+        # 1) trafilatura：通用正文抽取最稳，顺便拿标题/日期
+        try:
+            import trafilatura
+            text = trafilatura.extract(html, url=url, include_comments=False,
+                                       include_tables=True, favor_precision=False) or ""
+            if not title:
+                meta = trafilatura.extract_metadata(html, default_url=url)
+                title = (getattr(meta, "title", "") or "") if meta else ""
+        except Exception:      # noqa: BLE001
+            text = ""
+        # 2) GNE：中文新闻/公众号类页面兜底
+        if len(text.strip()) < 80:
+            try:
+                from gne import GeneralNewsExtractor
+                g = GeneralNewsExtractor().extract(html, with_body_html=False)
+                gtext = (g.get("content") or "").strip()
+                if len(gtext) > len(text.strip()):
+                    text = gtext
+                    title = title or (g.get("title") or "")
+            except Exception:      # noqa: BLE001
+                pass
+        # 3) 最后才退回标签密度最简单的 body 文本
+        if len(text.strip()) < 80:
+            for bad in soup(["script", "style", "nav", "header", "footer",
+                             "aside", "noscript"]):
+                bad.decompose()
+            body = (soup.select_one("article") or soup.select_one("main")
+                    or soup.body or soup)
+            text = body.get_text(chr(10), strip=True)
 
     text = re.sub(chr(10) + "{3,}", chr(10) + chr(10), text).strip()[:60000]
     # 质量校验：替换符/控制字符占比过高说明是二进制或编码错误
