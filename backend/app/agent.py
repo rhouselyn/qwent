@@ -1014,6 +1014,110 @@ TOOLS = {
                        "tid": {"type": "string"}}, "required": ["tid"]}),
 }
 
+# QQ 模式专用工具：只检索 QQ NT 本地库，不碰微信表
+def t_qq_search(args: dict) -> dict:
+    import main as M
+    import qq_local
+    query = str(args.get("query") or "").strip()
+    conv = str(args.get("conv") or "").strip()
+    limit = max(1, min(int(args.get("limit") or 20), 80))
+    con = M.db()
+    try:
+        items = qq_local.search(con, query, limit, conv)
+    finally:
+        con.close()
+    # messages（而非 items）：与微信工具同结构，agent 主循环才能登记 ref 编号，
+    # 前端据此渲染可点击的 [n] 引用并跳回 QQ 原文
+    msgs = []
+    for x in items:
+        mid = x.get("id")
+        text = (x.get("snippet") or x.get("text") or "").strip()
+        if not mid or not text:
+            continue
+        msgs.append({"id": mid,
+                     "chat": x.get("conv") or "",
+                     "chat_name": x.get("conv_name") or x.get("conv") or "",
+                     "who": x.get("who") or x.get("sender_name") or "",
+                     "ts": x.get("ts") or 0,
+                     "text": text[:1200]})
+    return {"query": query, "count": len(msgs), "messages": msgs}
+
+
+def t_qq_contacts(args: dict) -> dict:
+    import main as M
+    import qq_local
+    query = str(args.get("query") or "").strip()
+    kind = str(args.get("kind") or "").strip()
+    con = M.db()
+    try:
+        items = qq_local.contacts(con, query, kind, max(1, min(int(args.get("limit") or 30), 200)))
+    finally:
+        con.close()
+    return {"query": query, "count": len(items),
+            "items": [{"kind": x.get("kind"), "name": x.get("name"),
+                       "uin": x.get("uin"), "uid": x.get("uid"),
+                       "messages": x.get("cnt") or 0} for x in items]}
+
+
+def t_qq_files(args: dict) -> dict:
+    import main as M
+    import qq_local
+    query = str(args.get("query") or "").strip()
+    con = M.db()
+    try:
+        items = qq_local.files(con, query, "", "", max(1, min(int(args.get("limit") or 20), 100)))
+    finally:
+        con.close()
+    return {"query": query, "count": len(items),
+            "items": [{"name": x.get("name"), "chat": x.get("conv_name") or x.get("conv"),
+                       "who": x.get("sender_name"), "ts": x.get("ts"),
+                       "size": x.get("size"), "kind": x.get("kind")} for x in items]}
+
+
+QQ_TOOLS = {
+    "search_qq": (t_qq_search,
+                  "检索本机 QQ 聊天记录（消息正文），返回 QQ 群/好友、发言人、时间与原文。"
+                  "问 QQ 群/好友/某段 QQ 聊天时优先用它；query 可留空看最近消息。",
+                  {"type": "object", "properties": {
+                      "query": {"type": "string", "description": "关键词，可留空看最近"},
+                      "conv": {"type": "string",
+                               "description": "限定 QQ 会话（group:... / c2c:...）；在某个群里提问时由系统给出"},
+                      "limit": {"type": "integer"}}}),
+    "search_qq_contacts": (t_qq_contacts,
+                           "检索本机 QQ 联系人 / 群，返回名称、QQ 号、消息数；kind 可填 friend 或 group。",
+                           {"type": "object", "properties": {
+                               "query": {"type": "string"},
+                               "kind": {"type": "string"},
+                               "limit": {"type": "integer"}}}),
+    "search_qq_files": (t_qq_files,
+                        "检索本机 QQ 聊天文件，返回文件名、群/好友、发送者、时间与大小。",
+                        {"type": "object", "properties": {
+                            "query": {"type": "string"},
+                            "limit": {"type": "integer"}}}),
+}
+
+QQ_SYSTEM_PROMPT = """你是用户的 QQ 记录分析助手，数据来自本机 QQ 数据库。
+你有三个检索工具：search_qq 查聊天内容，search_qq_contacts 查 QQ 联系人/群，
+search_qq_files 查 QQ 聊天文件。按用户问题生成 1~3 组关键词检索，
+必要时可用空 query 查看最近消息；不要使用微信工具，也不要假装看过没检索到的记录。
+回答用纯文本、口语化；找不到就直说。
+如果用户问的是微信记录，提示他切换到微信界面或使用微信 Agent。
+
+引用规则（必须遵守）：
+- search_qq 返回的每条消息都带有 ref 编号（如 "ref": 3）；回答里引用任何一条
+  具体消息，都要在对应句子后标注 [3]。同一来源永远用同一个编号，不要自己重排。
+- 引用时可以同时写清群名/好友名与时间（如「计系小群3.0 · David 11-05」），
+  但 [n] 标记不能省——界面上的 [n] 就是可点击的原文链接。
+- **禁止在答案末尾输出「引用来源 / 参考资料」清单**：正文里的 [n] 已经可点击，
+  末尾清单是多余的，不要写。
+
+检索建议：
+- 「最近/刚才/今天」先 search_qq(query="", limit=30) 看最近消息。
+- 问某个群/某人：把群名或人名放进 query。
+- 问具体事件：换同义词、简称、相关概念多查一轮。
+- 统计类问题只能基于检索到的样本回答，并注明「基于检索到的消息，可能有遗漏」。
+"""
+
 SYSTEM_PROMPT = """你是用户的微信记录分析助手，可以调用工具主动检索本机历史数据。
 
 检索策略（重要）：
@@ -1086,6 +1190,25 @@ def _recent_block(chat: str, hours: int = 24, limit: int = 60) -> str:
         out.append(f"{_fmt(r['ts'])} {b['who']}: {txt}")
     con.close()
     return chr(10).join(out[-50:])
+
+
+def _qq_recent_block(conv: str, limit: int = 80) -> str:
+    """QQ 会话最近记录（供 QQ Agent 预注入；无编号，引用需用 search_qq 取 ref）。"""
+    import main as M
+    import qq_local
+    con = M.db()
+    try:
+        rows = qq_local.messages(con, conv, limit)
+    finally:
+        con.close()
+    out = []
+    for r in rows:
+        text = (r.get("text") or "").replace(chr(10), " ").strip()
+        if not text:
+            continue
+        who = "我" if r.get("is_sender") else (r.get("sender_name") or "?")
+        out.append(f"{_fmt(r.get('ts') or 0)} {who}: {text[:220]}")
+    return chr(10).join(out)
 
 
 def _recent_block_numbered(chat: str, hours: int = 24, limit: int = 60):
@@ -1218,16 +1341,32 @@ def _stream_llm(conf, messages, tools=None):
     yield ("done", "".join(full))
 
 
-def _tool_schemas():
-    return [{"type": "function",
-             "function": {"name": name, "description": desc, "parameters": params}}
-            for name, (fn, desc, params) in TOOLS.items()]
+def _platform_text(text: str, platform: str = "wechat") -> str:
+    """QQ 模式的人设与术语：同一套工具，措辞换成 QQ 侧说法。"""
+    if platform != "qq" or not text:
+        return text
+    for a, b in (("微信记录分析助手", "QQ 记录分析助手"),
+                 ("朋友圈", "QQ空间"), ("公众号/网页", "网页"),
+                 ("公众号文章", "网页文章"), ("公众号", "网页")):
+        text = text.replace(a, b)
+    return text
+
+
+def _tool_schemas(platform: str = "wechat"):
+    out = []
+    all_tools = QQ_TOOLS if platform == "qq" else TOOLS
+    for name, (fn, desc, params) in all_tools.items():
+        out.append({"type": "function",
+                    "function": {"name": name,
+                                 "description": _platform_text(desc, platform),
+                                 "parameters": params}})
+    return out
 
 
 def run(question: str, conf: dict, chat_ctx: str | None = None,
         chat_name: str | None = None, quoted: list[dict] | None = None,
         history: list[dict] | None = None, on_event=None,
-        explorer: bool = False) -> dict:
+        explorer: bool = False, platform: str = "wechat") -> dict:
     """执行 agent 循环，返回 {answer, trace, refs}。
 
     on_event(dict) 可选，用于实时推送进度（tool_call / tool_result / refs / status）。
@@ -1253,20 +1392,35 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
             "换 2~4 组互补关键词、对命中密集的日期用 read_chat(since, until) 按天补读、"
             "发现新实体名就追查一轮；宁可多查一步，不要早停。"
             "普通聊天问题该快还是要快，探索模式不是让你每问必查满。")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + chr(10) + time_line}]
+    base_prompt = QQ_SYSTEM_PROMPT if platform == "qq" else _platform_text(SYSTEM_PROMPT, platform)
+    messages = [{"role": "system", "content": base_prompt + chr(10) + time_line}]
     ctx_bits = []
     if chat_ctx:
-        ctx_bits.append(
-            f"用户正在浏览会话「{chat_name or chat_ctx}」（username={chat_ctx}）。"
-            "默认在该会话范围内回答，不需要 find_sessions；"
-            "只有用户明确要求跨会话/全局时才扩大范围。")
-        # 预注入最近记录：常见问题可零检索直接回答
-        try:
-            rc = _recent_block(chat_ctx, hours=24, limit=60)
-            if rc:
-                ctx_bits.append("【最近记录】（该会话最近的真实发言，时间正序）：" + chr(10) + rc)
-        except Exception:
-            pass
+        if platform == "qq":
+            ctx_bits.append(
+                f"用户正在浏览 QQ 会话「{chat_name or chat_ctx}」（conv={chat_ctx}）。"
+                f"默认先在该会话内回答：调用 search_qq 时把 conv 设为 {chat_ctx}；"
+                "只有用户明确要求跨群/全局时才省略 conv。")
+            try:
+                rc = _qq_recent_block(chat_ctx, limit=80)
+                if rc:
+                    ctx_bits.append(
+                        "【最近 QQ 记录】（该会话最近的真实发言，时间正序，未编号；"
+                        "引用具体消息时请用 search_qq 检索取得 ref 编号）：" + chr(10) + rc)
+            except Exception:
+                pass
+        else:
+            ctx_bits.append(
+                f"用户正在浏览会话「{chat_name or chat_ctx}」（username={chat_ctx}）。"
+                "默认在该会话范围内回答，不需要 find_sessions；"
+                "只有用户明确要求跨会话/全局时才扩大范围。")
+            # 预注入最近记录：常见问题可零检索直接回答
+            try:
+                rc = _recent_block(chat_ctx, hours=24, limit=60)
+                if rc:
+                    ctx_bits.append("【最近记录】（该会话最近的真实发言，时间正序）：" + chr(10) + rc)
+            except Exception:
+                pass
     if quoted:
         parts = []
         for q in quoted[:10]:
@@ -1287,7 +1441,7 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
     call_cache: dict[str, dict] = {}
     read_urls: set[str] = set()        # 本轮已读过的链接（自动补正文用，避免重复）
 
-    schemas = _tool_schemas()
+    schemas = _tool_schemas(platform)
     if chat_ctx:
         # 会话已确定：不需要"再找会话"这个工具
         schemas = [x for x in schemas if x["function"]["name"] != "find_sessions"]
@@ -1318,7 +1472,7 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
                 args = {}
             emit({"type": "tool", "tool": name, "args": args})
             ckey = name + ":" + json.dumps(args, sort_keys=True, ensure_ascii=False)
-            fn = TOOLS.get(name, (None,))[0]
+            fn = (QQ_TOOLS if platform == "qq" else TOOLS).get(name, (None,))[0]
             if ckey in call_cache:
                 result = call_cache[ckey]
                 result["_note"] = "同一调用已执行过，结果见上，请直接用，不要重复检索"

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import ipaddress
 import json
@@ -43,6 +44,9 @@ import vector  # noqa: E402
 import agent as agent_mod  # noqa: E402
 import privacy  # noqa: E402
 import sns as sns_mod  # noqa: E402
+import platform_text  # noqa: E402  平台文案（系统消息微信/QQ 双版本）
+import qq_messages  # noqa: E402    QQ 机器人消息留存
+import qq_local  # noqa: E402       QQ NT 本地记录（消息/联系人/文件）
 
 _vec_local = threading.local()
 
@@ -145,6 +149,14 @@ def ensure_chat_pin(con: sqlite3.Connection):
         # 默认置顶：文件传输助手 + 自己
         con.execute("UPDATE chat SET pinned=1 WHERE username IN ('filehelper', ?)",
                     (ACCOUNT_ID.rsplit("_", 1)[0],))
+    # 全项目有 20+ 处 SQL 依赖 message.noise，但历史建表脚本没写这一列；
+    # 从零初始化（换电脑恢复备份 / 新建库）时会整片报错，这里幂等补上。
+    mcols = {r[1] for r in con.execute("PRAGMA table_info(message)")}
+    if mcols and "noise" not in mcols:
+        try:
+            con.execute("ALTER TABLE message ADD COLUMN noise INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
 
 def db() -> sqlite3.Connection:
@@ -201,12 +213,12 @@ def _xml_unescape(s: str) -> str:
     return s
 
 
-def _quote_oneline(s: str) -> str:
+def _quote_oneline(s: str, cap: int = 200) -> str:
     """引用预览压成单行，避免界面出现多行转义残渣。"""
-    return re.sub(r"\s+", " ", s or "").strip()[:200]
+    return re.sub(r"\s+", " ", s or "").strip()[:cap]
 
 
-def _refer_text(ref: str) -> str:
+def _refer_text(ref: str, cap: int = 200) -> str:
     """refermsg 的人可读正文：优先 <title>，否则取 <content>。
 
     不能对整个 refermsg 块去标签——那会把 type/svrid/fromusr/msgsource 等
@@ -218,7 +230,7 @@ def _refer_text(ref: str) -> str:
     ref = re.sub(r"<msgsource>.*?</msgsource>", "", ref, flags=re.S)
     mt = XML_TITLE.search(ref)
     if mt and mt.group(1).strip():
-        return _quote_oneline(_xml_unescape(mt.group(1)))
+        return _quote_oneline(_xml_unescape(mt.group(1)), cap)
     mc = XML_REFER_CONTENT.search(ref)
     if not mc:
         return ""
@@ -232,16 +244,16 @@ def _refer_text(ref: str) -> str:
     if c.startswith("<"):
         mt = XML_TITLE.search(c)
         if mt and mt.group(1).strip():
-            return _quote_oneline(_xml_unescape(mt.group(1)))
+            return _quote_oneline(_xml_unescape(mt.group(1)), cap)
         m = XML_QUOTE_MEDIA.search(c)
         if m:
             return _QUOTE_MEDIA_LABEL[m.group(1)]
         # 彻底去标签后再压行：内层可能还有双重转义的标签，解不净就当未知消息
-        plain = _quote_oneline(re.sub(r"<[^>]+>", " ", _xml_unescape(c)))
+        plain = _quote_oneline(re.sub(r"<[^>]+>", " ", _xml_unescape(c)), cap)
         if "<" in plain or "&lt;" in plain:
             return "[消息]"
         return plain
-    return _quote_oneline(c)
+    return _quote_oneline(c, cap)
 
 
 def has_xml_text(content: str) -> bool:
@@ -320,12 +332,15 @@ def _appmsg_dict(c: str) -> dict:
         return {"text": title or "[拍了拍]"}
     if subtype in ("57",):
         ref = XML_REFER.search(c)
-        rdisp = rtitle = ""
+        rdisp = rtitle = rlong = ""
         if ref:
             x = XML_DISPLAYNAME.search(ref.group(1))
             rdisp = _quote_oneline(_xml_unescape(x.group(1))) if x else ""
             rtitle = _refer_text(ref.group(1))
-        return {"kind": "quote", "title": title, "refer": {"who": rdisp, "title": rtitle}}
+            rlong = _refer_text(ref.group(1), 500)
+        return {"kind": "quote", "title": title,
+                "title_full": _xml_unescape(title).strip()[:1000],
+                "refer": {"who": rdisp, "title": rtitle, "text": rlong or rtitle}}
     link_url = _xml_unescape(mu.group(1)) if mu else ""
     if _RECORD_HINT.search(link_url or ""):
         link_url = ""      # 微信"不支持查看"的占位地址,不是真实内容
@@ -344,13 +359,12 @@ def parse_message(m: sqlite3.Row) -> dict:
         else:
             out["text"] = c
     elif t in (10000, 10002):
-        if t == 10000 and "revokemsg" in c:
-            # 撤回通知只取 <content>：整段去标签会把 <revoketime>0 的尾巴带出来
-            mc = re.search(r"<content>(.*?)</content>", c, re.S)
-            out["system"] = _quote_oneline(_xml_unescape(mc.group(1))) if mc \
-                else re.sub(r"<[^>]+>", "", c)[:300]
-        else:
-            out["system"] = re.sub(r"<[^>]+>", "", c)[:300]
+        # 系统提示（改群名 / 邀请入群 / 撤回 / 加好友…）按真实微信措辞清洗，
+        # 同时给出 QQ 版本，前端按当前平台选用，避免 QQ 界面冒出微信文案。
+        recall = t == 10000 and "revokemsg" in c
+        wt, qt = platform_text.system_pair(c, recall=recall)
+        out["system"] = wt or "系统消息"
+        out["system_qq"] = qt or "系统消息"
     elif t == 3:
         attrs = dict(XML_ATTR.findall(c[:2000]))
         out["kind"] = "image"
@@ -397,14 +411,17 @@ def parse_message(m: sqlite3.Row) -> dict:
             out["text"] = clean_display(62, c) or "[拍了拍]"
         elif subtype == "57":
             ref = XML_REFER.search(c)
-            rdisp = rtitle = ""
+            rdisp = rtitle = rlong = ""
             if ref:
                 x = XML_DISPLAYNAME.search(ref.group(1))
                 rdisp = _quote_oneline(_xml_unescape(x.group(1))) if x else ""
                 rtitle = _refer_text(ref.group(1))
+                rlong = _refer_text(ref.group(1), 500)
             out["kind"] = "quote"
             out["title"] = _quote_oneline(_xml_unescape(title))
-            out["refer"] = {"who": rdisp, "title": rtitle}
+            out["title_full"] = _xml_unescape(title).strip()[:1000]
+            out["refer"] = {"who": rdisp, "title": rtitle,
+                            "text": rlong or rtitle}
         elif subtype in ("5", "6"):
             fn = XML_FILENAME.search(c)
             total = XML_TOTALEN.search(c)
@@ -1008,14 +1025,20 @@ def ensure_qa_table(con):
     if "trace" not in cols:
         con.execute("ALTER TABLE ai_qa ADD COLUMN trace TEXT DEFAULT ''")
     # AI 会话（一次连续对话）；scope 为 'assistant'、chat_user、file:<chat>:<local_id>、link:<hash>
+    # platform 区分微信 / QQ：两套 Agent 的会话历史互不混用
     con.execute("""CREATE TABLE IF NOT EXISTS ai_session(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         scope TEXT NOT NULL,
         title TEXT DEFAULT '',
+        platform TEXT DEFAULT 'wechat',
         created INTEGER, updated INTEGER)""")
     scols = {r[1] for r in con.execute("PRAGMA table_info(ai_session)")}
     if "name" not in scols:      # 作用域的显示名（群名 / 文件名 / 文章标题）
         con.execute("ALTER TABLE ai_session ADD COLUMN name TEXT DEFAULT ''")
+    if "platform" not in scols:
+        con.execute("ALTER TABLE ai_session ADD COLUMN platform TEXT DEFAULT 'wechat'")
+        con.execute("UPDATE ai_session SET platform='wechat' WHERE IFNULL(platform,'')=''")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ai_session_platform ON ai_session(platform)")
     if "session_id" not in cols:
         con.execute("ALTER TABLE ai_qa ADD COLUMN session_id INTEGER")
         _migrate_sessions(con)
@@ -1034,18 +1057,22 @@ def _migrate_sessions(con):
     con.commit()
 
 
-def get_or_create_session(con, scope: str, new: bool = False, name: str = "") -> int:
+def get_or_create_session(con, scope: str, new: bool = False, name: str = "",
+                          platform: str = "wechat") -> int:
+    platform = platform if platform in ("wechat", "qq") else "wechat"
     if not new:
-        r = con.execute("SELECT id FROM ai_session WHERE scope=? ORDER BY id DESC LIMIT 1",
-                        (scope,)).fetchone()
+        r = con.execute("SELECT id FROM ai_session WHERE scope=? "
+                        "AND IFNULL(platform,'wechat')=? ORDER BY id DESC LIMIT 1",
+                        (scope, platform)).fetchone()
         if r:
             if name:
                 con.execute("UPDATE ai_session SET name=? WHERE id=? AND IFNULL(name,'')=''",
                             (name[:60], r[0]))
             return r[0]
-    cur = con.execute("INSERT INTO ai_session(scope,title,created,updated,name) "
-                      "VALUES(?,?,?,?,?)",
-                      (scope, "", int(time.time()), int(time.time()), (name or "")[:60]))
+    cur = con.execute("INSERT INTO ai_session(scope,title,platform,created,updated,name) "
+                      "VALUES(?,?,?,?,?,?)",
+                      (scope, "", platform, int(time.time()), int(time.time()),
+                       (name or "")[:60]))
     return cur.lastrowid
 
 
@@ -1054,6 +1081,19 @@ def touch_session(con, sid: int, title: str | None = None):
     if title:
         con.execute("UPDATE ai_session SET title=? WHERE id=? AND IFNULL(title,'')=''",
                     (title[:40], sid))
+
+
+def claim_session_platform(sid: int, platform: str) -> None:
+    """把通道自己持有的旧会话归到微信 / QQ 名下（升级前建的会话默认是微信）。"""
+    platform = platform if platform in ("wechat", "qq") else "wechat"
+    con = db()
+    try:
+        ensure_qa_table(con)
+        con.execute("UPDATE ai_session SET platform=? WHERE id=? "
+                    "AND IFNULL(platform,'wechat')<>?", (platform, int(sid), platform))
+        con.commit()
+    finally:
+        con.close()
 
 
 @app.post("/api/ask")
@@ -1066,6 +1106,7 @@ def api_ask(payload: dict):
     use_agent = payload.get("agent", True)
     want_new_session = bool(payload.get("new_session"))
     session_id = payload.get("session_id")
+    platform = payload.get("platform") if payload.get("platform") in ("wechat", "qq") else "wechat"
     if not q:
         raise HTTPException(400, "空问题")
     con = db()
@@ -1077,21 +1118,41 @@ def api_ask(payload: dict):
     if quoted_ids and conf0["llm"].get("api_key") and use_agent and not fdoc:
         quoted = []
         for qid in quoted_ids[:10]:
-            r = con.execute("SELECT * FROM message WHERE id=?", (int(qid),)).fetchone()
+            raw = str(qid)
+            if raw.startswith("qq-"):
+                raw = raw[3:]
+            try:
+                qid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if platform == "qq":
+                # QQ 引用 id 指向 qq_local_message，不能查微信 message 表
+                r = con.execute("SELECT id,ts,sender_name,is_sender,text "
+                                "FROM qq_local_message WHERE id=?", (qid,)).fetchone()
+                if r:
+                    quoted.append({"id": r[0], "ts": r[1],
+                                   "who": "我" if r[3] else (r[2] or ""),
+                                   "text": (r[4] or "")[:400]})
+                continue
+            r = con.execute("SELECT * FROM message WHERE id=?", (qid,)).fetchone()
             if r:
                 b = agent_mod._msg_brief(con, r)
                 quoted.append({"id": b["id"], "ts": b["ts"], "who": b["who"], "text": b["text"]})
         chat_name = None
         if chat:
-            row = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) FROM chat "
-                              "WHERE username=?", (chat,)).fetchone()
+            if platform == "qq":
+                row = con.execute("SELECT name FROM qq_chat WHERE conv=?", (chat,)).fetchone()
+            else:
+                row = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) FROM chat "
+                                  "WHERE username=?", (chat,)).fetchone()
             chat_name = row[0] if row else chat
         res = agent_mod.run(q, conf0, chat_ctx=chat, chat_name=chat_name,
                             quoted=quoted, history=history,
-                            explorer=bool(payload.get("explorer")))
+                            explorer=bool(payload.get("explorer")), platform=platform)
         ans, refs, trace = res["answer"], res["refs"], res["trace"]
         ensure_qa_table(con)
-        sid = session_id or get_or_create_session(con, chat or "assistant", new=want_new_session)
+        sid = session_id or get_or_create_session(con, chat or "assistant",
+                                                  new=want_new_session, platform=platform)
         con.execute("INSERT INTO ai_qa(chat_id, question, answer, cited_refs, ts, scope, "
                     "trace, session_id) VALUES(?,?,?,?,?,?,?,?)",
                     (chat or "assistant", q, ans, json.dumps(refs, ensure_ascii=False),
@@ -1105,17 +1166,21 @@ def api_ask(payload: dict):
     if conf0["llm"].get("api_key") and use_agent and not fdoc:
         chat_name = None
         if chat:
-            row = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) FROM chat "
-                              "WHERE username=?", (chat,)).fetchone()
+            if platform == "qq":
+                row = con.execute("SELECT name FROM qq_chat WHERE conv=?", (chat,)).fetchone()
+            else:
+                row = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) FROM chat "
+                                  "WHERE username=?", (chat,)).fetchone()
             chat_name = row[0] if row else chat
         try:
             res = agent_mod.run(q, conf0, chat_ctx=chat, chat_name=chat_name,
                                 history=history,
-                                explorer=bool(payload.get("explorer")))
+                                explorer=bool(payload.get("explorer")), platform=platform)
             if res.get("answer"):
                 ensure_qa_table(con)
                 sid = session_id or get_or_create_session(con, chat or "assistant",
-                                                          new=want_new_session)
+                                                          new=want_new_session,
+                                                          platform=platform)
                 con.execute("INSERT INTO ai_qa(chat_id, question, answer, cited_refs, ts, "
                             "scope, trace, session_id) VALUES(?,?,?,?,?,?,?,?)",
                             (chat or "assistant", q, res["answer"],
@@ -1131,11 +1196,17 @@ def api_ask(payload: dict):
 
     # 指定文件问答：文件正文直接作为上下文，不做消息检索
     if fdoc:
-        path = locate_file(fdoc.get("chat", ""), int(fdoc.get("local_id", 0)),
-                           int(fdoc.get("ts", 0)), fdoc.get("name", ""))
+        # QQ 文件中心：fdoc 直接带本机路径
+        if fdoc.get("path"):
+            path = Path(str(fdoc["path"]))
+            if not path.is_file():
+                path = None
+        else:
+            path = locate_file(fdoc.get("chat", ""), int(fdoc.get("local_id", 0)),
+                               int(fdoc.get("ts", 0)), fdoc.get("name", ""))
         if not path:
             return {"mode": "empty", "refs": [],
-                    "answer": f"文件「{fdoc.get('name','')}」不在本地磁盘上（可能已被微信清理或未下载）。"}
+                    "answer": f"文件「{fdoc.get('name','')}」不在本地磁盘上（可能已被清理或未下载）。"}
         text = extract_text(path, 24000)
         conf = load_conf()
         mode = "llm" if conf["llm"]["api_key"] else "retrieval"
@@ -1217,6 +1288,7 @@ def api_ask(payload: dict):
                  "引用时标注 [编号]；标注为公众号/网页的内容也要引用其编号；"
                  "上下文没有答案就直说没找到，不要编造。"
                  "上下文格式：[编号] (会话名) 时间 发言人: 内容")
+        sys_p = agent_mod._platform_text(sys_p, platform)
         msgs = [{"role": "system", "content": sys_p}]
         for h in history[-4:]:
             msgs.append({"role": "user", "content": h.get("q", "")})
@@ -1236,7 +1308,8 @@ def api_ask(payload: dict):
                "完整内容与前后文请展开下方「引用来源」。\n\n%s"
                % (len(blocks), "\n".join(ctx_lines[:5])))
     ensure_qa_table(con)
-    sid = session_id or get_or_create_session(con, chat or "assistant", new=want_new_session)
+    sid = session_id or get_or_create_session(con, chat or "assistant",
+                                              new=want_new_session, platform=platform)
     con.execute("INSERT INTO ai_qa(chat_id, question, answer, cited_refs, ts, scope, "
                 "session_id) VALUES(?,?,?,?,?,?,?)",
                 (chat or "assistant", q, ans,
@@ -1248,8 +1321,10 @@ def api_ask(payload: dict):
 
 
 @app.get("/api/ai/sessions")
-def api_ai_sessions():
-    """AI 会话树：按作用域分组（全局 / 各群聊·私聊 / 各文件 / 各链接），互不混用。"""
+def api_ai_sessions(platform: str = "wechat"):
+    """AI 会话树：按作用域分组（全局 / 各群聊·私聊 / 各文件 / 各链接），互不混用。
+    platform 区分微信 / QQ 两套 Agent，默认微信（兼容旧调用）。"""
+    platform = platform if platform in ("wechat", "qq") else "wechat"
     con = db()
     ensure_qa_table(con)
     rows = con.execute("""
@@ -1257,7 +1332,8 @@ def api_ai_sessions():
                (SELECT COUNT(*) FROM ai_qa q WHERE q.session_id=s.id
                  AND IFNULL(q.hidden,0)=0) cnt
         FROM ai_session s
-        ORDER BY s.updated DESC""").fetchall()
+        WHERE IFNULL(s.platform,'wechat')=?
+        ORDER BY s.updated DESC""", (platform,)).fetchall()
     groups: dict[str, dict] = {}
     for r in rows:
         scope = r["scope"]
@@ -1286,8 +1362,7 @@ def api_ai_sessions():
             is_group = bool(row[1]) if row else False
             kind = "group" if is_group else "chat"
         out.append({"scope": scope, "name": name, "is_group": is_group, "kind": kind,
-                    "sessions": [x for x in g["sessions"]
-                                 if x["count"] > 0 or len(g["sessions"]) == 1],
+                    "sessions": g["sessions"],
                     "count": len(g["sessions"])})
     out.sort(key=lambda x: (x["scope"] != "assistant",
                             -max([y["ts"] for y in x["sessions"]] or [0])))
@@ -1336,6 +1411,15 @@ def api_ai_scope_context(scope: str):
             lid = 0
         if not chat or lid <= 0:
             return {}
+        # QQ 文件中心：file:qqfile:<id>，直接给出本机路径
+        if chat == "qqfile":
+            row = con.execute("SELECT name,ts,path,size FROM qq_file WHERE id=?",
+                              (lid,)).fetchone()
+            if not row:
+                return {}
+            return {"file": {"chat": "qqfile", "local_id": lid, "ts": row[1] or 0,
+                             "name": row[0] or "文件", "path": row[2] or "",
+                             "size": row[3] or 0}}
         name, ts = "", 0
         try:
             _ensure_file_text(con)
@@ -1376,9 +1460,10 @@ def api_ai_session_new(payload: dict):
     ensure_qa_table(con)
     scope = payload.get("scope") or "assistant"
     name = (payload.get("name") or "").strip()
-    sid = get_or_create_session(con, scope, new=True, name=name)
+    platform = payload.get("platform") if payload.get("platform") in ("wechat", "qq") else "wechat"
+    sid = get_or_create_session(con, scope, new=True, name=name, platform=platform)
     con.commit()
-    return {"id": sid, "scope": scope, "name": name}
+    return {"id": sid, "scope": scope, "name": name, "platform": platform}
 
 
 @app.get("/api/ai/session/{sid}")
@@ -1391,6 +1476,7 @@ def api_ai_session_get(sid: int):
     rows = con.execute("SELECT * FROM ai_qa WHERE session_id=? AND IFNULL(hidden,0)=0 "
                        "ORDER BY id", (sid,)).fetchall()
     return {"id": s["id"], "scope": s["scope"], "title": s["title"] or "新对话",
+            "platform": s["platform"] or "wechat",
             "turns": [{"id": r["id"], "question": r["question"], "answer": r["answer"],
                        "refs": json.loads(r["cited_refs"] or "[]"), "ts": r["ts"],
                        "mode": r["scope"],
@@ -1504,11 +1590,12 @@ def quick_retrieve(con, query: str, chat: str | None, since: int | None,
 
 
 def save_qa(con, chat, question, answer, refs, scope, trace, session_id, new_session,
-            scope_name=None):
+            scope_name=None, platform: str = "wechat"):
     ensure_qa_table(con)
     key = chat or "assistant"
     sid = session_id or get_or_create_session(con, key, new=new_session,
-                                              name=scope_name or "")
+                                              name=scope_name or "",
+                                              platform=platform)
     if scope_name:
         con.execute("UPDATE ai_session SET name=? WHERE id=? AND IFNULL(name,'')=''",
                     (scope_name[:60], sid))
@@ -1572,6 +1659,19 @@ def _on_startup():
         threading.Thread(target=_sns_loop, daemon=True).start()
     threading.Thread(target=_vec_loop, daemon=True).start()
     threading.Thread(target=_auto_backlog_boot, daemon=True).start()
+    # QQ 自动同步：启动先增量入库一次，之后盯 NT 库指纹变化（新消息/文件/链接）
+    threading.Thread(target=_qq_sync_loop, daemon=True).start()
+    # 开机自启：首次运行自动登记（可在设置里关闭）
+    threading.Thread(target=_autostart_ensure_default, daemon=True).start()
+    # QQ 实时同步：文件通知 + WAL 帧补丁 + rowid 游标，新消息约 0.5~1 秒可查
+    threading.Thread(target=_qq_rt_loop, daemon=True).start()
+    # 媒体索引（6 万个文件，约 15 秒）启动就在后台建好，图片/文件路径读取时即补
+    def _qq_media_boot():
+        try:
+            qq_local._media_index_cached(qq_local.pick_account(), allow_empty=True)
+        except Exception:
+            pass
+    threading.Thread(target=_qq_media_boot, daemon=True).start()
     try:
         import qqbot as qqbot_mod
         qqbot_mod.apply_config(load_conf())
@@ -1919,8 +2019,9 @@ def _agent_api_log(line: str) -> None:
 def v1_chat(payload: dict, authorization: str = Header(default="")):
     """OpenAI 兼容问答：微信 Agent（OpenClaw weixin 渠道）把消息路由到这。
 
-    取最后一条用户消息作为问题，走与 QQ 机器人同一条问答链路（构建微信上下文
-    → Agent 工具循环 → 引用清洗），回答以 OpenAI chat.completions 结构返回。
+    取最后一条用户消息作为问题，交给 wxagent（微信通道自己的指令/状态/问答），
+    经本机 Agent 工具循环与引用清洗后，以 OpenAI chat.completions 结构返回。
+    QQ 机器人有独立的 qqagent，两者不再共用状态或帮助文本。
     """
     model = _agent_api_model(authorization)
     if not model:
@@ -1930,9 +2031,9 @@ def v1_chat(payload: dict, authorization: str = Header(default="")):
     if not question:
         raise HTTPException(400, "消息里没有可回答的用户问题")
     _agent_api_log(f"收到提问（{len(question)} 字）：{question[:80]}")
-    import qqbot as qqbot_mod
+    import wxagent
     # 指令（/帮助、/探索模式 等）直接由本机处理，不调用模型
-    cmd_reply = qqbot_mod.channel_command("openclaw", question)
+    cmd_reply = wxagent.command(question)
     if cmd_reply is not None:
         answer = cmd_reply
         _agent_api_log(f"指令已处理：{question[:40]}")
@@ -1940,8 +2041,7 @@ def v1_chat(payload: dict, authorization: str = Header(default="")):
         try:
             history = [m for m in (payload.get("messages") or [])
                        if isinstance(m, dict) and m.get("role") in ("user", "assistant")][:-1]
-            answer = qqbot_mod.ask_wechat("openclaw", question, channel="weixin",
-                                          history=history)
+            answer = wxagent.ask(question, history=history)
         except Exception as e:      # noqa: BLE001
             _agent_api_log(f"问答失败：{type(e).__name__}: {e}")
             raise HTTPException(500, "问答处理失败，请稍后重试（本机已记录错误日志）。")
@@ -2251,9 +2351,11 @@ def api_openclaw_pairing(payload: dict):
     return {"ok": True, "output": out[-1200:]}
 
 
-@app.post("/api/openclaw/apply")
 def _ensure_oc_config() -> dict:
     """把本助手写入 OpenClaw 配置（provider/主模型/网关 token/插件允许），返回 {model,key}。
+
+    注意：这是内部函数，不要给它挂路由装饰器——曾经和下面的 /api/openclaw/apply
+    重复注册，导致「一键写入并重启」版本永远匹配不到。
 
     设置页不再让用户填任何字段：扫码登录前自动调用一次即可。
     """
@@ -2292,7 +2394,7 @@ def _ensure_oc_config() -> dict:
         "apiKey": a["api_key"],
         "api": "openai-completions",
         "timeoutSeconds": 300,
-        "models": [{"id": a["model"], "name": "微信知识助手"}],
+        "models": [{"id": a["model"], "name": "Qwent"}],
     }
     agents = oc.setdefault("agents", {})
     defaults = agents.setdefault("defaults", {})
@@ -3506,10 +3608,6 @@ def api_files_stats():
 
 
 # ---------------------------------------------------------------- API: QQ 机器人
-
-
-
-# ---------------------------------------------------------------- API: QQ 机器人
 @app.get("/api/qqbot/status")
 def api_qqbot_status():
     conf = load_conf().get("qqbot", {})
@@ -3526,6 +3624,9 @@ def api_qqbot_status():
             "wechat_chat": str(conf.get("wechat_chat") or ""),
             "default_explorer": bool(conf.get("default_explorer")),
             "default_thinking": bool(conf.get("default_thinking")),
+            "allow_openids": list(conf.get("allow_openids") or []),
+            "max_msg_chars": int(conf.get("max_msg_chars") or 700),
+            "max_chunks": int(conf.get("max_chunks") or 4),
             "running": st.get("running"), "connected": st.get("connected"),
             "username": st.get("username"), "error": st.get("error"),
             "menu": st.get("menu"), "menu_error": st.get("menu_error"),
@@ -3548,6 +3649,18 @@ def api_qqbot_config(payload: dict):
               "default_explorer", "default_thinking"):
         if k in payload:
             q[k] = bool(payload[k])
+    if "allow_openids" in payload:
+        raw = payload.get("allow_openids")
+        if isinstance(raw, str):
+            raw = re.split(r"[,\s;]+", raw)
+        q["allow_openids"] = [str(x).strip() for x in (raw or [])
+                              if str(x).strip()][:50]
+    for k, lo, hi in (("max_msg_chars", 100, 2000), ("max_chunks", 1, 5)):
+        if k in payload:
+            try:
+                q[k] = max(lo, min(hi, int(payload[k])))
+            except (TypeError, ValueError):
+                pass
     CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2),
                       encoding="utf-8")
     import qqbot as qqbot_mod
@@ -4995,6 +5108,186 @@ def _auto_sync_loop():
             time.sleep(60)
 
 
+_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_NAME = "WechatKnowledgeAssistant"
+
+
+def _autostart_target() -> str:
+    """开机自启要执行的命令：优先 exe，其次 bat，最后 pythonw server.py。"""
+    exe = PROJECT / "Qwent.exe"
+    if exe.is_file():
+        return f'"{exe}"'
+    bat = PROJECT / "启动助手.bat"
+    if bat.is_file():
+        return f'"{bat}"'
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    if not pyw.is_file():
+        pyw = Path(sys.executable)
+    return f'"{pyw}" "{PROJECT / "backend" / "server.py"}" 8721'
+
+
+def _autostart_get() -> dict:
+    if os.name != "nt":
+        return {"supported": False, "enabled": False, "target": ""}
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY) as k:
+            val, _ = winreg.QueryValueEx(k, _AUTOSTART_NAME)
+        return {"supported": True, "enabled": True, "target": str(val)}
+    except FileNotFoundError:
+        return {"supported": True, "enabled": False, "target": ""}
+    except Exception as exc:  # noqa: BLE001
+        return {"supported": True, "enabled": False, "target": "", "error": str(exc)[:120]}
+
+
+def _autostart_set(enabled: bool) -> dict:
+    if os.name != "nt":
+        return {"ok": False, "error": "仅支持 Windows"}
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY, 0,
+                            winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, _AUTOSTART_NAME, 0, winreg.REG_SZ,
+                                  _autostart_target())
+            else:
+                try:
+                    winreg.DeleteValue(k, _AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+        return {"ok": True, **_autostart_get()}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:160]}
+
+
+def _dir_size(path: Path, limit_files: int = 200000) -> tuple[int, int]:
+    """目录大小与文件数（有上限，避免超大目录卡住接口）。"""
+    total = n = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                    n += 1
+                except OSError:
+                    continue
+                if n >= limit_files:
+                    return total, n
+    except OSError:
+        pass
+    return total, n
+
+
+@app.get("/api/storage")
+def api_storage():
+    """本机数据占用总览：knowledge.db + 各媒体/缓存目录，微信与 QQ 分开统计。"""
+    con = db()
+    try:
+        def _count(sql):
+            try:
+                return int(con.execute(sql).fetchone()[0] or 0)
+            except sqlite3.OperationalError:
+                return 0
+        wx_rows = {
+            "messages": _count("SELECT COUNT(*) FROM message"),
+            # 有效消息（排除公众号/系统提示等噪音），与「知识库概览」口径一致
+            "messages_real": _count("SELECT COUNT(*) FROM message WHERE noise=0"),
+            "chats": _count("SELECT COUNT(*) FROM chat"),
+            "contacts": _count("SELECT COUNT(*) FROM contact"),
+            "files": _count("SELECT COUNT(*) FROM file_text"),
+            "links": _count("SELECT COUNT(*) FROM link_cache"),
+        }
+        qq_rows = {
+            "messages": _count("SELECT COUNT(*) FROM qq_local_message"),
+            "chats": _count("SELECT COUNT(*) FROM qq_chat"),
+            "contacts": _count("SELECT COUNT(*) FROM qq_contact"),
+            "files": _count("SELECT COUNT(*) FROM qq_file"),
+            "links": _count("SELECT COUNT(*) FROM qq_link"),
+        }
+    finally:
+        con.close()
+
+    def _db_file(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except OSError:
+            return 0
+
+    db_total = sum(_db_file(Path(str(KNOWLEDGE_DB) + ext))
+                   for ext in ("", "-wal", "-shm"))
+    wx_media = DATA / "media_cache"
+    wx_dec = DATA / "decrypted"
+    qq_live = DATA / "qq_live"
+    qq_media = DATA / "qq_media"
+    qq_av = DATA / "qq_avatar"
+    qq_th = DATA / "qq_thumbs"
+    qq_fetched = DATA / "qq_fetched"
+    dirs = {}
+    for name, path in (("media_cache", wx_media), ("decrypted", wx_dec),
+                       ("qq_live", qq_live), ("qq_media", qq_media),
+                       ("qq_avatar", qq_av), ("qq_thumbs", qq_th),
+                       ("qq_fetched", qq_fetched)):
+        size, n = _dir_size(path)
+        dirs[name] = {"bytes": size, "files": n, "path": str(path)}
+    wx_media_bytes = dirs["media_cache"]["bytes"] + dirs["decrypted"]["bytes"]
+    qq_media_bytes = (dirs["qq_live"]["bytes"] + dirs["qq_media"]["bytes"]
+                      + dirs["qq_avatar"]["bytes"] + dirs["qq_thumbs"]["bytes"]
+                      + dirs["qq_fetched"]["bytes"])
+    # 数据库是两边共用的一个文件，按消息条数比例分摊估算各自占用
+    wx_n = max(0, wx_rows["messages"])
+    qq_n = max(0, qq_rows["messages"])
+    share = (wx_n / (wx_n + qq_n)) if (wx_n + qq_n) else 0.5
+    wx_db = int(db_total * share)
+    qq_db = db_total - wx_db
+    wx_bytes = wx_media_bytes + wx_db
+    qq_bytes = qq_media_bytes + qq_db
+    return {
+        "db": {"bytes": db_total, "path": str(KNOWLEDGE_DB),
+               "size": _db_file(KNOWLEDGE_DB), "main": _db_file(KNOWLEDGE_DB)},
+        "wechat": {"bytes": wx_bytes, "media_bytes": wx_media_bytes,
+                   "db_bytes": wx_db, "share": round(share, 4), "rows": wx_rows,
+                   "dirs": {"media_cache": dirs["media_cache"],
+                            "decrypted": dirs["decrypted"]}},
+        "qq": {"bytes": qq_bytes, "media_bytes": qq_media_bytes,
+               "db_bytes": qq_db, "rows": qq_rows, "dirs": {
+            "qq_live": dirs["qq_live"], "qq_media": dirs["qq_media"],
+            "qq_avatar": dirs["qq_avatar"], "qq_thumbs": dirs["qq_thumbs"],
+            "qq_fetched": dirs["qq_fetched"]}},
+        "total": {"bytes": db_total + wx_media_bytes + qq_media_bytes,
+                  "wechat": wx_bytes, "qq": qq_bytes,
+                  "db_bytes": db_total,
+                  "media_bytes": wx_media_bytes + qq_media_bytes},
+    }
+
+
+def _autostart_ensure_default():
+    """首次启动默认登记开机自启（用户关掉后不再自动恢复）。"""
+    try:
+        conf = load_conf()
+        st = conf.setdefault("app", {})
+        if st.get("autostart_initialized"):
+            return
+        st["autostart_initialized"] = True
+        CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not _autostart_get().get("enabled"):
+            _autostart_set(True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[autostart] init failed: {exc}")
+
+
+@app.get("/api/autostart")
+def api_autostart_get():
+    return _autostart_get()
+
+
+@app.post("/api/autostart")
+def api_autostart_set(payload: dict):
+    res = _autostart_set(bool(payload.get("enabled")))
+    if not res.get("ok"):
+        raise HTTPException(500, res.get("error") or "设置失败")
+    return res
+
+
 @app.get("/api/sync/auto")
 def api_sync_auto_get():
     conf = load_conf()
@@ -5303,6 +5596,1023 @@ def api_key_import(payload: dict):
     r = keyvault.import_manual_key(ACCOUNT_DIR, str(payload.get("key_hex") or ""))
     _key_status["ts"] = 0.0
     return r
+
+
+# ---------------------------------------------------------------- API: 平台 / 双通道设置
+@app.get("/api/platform")
+def api_platform_get():
+    """界面平台偏好（微信 / QQ）。前端同时记 localStorage，这里做跨设备兜底。"""
+    ui = load_conf().get("ui") or {}
+    p = ui.get("platform")
+    return {"platform": p if p in ("wechat", "qq") else "wechat",
+            "supported": ["wechat", "qq"]}
+
+
+@app.post("/api/platform")
+def api_platform_set(payload: dict):
+    p = str(payload.get("platform") or "").strip().lower()
+    if p not in ("wechat", "qq"):
+        raise HTTPException(400, "platform 只能是 wechat 或 qq")
+    conf = load_conf()
+    conf.setdefault("ui", {})["platform"] = p
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "platform": p}
+
+
+@app.get("/api/wxagent/config")
+def api_wxagent_config_get():
+    import wxagent
+    a = (load_conf().get("agent_api") or {})
+    w = (load_conf().get("wxagent") or {})
+    return {"enabled": bool(a.get("enabled")),
+            "model": str(a.get("model") or "wechat-kb"),
+            "has_key": bool(a.get("api_key")),
+            "key": str(a.get("api_key") or ""),
+            "base_url": "http://127.0.0.1:8721/v1",
+            "default_explorer": bool(w.get("default_explorer")),
+            "default_thinking": bool(w.get("default_thinking"))}
+
+
+@app.post("/api/wxagent/config")
+def api_wxagent_config_set(payload: dict):
+    """微信通道独立设置：开关、接口密钥、默认提问方式。不再包含任何 QQ 字段。"""
+    conf = load_conf()
+    w = conf.setdefault("wxagent", {})
+    a = conf.setdefault("agent_api", {})
+    for k in ("default_explorer", "default_thinking"):
+        if k in payload:
+            w[k] = bool(payload[k])
+    if "enabled" in payload:
+        a["enabled"] = bool(payload["enabled"])
+    if payload.get("model"):
+        a["model"] = str(payload["model"]).strip() or "wechat-kb"
+    if payload.get("regenerate") or (a.get("enabled") and not a.get("api_key")):
+        import secrets as _s
+        a["api_key"] = "wk-" + _s.token_hex(16)
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "enabled": bool(a.get("enabled")),
+            "key": str(a.get("api_key") or ""), "model": a.get("model")}
+
+
+@app.get("/api/wxagent/help")
+def api_wxagent_help():
+    """设置页预览：微信 ClawBot 里 /帮助 会看到的完整内容。"""
+    import wxagent
+    return {"help": wxagent.help_text(), "status": wxagent.status_text()}
+
+
+@app.get("/api/qqagent/help")
+def api_qqagent_help():
+    """设置页预览：QQ 机器人 /帮助 与菜单定义（两者能力一致）。"""
+    import qqagent
+    import qqbot as qqbot_mod
+    import botcore
+    conf = qqbot_mod.conf_of(load_conf())
+    return {"help": qqagent.help_text("__preview__", conf),
+            "menu": qqagent.MENU_ITEMS,
+            "commands": [{"key": k, "action": v}
+                         for k, v in sorted(botcore.ALIASES.items())]}
+
+
+# ---------------------------------------------------------------- API: QQ 消息（qqbot 接入）
+@app.get("/api/qq/conversations")
+def api_qq_conversations():
+    con = db()
+    try:
+        return {"conversations": qq_messages.conversations(con)}
+    finally:
+        con.close()
+
+
+@app.get("/api/qq/messages")
+def api_qq_messages(conv: str = "", limit: int = 200):
+    if not conv:
+        raise HTTPException(400, "缺少 conv")
+    con = db()
+    try:
+        items = qq_messages.messages(con, conv, limit)
+        names = {x["conv"]: x["name"] for x in qq_messages.conversations(con)}
+        return {"conv": conv, "name": names.get(conv) or conv, "messages": items}
+    finally:
+        con.close()
+
+
+@app.post("/api/qq/conversations/rename")
+def api_qq_conversation_rename(payload: dict):
+    conv = str(payload.get("conv") or "")
+    if not conv.startswith(("c2c:", "group:")):
+        raise HTTPException(400, "无效的会话")
+    con = db()
+    try:
+        name = qq_messages.rename(con, conv, payload.get("name"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        con.close()
+    return {"ok": True, "conv": conv, "name": name}
+
+
+@app.get("/api/qq/overview")
+def api_qq_overview():
+    con = db()
+    try:
+        data = qq_messages.overview(con)
+        try:
+            data["local"] = qq_local.stats(con)
+        except Exception:
+            data["local"] = {}
+    finally:
+        con.close()
+    try:
+        import qqbot as qqbot_mod
+        st = qqbot_mod.status()
+        data["bot_connected"] = bool(st.get("connected"))
+        data["bot_running"] = bool(st.get("running"))
+        data["bot_name"] = st.get("username") or ""
+    except Exception:
+        data["bot_connected"] = False
+    return data
+
+
+@app.get("/api/qq/media/{name}")
+def api_qq_media(name: str):
+    """QQ 消息附件（图片/语音/文件）；只允许读取 data/qq_media 下的文件名。"""
+    safe = Path(name).name
+    path = DATA / "qq_media" / safe
+    if not safe or not path.is_file():
+        raise HTTPException(404, "附件不存在")
+    return FileResponse(path)
+
+
+@app.get("/api/qq/search")
+def api_qq_search(q: str = "", n: int = 50):
+    con = db()
+    try:
+        local = qq_local.search(con, q, n)
+        for x in local:
+            x["source"] = "local"
+        bot = qq_messages.search(con, q, n)
+        for x in bot:
+            x["source"] = "bot"
+            x["conv_name"] = x.get("conv_name") or x.get("conv") or ""
+        out = sorted(local + bot, key=lambda x: x.get("ts") or 0, reverse=True)[:n]
+        return {"items": out}
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- QQ 自动同步（NT 数据库指纹 → 增量导入 → 自动解析）
+_qq_sync_state = {"running": False, "last": "", "last_result": None, "error": "",
+                  "progress": "", "finger": {}, "last_ok": 0.0, "booted": False}
+_qq_sync_wake = threading.Event()
+
+
+def _qq_sync_conf() -> dict:
+    conf = load_conf()
+    st = conf.get("qq_sync", {})
+    return {"auto": bool(st.get("auto", True)),
+            "realtime": bool(st.get("realtime", True)),
+            "interval_min": max(5, int(st.get("interval_min", 10)))}
+
+
+def _qq_sync_once(progress=None, light: bool = False) -> dict:
+    """增量同步一次：库里没数据则全量导入；否则只导最近窗口。
+
+    light=True（实时触发）：只解密 nt_msg.db（约 6 秒），窗口缩到 2h，
+    新消息从出现到入库一般在十几秒内。
+    """
+    con = db()
+    try:
+        n = con.execute("SELECT COUNT(*) FROM qq_local_message").fetchone()[0]
+        if n == 0:
+            if progress:
+                progress("首次导入，正在解密全库…")
+            return qq_local.import_all(con, rebuild=True, progress=progress)
+        if progress:
+            progress("准备解密最近记录…")
+        since = int(time.time()) - ((2 if light else 49) * 3600)
+        return qq_local.import_all(con, rebuild=False, since_ts=since,
+                                   light=light, progress=progress)
+    finally:
+        con.close()
+
+
+def _qq_auto_parse_after_sync():
+    """同步后补解析新文件/链接（与导入后的自动解析同一套 worker）。"""
+    try:
+        if not _qq_file_parse_state["running"]:
+            _qq_file_parse_state.update({"running": True, "done": 0, "total": 0,
+                                         "progress": "自动解析文件…", "error": "", "stage": ""})
+            _qq_file_parse_worker(80)
+        if not _qq_link_parse_state["running"]:
+            _qq_link_parse_state.update({"running": True, "done": 0, "total": 0,
+                                         "progress": "自动解析链接…", "error": "", "last": ""})
+            _qq_link_parse_worker(10)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[qq_sync] auto parse failed: {exc}")
+
+
+def _qq_sync_run(reason: str = "", light: bool = False):
+    """执行一次同步（增量优先），成功后记录指纹并补解析。"""
+    if _qq_sync_state["running"]:
+        return
+    _qq_sync_state["running"] = True
+    _qq_sync_state["error"] = ""
+    try:
+        def _p(s):
+            _qq_sync_state["progress"] = s
+        result = _qq_sync_once(progress=_p, light=light)
+        _qq_sync_state["last_result"] = result
+        _qq_sync_state["progress"] = "同步完成"
+        _qq_sync_state["last"] = time.strftime("%m-%d %H:%M")
+        _qq_sync_state["last_ok"] = time.time()
+        _qq_sync_state["finger"] = qq_local.db_fingerprints()
+        if result.get("messages") or result.get("files") or result.get("links"):
+            threading.Thread(target=_qq_auto_parse_after_sync, daemon=True).start()
+        if reason:
+            print(f"[qq_sync] {reason}: +{result.get('messages')} messages, "
+                  f"+{result.get('files')} files, +{result.get('links')} links")
+    except Exception as exc:  # noqa: BLE001
+        _qq_sync_state["error"] = str(exc)[:200]
+        _qq_sync_state["progress"] = "同步失败"
+    finally:
+        _qq_sync_state["running"] = False
+
+
+_QQ_WATCH = {"handle": None}
+
+
+def _qq_watcher_wait(timeout_ms: int = 1000) -> bool:
+    """Windows 文件系统通知：静默等待目录变化（零 CPU），不用轮询。
+
+    FindFirstChangeNotificationW 监听 nt_db 目录的写入/改名/大小变化，
+    返回 True 表示有变化（随即重置），False 为超时。
+    """
+    import ctypes
+    from ctypes import wintypes
+    if os.name != "nt":
+        time.sleep(timeout_ms / 1000.0)
+        return True
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        FILE_NOTIFY_CHANGE_FILE_NAME = 0x1
+        FILE_NOTIFY_CHANGE_SIZE = 0x8
+        FILE_NOTIFY_CHANGE_LAST_WRITE = 0x10
+        flags = (FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE
+                 | FILE_NOTIFY_CHANGE_LAST_WRITE)
+        h = _QQ_WATCH["handle"]
+        if not h:
+            account = qq_local.pick_account()
+            dbdir = str(account / "nt_qq" / "nt_db")
+            h = k32.FindFirstChangeNotificationW(dbdir, False, flags)
+            if h in (None, 0, wintypes.HANDLE(-1).value):
+                _QQ_WATCH["handle"] = None
+                time.sleep(1)
+                return True
+            _QQ_WATCH["handle"] = h
+        r = k32.WaitForSingleObject(h, timeout_ms)
+        if r == 0:                       # WAIT_OBJECT_0：有变化
+            k32.FindNextChangeNotification(h)
+            return True
+        return False
+    except Exception:
+        time.sleep(timeout_ms / 1000.0)
+        return True
+
+
+def _qq_rt_loop():
+    """实时同步 v2（WAL 帧级增量）：
+
+    每 2 秒看 nt_msg.db + -wal 指纹（0.002s）→ 变化抖动 1 秒 →
+    live_update 只解密 WAL 新帧（毫秒级）打补丁进本地解密副本 →
+    对副本走轻量导入（只解析重叠 15 分钟窗口）。
+    新消息从 QQ 落库到本助手可查约 2~5 秒。
+    任何一步失败回退整库轻量同步（约 6 秒）。
+    """
+    last_st = ("", 0)
+    live_dir = KNOWLEDGE_DB.parent / "qq_live"
+    while True:
+        try:
+            conf = _qq_sync_conf()
+            if not (conf["auto"] and conf["realtime"]):
+                time.sleep(5)
+                continue
+            if _qq_sync_state["running"]:
+                time.sleep(2)
+                continue
+            try:
+                account = qq_local.pick_account()
+            except Exception:
+                time.sleep(15)
+                continue
+            p = account / "nt_qq" / "nt_db" / "nt_msg.db"
+            if not p.is_file():
+                time.sleep(15)
+                continue
+            wal_p = Path(str(p) + "-wal")
+            try:
+                wst0 = wal_p.stat()
+            except OSError:
+                wst0 = None
+            st0 = p.stat()
+            cur = (int(st0.st_mtime), st0.st_size,
+                   int(wst0.st_mtime) if wst0 else 0, wst0.st_size if wst0 else 0)
+            first_rt = not _qq_sync_state.get("rt_booted")
+            if not first_rt and (cur == last_st or cur == _qq_sync_state["finger"].get("nt_msg.db")):
+                # 等文件系统通知（零 CPU）而不是定时轮询；超时 5 秒兜底
+                _qq_watcher_wait(5000)
+                continue
+            # 抖动 0.3 秒：等 QQ 写完这一波帧（再短会读到写了一半的 WAL）
+            time.sleep(0.3)
+            try:
+                wst1 = wal_p.stat()
+            except OSError:
+                wst1 = None
+            st1 = p.stat()
+            cur1 = (int(st1.st_mtime), st1.st_size,
+                    int(wst1.st_mtime) if wst1 else 0, wst1.st_size if wst1 else 0)
+            if cur1 != cur:
+                continue
+            last_st = cur1
+            if _qq_sync_state["running"]:
+                continue
+            _qq_sync_state["rt_booted"] = True
+            _qq_sync_state["running"] = True
+            _qq_sync_state["error"] = ""
+            _t0 = time.time()
+            try:
+                def _p(s):
+                    _qq_sync_state["progress"] = s
+                con = db()
+                try:
+                    r = qq_local.live_update(con, live_dir, progress=_p)
+                    # 游标增量：只读 rowid > 上次的最大 rowid（走主键索引，不扫全表）
+                    cursors = {}
+                    for k, v in con.execute(
+                            "SELECT key,value FROM meta WHERE key LIKE 'qq_rt_rid_%'"):
+                        if str(v).isdigit():
+                            cursors[k[len('qq_rt_rid_'):]] = int(v)
+                    result = qq_local.import_all(
+                        con, rebuild=False, since_ts=0 if cursors else int(time.time()) - 49 * 3600,
+                        light=True, decrypt_dir=live_dir, progress=_p,
+                        after_rowid=cursors if cursors else None)
+                    for tbl, rid in (result.get("max_rowid") or {}).items():
+                        con.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                    ("qq_rt_rid_" + tbl, str(rid)))
+                    con.commit()
+                finally:
+                    con.close()
+                _qq_sync_state["last_result"] = result
+                _qq_sync_state["progress"] = "同步完成"
+                _qq_sync_state["last_ms"] = int((time.time() - _t0) * 1000)
+                _qq_sync_state["last"] = time.strftime("%m-%d %H:%M:%S")
+                _qq_sync_state["last_ok"] = time.time()
+                _qq_sync_state["finger"] = qq_local.db_fingerprints()
+                if result.get("messages") or result.get("files") or result.get("links"):
+                    print(f"[qq_rt] +{result.get('messages')} msgs, "
+                          f"+{result.get('files')} files, +{result.get('links')} links "
+                          f"(patched={r.get('patched')})")
+                    _qq_bump_version()
+                    threading.Thread(target=_qq_auto_parse_after_sync, daemon=True).start()
+            except Exception as exc:  # noqa: BLE001
+                _qq_sync_state["error"] = str(exc)[:200]
+                _qq_sync_state["progress"] = "同步失败"
+                print(f"[qq_rt] fallback to full light sync: {exc}")
+                _qq_sync_state["running"] = False
+                _qq_sync_run("rt-fallback", light=True)
+                time.sleep(10)
+                continue
+            finally:
+                _qq_sync_state["running"] = False
+            _qq_watcher_wait(1000)       # 喂掉本轮自己写入触发的通知
+        except Exception as exc:  # noqa: BLE001
+            print(f"[qq_rt] loop error: {exc}")
+            time.sleep(15)
+
+
+def _qq_sync_loop():
+    """每分钟看一眼 QQ 库指纹：变化且到间隔才解密导入（启动时先同步一次）。"""
+    while True:
+        try:
+            conf = _qq_sync_conf()
+            if not conf["auto"]:
+                _qq_sync_wake.wait(timeout=60)
+                _qq_sync_wake.clear()
+                continue
+            finger = qq_local.db_fingerprints()
+            changed = bool(finger) and finger != _qq_sync_state["finger"]
+            due = time.time() - _qq_sync_state["last_ok"] >= conf["interval_min"] * 60
+            first = not _qq_sync_state["booted"]
+            err_retry = bool(_qq_sync_state["error"]) and                 time.time() - _qq_sync_state["last_ok"] >= 300
+            if _qq_sync_state["running"]:
+                time.sleep(5)
+                continue
+            if first or (changed and due) or err_retry:
+                _qq_sync_state["booted"] = True
+                if not finger:
+                    # QQ 未登录/未安装：标记错误，等下轮重试
+                    _qq_sync_state["error"] = "QQ 未运行或未找到本地数据库，登录 QQ 后自动重试"
+                    _qq_sync_wake.wait(timeout=120)
+                    _qq_sync_wake.clear()
+                    continue
+                _qq_sync_run("startup" if first else "changed")
+            _qq_sync_wake.wait(timeout=60)
+            _qq_sync_wake.clear()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[qq_sync] loop error: {exc}")
+            time.sleep(60)
+
+
+# ---------------------------------------------------------------- API: QQ 本地记录（NT 数据库导入）
+_qq_import_lock = threading.Lock()
+_qq_import_state = {"running": False, "progress": "", "result": None, "error": ""}
+
+
+def _qq_import_worker(qq: str = "", rebuild: bool = True):
+    con = None
+    try:
+        con = db()
+        def _p(s):
+            _qq_import_state["progress"] = s
+        result = qq_local.import_all(con, qq=qq or None, rebuild=rebuild, progress=_p)
+        _qq_import_state["result"] = result
+        _qq_import_state["progress"] = "导入完成"
+        # 导入后自动补解析：本机文件正文 + 链接正文（与微信的自动解析对齐）
+        if result.get("files") or result.get("links"):
+            threading.Thread(target=_qq_auto_parse_after_import, daemon=True).start()
+        # 手动全量导入后刷新指纹，避免自动同步立刻重复跑
+        _qq_sync_state["finger"] = qq_local.db_fingerprints()
+        _qq_sync_state["last"] = time.strftime("%m-%d %H:%M")
+        _qq_sync_state["last_ok"] = time.time()
+        if result.get("messages") or result.get("files") or result.get("links"):
+            _qq_bump_version()
+    except Exception as exc:  # noqa: BLE001
+        _qq_import_state["error"] = str(exc)[:300]
+        _qq_import_state["progress"] = "导入失败"
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        _qq_import_state["running"] = False
+
+
+def _qq_auto_parse_after_import():
+    """导入完成后串行补解析，避免两个 worker 同时写库。"""
+    try:
+        if not _qq_file_parse_state["running"]:
+            _qq_file_parse_state.update({"running": True, "done": 0, "total": 0,
+                                         "progress": "自动解析文件…", "error": ""})
+            _qq_file_parse_worker(300)
+        if not _qq_link_parse_state["running"]:
+            _qq_link_parse_state.update({"running": True, "done": 0, "total": 0,
+                                         "progress": "自动解析链接…", "error": "",
+                                         "last": ""})
+            _qq_link_parse_worker(20)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("qq auto parse after import failed: %s", exc)
+
+
+_qq_data_version = 0
+
+
+def _qq_bump_version():
+    global _qq_data_version
+    _qq_data_version += 1
+
+
+@app.get("/api/qq/local/stream")
+def api_qq_local_stream(conv: str, after_id: int = 0):
+    """SSE 推送 QQ 新消息（与微信 /api/messages/stream 同款机制）。
+
+    服务端每 0.5 秒比对 id 水位，有新增立即下发；QQ 实时同步导入任何会话的
+    新内容时附带 chats 事件，前端借此刷新会话列表（别的会话来消息也能看到）。
+    无新增每 15 秒心跳；EventSource 断线自动重连。
+    """
+    from fastapi.responses import StreamingResponse
+
+    def gen():
+        global _qq_data_version
+        last = int(after_id or 0)
+        seen_version = _qq_data_version
+        idle = 0
+        nn = chr(10) * 2                    # SSE 事件以空行结尾
+        yield "retry: 3000" + nn
+        while True:
+            try:
+                con = db()
+                rows = []
+                if conv:
+                    rows = qq_local.messages(con, conv, 40, after=last)
+                version_changed = _qq_data_version != seen_version
+                if rows:
+                    last = max(last, max(r["id"] for r in rows))
+                    payload = json.dumps({"messages": rows, "max_id": last},
+                                         ensure_ascii=False)
+                    yield "data: " + payload + nn
+                    idle = 0
+                if version_changed:
+                    seen_version = _qq_data_version
+                    yield "data: " + json.dumps({"chats": True}, ensure_ascii=False) + nn
+                    idle = 0
+                if not rows and not version_changed:
+                    idle += 1
+                    if idle >= 30:
+                        idle = 0
+                        yield ": ping" + nn
+                con.close()
+            except Exception:
+                yield ": error" + nn
+            time.sleep(0.5)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+_QQ_AV_DIR = KNOWLEDGE_DB.parent / "qq_avatar"
+_QQ_AV_SEM = threading.Semaphore(8)          # 头像下载限并发，别拖垮别的接口
+_QQ_AV_FAIL: dict[str, float] = {}           # 失败缓存：1 小时内不再重试（避免反复打 CDN）
+
+
+def _qq_avatar_fetch(kind: str, key: str, size: int = 100):
+    """QQ 头像：好友走 qlogo 号接口，群走群头像接口。列表用 100px（省带宽），详情 640。"""
+    import qqagent
+    big = "640" if size >= 200 else "100"
+    urls = ([f"https://p.qlogo.cn/gh/{key}/{key}/{big}"]
+            if kind == "group" else
+            [f"https://q1.qlogo.cn/g?b=qq&nk={key}&s={big}"])
+    for url in urls:
+        try:
+            r = qqagent._req("GET", url, timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0",
+                                      "Referer": "https://q.qq.com/"})
+            if r.status_code == 200 and len(r.content) > 500:
+                return r.content
+        except Exception:
+            continue
+    return None
+
+
+@app.get("/api/qq/avatar")
+def api_qq_avatar(kind: str = "friend", key: str = "", size: int = 100):
+    """QQ 好友/群头像（本地缓存，离线可用）。key 可为 QQ 号/群号，也接受 uid（自动反查）。"""
+    key = (key or "").strip()
+    if not key:
+        raise HTTPException(404, "no key")
+    if not key.isdigit():
+        con = db()
+        try:
+            row = con.execute("SELECT uin FROM qq_contact WHERE uid=? OR key=? LIMIT 1",
+                              (key, f"c2c:{key}")).fetchone()
+        finally:
+            con.close()
+        key = str(row[0]) if row and row[0] else ""
+        if not key:
+            raise HTTPException(404, "no avatar")
+    _QQ_AV_DIR.mkdir(parents=True, exist_ok=True)
+    fp = _QQ_AV_DIR / f"{kind}_{key}_{'640' if size >= 200 else '100'}.img"
+    if fp.is_file() and fp.stat().st_size > 500:
+        return FileResponse(str(fp), headers={"Cache-Control": "public, max-age=86400"})
+    ck = f"{kind}:{key}"
+    if _QQ_AV_FAIL.get(ck, 0) > time.time() - 3600:
+        raise HTTPException(404, "no avatar")
+    with _QQ_AV_SEM:
+        data = _qq_avatar_fetch(kind, key, size)
+    if not data:
+        _QQ_AV_FAIL[ck] = time.time()
+        raise HTTPException(404, "no avatar")
+    fp.write_bytes(data)
+    return FileResponse(str(fp), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/qq/local/sync/status")
+def api_qq_local_sync_status():
+    con = db()
+    try:
+        st = qq_local.stats(con)
+    finally:
+        con.close()
+    return {"state": {k: v for k, v in _qq_sync_state.items() if k != "finger"},
+            "config": _qq_sync_conf(), "stats": st}
+
+
+@app.post("/api/qq/local/sync")
+def api_qq_local_sync_now():
+    """立即同步一次（增量），后台执行。"""
+    if _qq_sync_state["running"]:
+        raise HTTPException(409, "QQ 同步正在进行")
+    threading.Thread(target=_qq_sync_run, args=("manual",), daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+@app.post("/api/qq/local/sync/config")
+def api_qq_local_sync_config(payload: dict):
+    conf = load_conf()
+    st = conf.setdefault("qq_sync", {})
+    if "auto" in payload:
+        st["auto"] = bool(payload["auto"])
+    if "realtime" in payload:
+        st["realtime"] = bool(payload["realtime"])
+    if payload.get("interval_min"):
+        st["interval_min"] = max(5, int(payload["interval_min"]))
+    CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2), encoding="utf-8")
+    if st.get("auto"):
+        _qq_sync_wake.set()          # 重新开启时立刻检查一轮
+    return {"ok": True, "auto": bool(st.get("auto", True)),
+            "realtime": bool(st.get("realtime", True)),
+            "interval_min": int(st.get("interval_min", 10))}
+
+
+@app.post("/api/qq/local/import")
+def api_qq_local_import(payload: dict | None = None):
+    if _qq_import_state["running"]:
+        raise HTTPException(409, "QQ 本地记录正在导入")
+    req = payload or {}
+    _qq_import_state.update({"running": True, "progress": "准备中…",
+                             "result": None, "error": ""})
+    th = threading.Thread(target=_qq_import_worker,
+                          args=(str(req.get("qq") or ""), bool(req.get("rebuild", True))),
+                          daemon=True)
+    th.start()
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/qq/local/import/status")
+def api_qq_local_import_status():
+    con = db()
+    try:
+        st = qq_local.stats(con)
+    finally:
+        con.close()
+    return {"state": dict(_qq_import_state), "stats": st}
+
+
+@app.get("/api/qq/local/sessions")
+def api_qq_local_sessions(q: str = "", limit: int = 300):
+    con = db()
+    try:
+        return {"sessions": qq_local.sessions(con, q, limit)}
+    finally:
+        con.close()
+
+
+@app.post("/api/qq/local/session/pin")
+def api_qq_local_session_pin(payload: dict):
+    conv = str(payload.get("conv") or "")
+    if not conv.startswith(("c2c:", "group:")):
+        raise HTTPException(400, "无效的会话")
+    con = db()
+    try:
+        qq_local.set_pinned(con, conv, bool(payload.get("pinned")))
+    finally:
+        con.close()
+    return {"ok": True, "conv": conv, "pinned": bool(payload.get("pinned"))}
+
+
+@app.get("/api/qq/local/messages")
+def api_qq_local_messages(conv: str = "", limit: int = 200, before: int = 0,
+                          around: int = 0, after: int = 0):
+    if not conv:
+        raise HTTPException(400, "缺少 conv")
+    con = db()
+    try:
+        name = con.execute("SELECT name FROM qq_chat WHERE conv=?", (conv,)).fetchone()
+        return {"conv": conv, "name": (name[0] if name else conv),
+                "messages": qq_local.messages(con, conv, limit, before, around, after)}
+    finally:
+        con.close()
+
+
+@app.get("/api/qq/local/contacts")
+def api_qq_local_contacts(q: str = "", kind: str = "", limit: int = 500):
+    con = db()
+    try:
+        return {"contacts": qq_local.contacts(con, q, kind, limit)}
+    finally:
+        con.close()
+
+
+@app.get("/api/qq/local/files")
+def api_qq_local_files(q: str = "", kind: str = "", conv: str = "", limit: int = 200,
+                       offset: int = 0, sort: str = "new", days: int = 0,
+                       state: str = ""):
+    con = db()
+    try:
+        return qq_local.files(con, q, kind, conv, limit, offset, sort, days, state)
+    finally:
+        con.close()
+
+
+@app.post("/api/qq/local/file/parse")
+def api_qq_local_file_parse(payload: dict):
+    """提取单个 QQ 文件正文（预览时调用，带缓存）。"""
+    try:
+        fid = int(payload.get("id") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "缺少文件 id")
+    con = db()
+    try:
+        return qq_local.file_text(con, fid, bool(payload.get("force")))
+    finally:
+        con.close()
+
+
+@app.post("/api/qq/local/file/reveal")
+def api_qq_local_file_reveal(payload: dict):
+    """在资源管理器中定位 QQ 文件。"""
+    import subprocess
+    con = db()
+    try:
+        row = con.execute("SELECT path FROM qq_file WHERE id=?",
+                          (int(payload.get("id") or 0),)).fetchone()
+    finally:
+        con.close()
+    if not row or not row[0] or not Path(row[0]).is_file():
+        raise HTTPException(404, "文件不在本机（可能已被清理或未下载）")
+    try:
+        subprocess.Popen(["explorer.exe", f"/select,{row[0]}"])
+    except Exception as e:      # noqa: BLE001
+        raise HTTPException(500, f"打开所在位置失败：{e}")
+    return {"ok": True}
+
+
+_qq_file_parse_state = {"running": False, "done": 0, "total": 0, "progress": "",
+                        "error": ""}
+
+
+def _qq_file_parse_worker(limit: int):
+    con = None
+    try:
+        _qq_file_parse_state["stage"] = "before_db"
+        con = db()
+        _qq_file_parse_state["stage"] = "after_db"
+        ids = qq_local.files_to_parse(con, limit)
+        _qq_file_parse_state["stage"] = "after_ids"
+        _qq_file_parse_state["total"] = len(ids)
+        for i, fid in enumerate(ids):
+            _qq_file_parse_state["progress"] = f"解析 {i + 1}/{len(ids)}…"
+            qq_local.file_text(con, fid)
+            _qq_file_parse_state["done"] = i + 1
+        _qq_file_parse_state["progress"] = "解析完成"
+        _qq_file_parse_state["stage"] = "done"
+    except Exception as exc:  # noqa: BLE001
+        _qq_file_parse_state["stage"] = "error"
+        _qq_file_parse_state["error"] = str(exc)[:300]
+        _qq_file_parse_state["progress"] = "解析失败"
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        _qq_file_parse_state["running"] = False
+
+
+@app.post("/api/qq/local/files/parse")
+def api_qq_local_files_parse(payload: dict | None = None):
+    if _qq_file_parse_state["running"]:
+        raise HTTPException(409, "QQ 文件正文正在解析")
+    req = payload or {}
+    _qq_file_parse_state.update({"running": True, "done": 0, "total": 0,
+                                 "progress": "准备中…", "error": "", "stage": ""})
+    threading.Thread(target=_qq_file_parse_worker,
+                     args=(max(1, min(int(req.get("limit") or 50), 300)),),
+                     daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/qq/local/files/parse/status")
+def api_qq_local_files_parse_status():
+    return dict(_qq_file_parse_state)
+
+
+_qq_link_parse_state = {"running": False, "done": 0, "total": 0, "progress": "",
+                        "error": "", "last": ""}
+
+
+def _qq_link_parse_worker(limit: int):
+    con = None
+    try:
+        con = db()
+        items = qq_local.links_to_parse(con, limit)
+        _qq_link_parse_state["total"] = len(items)
+        for i, (_rid, url) in enumerate(items):
+            _qq_link_parse_state["progress"] = f"解析 {i + 1}/{len(items)}…"
+            _qq_link_parse_state["last"] = url[:80]
+            try:
+                fetch_article(url)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("qq link parse failed: %s %s", url[:60], exc)
+        _qq_link_parse_state["progress"] = "解析完成"
+    except Exception as exc:  # noqa: BLE001
+        _qq_link_parse_state["error"] = str(exc)[:300]
+        _qq_link_parse_state["progress"] = "解析失败"
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        _qq_link_parse_state["running"] = False
+
+
+@app.post("/api/qq/local/links/parse")
+def api_qq_local_links_parse(payload: dict | None = None):
+    if _qq_link_parse_state["running"]:
+        raise HTTPException(409, "QQ 链接正文正在解析")
+    req = payload or {}
+    _qq_link_parse_state.update({"running": True, "done": 0, "total": 0,
+                                 "progress": "准备中…", "error": "", "last": ""})
+    threading.Thread(target=_qq_link_parse_worker,
+                     args=(max(1, min(int(req.get("limit") or 10), 50)),),
+                     daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/qq/local/links/parse/status")
+def api_qq_local_links_parse_status():
+    return dict(_qq_link_parse_state)
+
+
+@app.get("/api/qq/local/links")
+def api_qq_local_links(q: str = "", conv: str = "", limit: int = 100,
+                       offset: int = 0, sort: str = "new", days: int = 0,
+                       platform: str = "", state: str = ""):
+    con = db()
+    try:
+        return qq_local.links(con, q, conv, limit, offset, sort, days,
+                              platform, state)
+    finally:
+        con.close()
+
+
+@app.post("/api/qq/local/reparse-cards")
+def api_qq_local_reparse_cards():
+    """把历史卡片消息按新规则重新解析（分享链接/小程序卡片 vs 聊天记录转发）。"""
+    live_dir = DATA / "qq_live"
+    if not (live_dir / "nt_msg.db").is_file():
+        raise HTTPException(409, "QQ 实时副本尚未就绪，请稍后再试")
+    con = db()
+    try:
+        res = qq_local.reparse_cards(con, live_dir)
+    finally:
+        con.close()
+    return {"ok": True, **res}
+
+
+@app.get("/api/qq/local/self")
+def api_qq_local_self():
+    con = db()
+    try:
+        return qq_local.self_info(con)
+    finally:
+        con.close()
+
+
+@app.get("/api/qq/local/overview")
+def api_qq_local_overview():
+    con = db()
+    try:
+        return qq_local.stats(con)
+    finally:
+        con.close()
+
+
+_QQ_FETCHING: dict = {}
+
+
+def _qq_fetch_remote(url: str, md5: str = "", kind: str = "image"):
+    """按 md5 从 CDN 拉一张 QQ 图并落盘到本地缓存目录。
+
+    QQ 只缓存用户看过的图片；这里用消息里的 md5 去下载，历史图片也能显示。
+    返回落盘后的本地绝对路径（字符串），失败返回 None。
+    """
+    if not url:
+        return None
+    out_dir = KNOWLEDGE_DB.parent / "qq_fetched"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # 目标文件名优先 md5，其次 url 末段
+    if md5:
+        name = md5.lower()
+        for ext in (".jpg", ".png", ".gif", ".webp"):
+            hit = next((f for f in out_dir.iterdir() if f.stem == name and f.suffix == ext), None)
+            if hit:
+                return str(hit)
+    if not url:
+        # 只有 md5：走 multimedia CDN 的通用拼接口径（不保证成功）
+        url = f"https://multimedia.nt.qq.com.cn/download?ef=img&fileid={md5}"
+    import requests as _rq
+    try:
+        r = _rq.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0",
+                                              "Referer": "https://qun.qq.com/"})
+        if r.status_code != 200 or len(r.content) < 500:
+            return None
+    except Exception:
+        return None
+    ext = ".jpg"
+    ct = (r.headers.get("Content-Type") or "").lower()
+    if "png" in ct:
+        ext = ".png"
+    elif "gif" in ct:
+        ext = ".gif"
+    elif "webp" in ct:
+        ext = ".webp"
+    fp = out_dir / (name + ext)
+    fp.write_bytes(r.content)
+    return str(fp)
+
+
+@app.get("/api/qq/local/media/fetch")
+def api_qq_local_media_fetch(url: str = "", md5: str = "", kind: str = "image"):
+    """按需从 CDN 拉一张 QQ 图（QQ 未缓存的媒体）。
+
+    消息里只有 md5 时走 multimedia CDN 通用拼接口径；有 url 时优先 url。
+    拉到后落盘 data/qq_fetched/，并立刻返回可用路径。
+    """
+    fp = _qq_fetch_remote(url, md5, kind)
+    if not fp:
+        raise HTTPException(404, "无法从 CDN 拉取")
+    return {"path": fp}
+
+
+@app.get("/api/qq/local/media/thumb")
+def api_qq_local_media_thumb(path: str = "", w: int = 200):
+    """QQ 图片缩略图：优先给 <200px 的 Thumb（几百 KB），没有才回退原图。
+
+    原图常有几 MB，直接塞进 <img src> 首屏要好几秒才出图；缩略图快得多，
+    对聊天气泡的展示尺寸完全够用。
+    """
+    p = qq_local.media_path(path)
+    if not p:
+        raise HTTPException(404, "no media")
+    # 优先用 QQ 自带的 Thumb（已是 720px 缓存，省掉一次 PIL 编码）
+    stem = p.stem.lower()
+    for suffix in ("_720", "_0"):
+        if stem.endswith(suffix) and len(stem) - len(suffix) == 32:
+            base = p.parent.parent / stem[:-len(suffix)]
+            cand = [base.with_suffix(".jpg"), base.with_suffix(".png")]
+            for c in cand:
+                if c.is_file():
+                    p = c
+                    break
+            break
+    # 只有 QQ 自带的 Thumb（_720/_0）才用它；没有说明没有缩略图缓存，
+    # 用 Ori 原图走 PIL 缩放，否则大图会被整张拉下来再缩
+    is_thumb = stem.endswith(("_720", "_0"))
+    try:
+        w = max(60, min(int(w or 200), 640))
+    except (TypeError, ValueError):
+        w = 200
+    # 缩略图磁盘缓存：同一张图 + 同一宽度只编码一次（首次 ~0.8s，之后几 ms）
+    try:
+        st = p.stat()
+        ck = hashlib.sha1(f"{p}|{st.st_mtime_ns}|{st.st_size}|{w}".encode()).hexdigest()[:24]
+        cache_dir = KNOWLEDGE_DB.parent / "qq_thumbs"
+        cache_fp = cache_dir / (ck + ".jpg")
+        if cache_fp.is_file():
+            return FileResponse(str(cache_fp), media_type="image/jpeg",
+                                headers={"Cache-Control": "private, max-age=86400"})
+    except Exception:
+        cache_fp = None
+    try:
+        from PIL import Image as _PILImage
+        import io as _io
+        with _PILImage.open(str(p)) as im:
+            if im.width <= w and is_thumb:
+                return FileResponse(str(p), media_type="image/png",
+                                    headers={"Cache-Control": "private, max-age=86400"})
+            ratio = w / im.width
+            im = im.convert("RGB").resize((w, max(1, int(im.height * ratio))))
+            buf = _io.BytesIO()
+            im.save(buf, format="JPEG", quality=72, optimize=True)
+            data = buf.getvalue()
+        if len(data) >= os.path.getsize(str(p)):
+            # 编码后不比原图小（罕见）：退回原文件
+            return FileResponse(str(p), media_type="image/png",
+                                headers={"Cache-Control": "private, max-age=86400"})
+        if cache_fp is not None:
+            try:
+                cache_fp.parent.mkdir(parents=True, exist_ok=True)
+                cache_fp.write_bytes(data)
+            except Exception:
+                pass
+        return Response(data, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
+    except Exception:
+        return FileResponse(str(p), media_type="image/png",
+                            headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/qq/local/media")
+def api_qq_local_media(path: str = ""):
+    p = qq_local.media_path(path)
+    if not p:
+        raise HTTPException(404, "文件不存在或不在允许目录")
+    return FileResponse(p)
 
 
 # ---------------------------------------------------------------- 静态前端

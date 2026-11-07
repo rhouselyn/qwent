@@ -157,6 +157,7 @@ def make_stream(payload: dict, deps: dict):
     ldoc = payload.get("link") or None
     quoted = payload.get("quoted") or []
     explorer = bool(payload.get("explorer"))   # 探索模式：跳过快速回答，工具步数翻倍
+    platform = payload.get("platform") if payload.get("platform") in ("wechat", "qq") else "wechat"
     # 作用域键：不同群聊 / 文件 / 链接各自独立会话，绝不与其他上下文混用
     #   assistant / <chat username> / file:<chat>:<local_id> / link:<hash>
     scope_key = payload.get("scope") or chat or "assistant"
@@ -196,21 +197,30 @@ def make_stream(payload: dict, deps: dict):
                     body = "《%s》正文：\n%s" % (d.get("title") or "", (d.get("text") or "")[:26000])
                     yield from _answer(conf, deps, q, "", [body],
                                        refs, history, new_session, session_id, scope_key, "link",
-                                       scope_name=scope_name)
+                                       scope_name=scope_name, platform=platform)
                     return
 
             # ---- 指定文件问答：直接读文件正文（走 file_text 缓存，重复提问秒回） ----
             if fdoc:
-                getter = deps.get("file_text_cached")
-                if getter:
-                    p, fname, text = getter(con, fdoc.get("chat", ""),
-                                            int(fdoc.get("local_id", 0) or 0),
-                                            int(fdoc.get("ts", 0) or 0), fdoc.get("name", ""))
-                else:
-                    p = deps["locate_file"](fdoc.get("chat", ""), int(fdoc.get("local_id", 0) or 0),
-                                            int(fdoc.get("ts", 0) or 0), fdoc.get("name", ""))
-                    fname = p.name if p else (fdoc.get("name") or "文件")
+                if fdoc.get("path"):
+                    # QQ 文件中心：直接给本机路径，不走微信文件定位
+                    from pathlib import Path as _P
+                    p = _P(str(fdoc["path"])) if str(fdoc["path"]) else None
+                    if p is not None and not p.is_file():
+                        p = None
+                    fname = fdoc.get("name") or (p.name if p else "文件")
                     text = deps["extract_text"](p, 24000) if p else ""
+                else:
+                    getter = deps.get("file_text_cached")
+                    if getter:
+                        p, fname, text = getter(con, fdoc.get("chat", ""),
+                                                int(fdoc.get("local_id", 0) or 0),
+                                                int(fdoc.get("ts", 0) or 0), fdoc.get("name", ""))
+                    else:
+                        p = deps["locate_file"](fdoc.get("chat", ""), int(fdoc.get("local_id", 0) or 0),
+                                                int(fdoc.get("ts", 0) or 0), fdoc.get("name", ""))
+                        fname = p.name if p else (fdoc.get("name") or "文件")
+                        text = deps["extract_text"](p, 24000) if p else ""
                 if not (text or "").strip():
                     yield _sse({"type": "error", "message": "文件不在本地磁盘"})
                     return
@@ -228,21 +238,39 @@ def make_stream(payload: dict, deps: dict):
                 yield _sse({"type": "refs", "refs": refs})
                 yield from _answer(conf, deps, q, "", [f"文件《{fname}》正文：\n{text}"],
                                   [], history, new_session, session_id, scope_key, "file",
-                                  scope_name=scope_name)
+                                  scope_name=scope_name, platform=platform)
                 return
 
             # ---- 统一走 Agent：检索范围/关键词由模型自己决定 ----
             # 会话内提问时，Agent 已预注入【最近记录】，常见问题一步即可作答；
             # 全局提问时 Agent 自行调用 rag_search(scope=...) 并自造关键词。
             if not conf["llm"].get("api_key"):
-                # 无 Key：退化为一次性检索 + 原文展示
+                # 无 Key：退化为一次性检索 + 原文展示（QQ 模式检索 QQ 本地表）
                 since = int(time.time()) - hours * 3600 if (chat and hours) else None
-                hits, refs = deps["quick_retrieve"](con, q, chat, since, hours=hours)
+                refs = []
+                if platform == "qq":
+                    import qq_local as _ql
+                    try:
+                        refs = [{"n": i, "id": x.get("id") or 0,
+                                 "chat": x.get("conv") or "",
+                                 "chat_name": x.get("conv_name") or "",
+                                 "ts": x.get("ts") or 0,
+                                 "sender_name": x.get("who") or "",
+                                 "snippet": (x.get("snippet") or x.get("text") or "")[:160],
+                                 "text": (x.get("snippet") or x.get("text") or "")[:600],
+                                 "ctx": []}
+                                for i, x in enumerate(
+                                    _ql.search(con, q, 8, chat), 1)]
+                    except Exception:
+                        refs = []
+                else:
+                    _, refs = deps["quick_retrieve"](con, q, chat, since, hours=hours)
                 yield _sse({"type": "refs", "refs": refs})
                 body = "**[检索模式：未配置 API Key]**" + chr(10) + chr(10) + (chr(10) + chr(10)).join(
                     r.get("text", "")[:600] for r in refs[:4])
                 sid = deps["save_qa"](con, scope_key, q, body, refs, "retrieval", None,
-                                      session_id, new_session, scope_name)
+                                      session_id, new_session, scope_name,
+                                      platform=platform)
                 yield _sse({"type": "delta", "text": body})
                 yield _sse({"type": "done", "session_id": sid, "mode": "retrieval"})
                 return
@@ -251,7 +279,10 @@ def make_stream(payload: dict, deps: dict):
             # 列举/查找/统计类问题（_need_tools）跳过快速路径：最近记录不足以回答，
             # 试探只会得到「没有提到」的错误答案，直接让 Agent 全库检索。
             # 探索模式（explorer）同样跳过：用户明确要多轮深挖
-            if chat and conf["llm"].get("api_key") and not _need_tools(q) and not explorer:
+            # QQ 平台也跳过：最近记录/链接/文件摘录都查微信表，QQ 会话命中不了，
+            # QQ 的会话内上下文由 Agent 预注入【最近 QQ 记录】承担
+            if (chat and platform != "qq" and conf["llm"].get("api_key")
+                    and not _need_tools(q) and not explorer):
                 import agent as agent_mod
                 rrefs: list = []
                 rc = None
@@ -289,7 +320,7 @@ def make_stream(payload: dict, deps: dict):
                         extra += (chr(10) + chr(10) + "最近分享的文件（内容摘录）："
                                  + chr(10) + fblock["text"])
                     msgs = [
-                        {"role": "system", "content":
+                        {"role": "system", "content": agent_mod._platform_text(
                          "你是微信记录助手。系统会给出该会话最近的真实发言（含图片OCR/语音视频转写），"
                          "每行行首 [n] 是引用编号"
                          "（可能还附有已解析文章/文件的内容摘录，同样有编号，可引用）。"
@@ -302,7 +333,7 @@ def make_stream(payload: dict, deps: dict):
                          "绝对不要凭最近记录回答「没有提到/没有找到」——你没有检索过全库，"
                          "那不是你能下的结论**。"
                          "列举类问题（问有哪些）只能基于最近记录作答时，"
-                         "注明「基于最近记录，更早内容未检索」。"},
+                         "注明「基于最近记录，更早内容未检索」。", platform)},
                         {"role": "system", "content": f"当前时间：{_now_text()}；"
                                                       f"会话：{cname}"},
                         {"role": "user", "content":
@@ -331,7 +362,8 @@ def make_stream(payload: dict, deps: dict):
                     if not need_tools:
                         answer = strip_ref_footer(agent_mod.strip_dsml("".join(acc)))
                         sid = deps["save_qa"](con, scope_key, q, answer, rrefs, "fast",
-                                              None, session_id, new_session, scope_name)
+                                              None, session_id, new_session, scope_name,
+                                              platform=platform)
                         # done 带完整答案：客户端以其为准，短答案/丢增量也保证显示完整
                         yield _sse({"type": "done", "session_id": sid, "mode": "fast",
                                     "answer": answer})
@@ -348,12 +380,33 @@ def make_stream(payload: dict, deps: dict):
             import agent as agent_mod
             qname = None
             if chat:
-                row = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) "
-                                  "FROM chat WHERE username=?", (chat,)).fetchone()
-                qname = row[0] if row else chat
+                if platform == "qq":
+                    row = con.execute("SELECT name FROM qq_chat WHERE conv=?",
+                                      (chat,)).fetchone()
+                    qname = row[0] if row else chat
+                else:
+                    row = con.execute("SELECT COALESCE(NULLIF(display_name,''), username) "
+                                      "FROM chat WHERE username=?", (chat,)).fetchone()
+                    qname = row[0] if row else chat
             qn = []
             for qid in quoted[:10]:
-                r = con.execute("SELECT * FROM message WHERE id=?", (int(qid),)).fetchone()
+                raw = str(qid)
+                if raw.startswith("qq-"):
+                    raw = raw[3:]
+                try:
+                    qid_i = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if platform == "qq":
+                    # QQ 引用的 id 指向 qq_local_message，不能拿微信 message 表去查
+                    r = con.execute("SELECT id,ts,sender_name,is_sender,text "
+                                    "FROM qq_local_message WHERE id=?", (qid_i,)).fetchone()
+                    if r:
+                        qn.append({"id": r[0], "ts": r[1],
+                                   "who": "我" if r[3] else (r[2] or ""),
+                                   "text": (r[4] or "")[:400]})
+                    continue
+                r = con.execute("SELECT * FROM message WHERE id=?", (qid_i,)).fetchone()
                 if r:
                     b = agent_mod._msg_brief(con, r)
                     qn.append({"id": b["id"], "ts": b["ts"], "who": b["who"],
@@ -366,7 +419,7 @@ def make_stream(payload: dict, deps: dict):
                     result_holder.update(agent_mod.run(
                         q, conf, chat_ctx=chat, chat_name=qname,
                         quoted=qn, history=history, on_event=on_event,
-                        explorer=explorer))
+                        explorer=explorer, platform=platform))
                 except Exception as exc:      # noqa: BLE001
                     result_holder["error"] = str(exc)
 
@@ -394,7 +447,7 @@ def make_stream(payload: dict, deps: dict):
             yield _sse({"type": "refs", "refs": trefs})
             sid = deps["save_qa"](con, scope_key, q, answer, trefs, "agent",
                                   result_holder.get("trace"), session_id, new_session,
-                                  scope_name)
+                                  scope_name, platform=platform)
             # 非流式产出也逐段吐出，保持"打字机"观感
             step = 60
             for i in range(0, len(answer), step):
@@ -412,7 +465,7 @@ def make_stream(payload: dict, deps: dict):
 
 
 def _answer(conf, deps, question, chat, ctx_lines, refs, history, new_session, session_id,
-            chat_key, mode, scope_name=None):
+            chat_key, mode, scope_name=None, platform: str = "wechat"):
     """流式生成回答并落库。"""
     import agent as agent_mod
     con = deps["db"]()
@@ -421,18 +474,18 @@ def _answer(conf, deps, question, chat, ctx_lines, refs, history, new_session, s
         body = "**[检索模式：未配置 API Key]**\n\n" + "\n\n".join(c[:500] for c in ctx_lines[:5])
         yield _sse({"type": "delta", "text": body})
         sid = deps["save_qa"](con, chat_key, question, body, refs, "retrieval", None,
-                              session_id, new_session, scope_name)
+                              session_id, new_session, scope_name, platform=platform)
         yield _sse({"type": "done", "session_id": sid, "mode": "retrieval"})
         con.close()
         return
 
     scope_txt = "当前会话" if chat else "全部聊天记录"
-    now_txt = agent_mod.SYSTEM_PROMPT.splitlines()[0]
     sys_content = ("你是用户的微信记录助手。仅依据给出的聊天记录上下文回答；"
                    "引用时标注 [编号]；**不要在答案末尾输出「引用来源」清单**"
                    "（正文里的 [n] 会被界面渲染成可点击引用）；"
                    "没有答案就直说没找到，不要编造。"
                    "用简洁的 Markdown（列表/表格）组织答案。")
+    sys_content = agent_mod._platform_text(sys_content, platform)
     msgs = [{"role": "system", "content": sys_content},
             {"role": "system", "content": f"当前时间：{_now_text()}；检索范围：{scope_txt}"}]
     for h in (history or [])[-3:]:
@@ -455,7 +508,7 @@ def _answer(conf, deps, question, chat, ctx_lines, refs, history, new_session, s
         yield _sse({"type": "error", "message": f"模型调用失败：{exc}"})
     full = "".join(answer_parts)
     sid = deps["save_qa"](con, chat_key, question, full, refs, mode, None,
-                          session_id, new_session, scope_name)
+                          session_id, new_session, scope_name, platform=platform)
     yield _sse({"type": "done", "session_id": sid, "mode": mode})
     con.close()
 

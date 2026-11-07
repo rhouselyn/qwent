@@ -4,21 +4,24 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#07c160">
-<title>微信知识助手</title>
-<link rel="stylesheet" href="style.css?v=60">
+<link rel="icon" id="appIcon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='64'%20height='64'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2307c160'/%3E%3Ctext%20x='32'%20y='43'%20text-anchor='middle'%20font-size='34'%20font-family='Microsoft%20YaHei,sans-serif'%20font-weight='700'%20fill='white'%3E%E5%BE%AE%3C/text%3E%3C/svg%3E">
+<title>Qwent</title>
+<link rel="stylesheet" href="style.css?v=65">
+<link rel="stylesheet" href="qq.css?v=12">
 </head>
 <body>
 <div class="app">
   <!-- 左侧功能栏 -->
   <nav class="rail" aria-label="主导航">
-    <div class="avatar" aria-label="微信知识助手">微</div>
-    <button class="rail-btn active" data-view="chats" title="聊天" aria-label="聊天">💬</button>
-    <button class="rail-btn" data-view="contacts" title="通讯录" aria-label="通讯录">👥</button>
-    <button class="rail-btn" data-view="files" title="文件" aria-label="文件">📁</button>
-    <button class="rail-btn" data-view="links" title="链接 / 公众号" aria-label="链接 / 公众号">📰</button>
-    <button class="rail-btn" data-view="moments" title="朋友圈" aria-label="朋友圈">🌄</button>
+    <div class="avatar" id="brandLogo" role="button" tabindex="0"
+         aria-label="Qwent" title="点击切换到 QQ">微</div>
+    <button class="rail-btn active" data-view="chats" title="聊天" aria-label="聊天"><span class="rail-ico">💬</span></button>
+    <button class="rail-btn" data-view="contacts" title="通讯录" aria-label="通讯录"><span class="rail-ico">👥</span></button>
+    <button class="rail-btn" data-view="files" title="文件" aria-label="文件"><span class="rail-ico">📁</span></button>
+    <button class="rail-btn" data-view="links" title="链接 / 公众号" aria-label="链接 / 公众号"><span class="rail-ico">📰</span></button>
+    <button class="rail-btn" data-view="moments" title="朋友圈" aria-label="朋友圈"><span class="rail-ico">🌄</span></button>
     <div class="rail-spacer"></div>
-    <button class="rail-btn" data-view="settings" title="设置" aria-label="设置">⚙️</button>
+    <button class="rail-btn" data-view="settings" title="设置" aria-label="设置"><span class="rail-ico">⚙️</span></button>
   </nav>
 
   <!-- 中栏列表 -->
@@ -27,7 +30,10 @@
       <label class="sr-only" for="searchInput">搜索会话或消息</label>
       <input id="searchInput" type="search" autocomplete="off" placeholder="搜索会话 / 全局搜消息（回车）">
     </div>
+    <!-- QQ 模式「消息」页的视图切换：固定在列表上方，切到知识库记录后仍可切回 -->
+    <div id="qqViewTabs" class="qq-view-tabs" style="display:none"></div>
     <div id="sessionList" class="session-list"></div>
+    <div id="qqList" class="session-list" style="display:none"></div>
     <div id="resultList" class="session-list" style="display:none"></div>
     <div id="contactList" class="session-list" style="display:none"></div>
     <div id="fileList" class="session-list" style="display:none"></div>
@@ -42,7 +48,8 @@
   <main class="chat-pane">
     <div id="chatEmpty" class="chat-empty">
       <div class="logo-big">微</div>
-      <h2>微信知识助手</h2>
+      <h2>Qwent</h2>
+      <p class="qwent-sub">QQ · WeChat Agent — 两边的记录都能分开问</p>
       <p>选择一个会话浏览记录，或在置顶的 <b>✦ AI 助手</b> 里全局提问</p>
       <p class="hint" id="statusHint"></p>
     </div>
@@ -158,7 +165,9 @@
   </main>
 </div>
 <div id="toast" class="toast"></div>
-<script src="app.js?v=104"></script>
-<script src="stream_qa.js?v=19"></script>
+<script src="platform.js?v=4"></script>
+<script src="app.js?v=138"></script>
+<script src="settings_bot.js?v=4"></script>
+<script src="stream_qa.js?v=20"></script>
 </body>
 </html>

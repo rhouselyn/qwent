@@ -188,6 +188,7 @@ async function askStream(question) {
         body: JSON.stringify({
           scope: sc ? sc.key : (chat || "assistant"),
           name: question.slice(0, 24),
+          platform: (window.Platform && Platform.get()) || "wechat",
         }),
       });
       aiState.currentSession = r.id;
@@ -219,6 +220,7 @@ async function askStream(question) {
         scope: sc ? sc.key : (chat || "assistant"),
         scope_name: sc ? sc.name : "",
         session_id: aiState.currentSession,
+        platform: (window.Platform && Platform.get()) || "wechat",
         thinking: $("#thinkToggle") ? $("#thinkToggle").checked : undefined,
         explorer: $("#exploreToggle") ? $("#exploreToggle").checked : false,
         quoted: (fileCtx || linkCtx) ? [] : state.quoted.map(q => q.id),

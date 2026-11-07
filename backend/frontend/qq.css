@@ -1,0 +1,391 @@
+/* QQ 皮肤：左上角 logo 切到「QQ」时生效（html[data-platform="qq"]）。
+ * 只在样式层覆盖品牌色与形状，不改任何 DOM 结构，功能与微信模式完全一致。
+ * 无公众号、无频道，朋友圈对应 QQ 空间。
+ */
+html[data-platform="qq"] {
+  --green: #12b7f5;
+  --green-deep: #0a8edc;
+  --ink: #1f2733;
+  --muted: #8a94a2;
+  --line: #e3eaf2;
+  --panel: #ffffff;
+  --canvas: #f2f6fb;
+  --qq-blue: #12b7f5;
+  --qq-blue-deep: #0a8edc;
+  --qq-blue-soft: #e6f5ff;
+}
+
+/* ---------- 左侧导航：QQ 蓝 + 圆形头像 ---------- */
+html[data-platform="qq"] .rail {
+  background: linear-gradient(180deg, #159ee8 0%, #0a72c6 100%);
+  box-shadow: 2px 0 14px rgba(10, 114, 198, .16);
+}
+html[data-platform="qq"] .rail .avatar {
+  border-radius: 50%;
+  background: linear-gradient(145deg, #ffffff, #d9f1ff);
+  color: #0a8edc;
+  font-family: "Trebuchet MS", "Microsoft YaHei", sans-serif;
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: -.5px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .16);
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+html[data-platform="qq"] .rail .avatar:hover {
+  transform: rotate(-8deg) scale(1.06);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .24);
+}
+/* 蓝色导航上原来的彩色/灰色 emoji 太暗：只把图标文字做成白色剪影，
+   不作用于按钮本身，避免把 active 的半透明背景也一起过滤掉。 */
+html[data-platform="qq"] .rail-btn { color: rgba(255, 255, 255, .88); opacity: .9; }
+html[data-platform="qq"] .rail-btn .rail-ico {
+  display: inline-block;
+  filter: brightness(0) invert(1);
+  opacity: .9;
+}
+html[data-platform="qq"] .rail-btn.active .rail-ico,
+html[data-platform="qq"] .rail-btn:hover .rail-ico { opacity: 1; }
+html[data-platform="qq"] .rail-btn.active {
+  background: rgba(255, 255, 255, .22);
+  box-shadow: inset 3px 0 0 #fff, 0 2px 8px rgba(0, 0, 0, .08);
+  color: #fff;
+  opacity: 1;
+}
+html[data-platform="qq"] .rail-btn:hover { background: rgba(255, 255, 255, .12); opacity: 1; }
+html[data-platform="qq"] .logo-big {
+  border-radius: 50%;
+  background: linear-gradient(145deg, #21c0ff, #0a8edc);
+  color: #fff;
+  font-family: "Trebuchet MS", "Microsoft YaHei", sans-serif;
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -2px;
+  box-shadow: 0 14px 34px rgba(18, 183, 245, .3);
+}
+
+/* ---------- 列表 / 会话 ---------- */
+html[data-platform="qq"] .list-pane { background: #f7fafd; border-right: 1px solid #e3eaf2; }
+html[data-platform="qq"] .searchbar input:focus { box-shadow: 0 0 0 2px rgba(18, 183, 245, .22); }
+html[data-platform="qq"] .session-item.active {
+  background: #e2f3ff;
+  box-shadow: inset 3px 0 0 var(--qq-blue);
+}
+html[data-platform="qq"] .session-item:hover { background: #eef7ff; }
+html[data-platform="qq"] .session-item.ai {
+  background: linear-gradient(90deg, #e6f5ff, #f7fbff);
+}
+html[data-platform="qq"] .session-item.ai .ava {
+  background: linear-gradient(135deg, #12b7f5, #6ad6ff);
+}
+html[data-platform="qq"] .session-item.ai .badge {
+  color: #0a8edc; border: 1px solid rgba(18, 183, 245, .4);
+}
+html[data-platform="qq"] .session-item .ava,
+html[data-platform="qq"] .msg .ava,
+html[data-platform="qq"] .ava { border-radius: 50%; }
+html[data-platform="qq"] .msg.right .ava { background: #12b7f5; }
+html[data-platform="qq"] #settingsNav .sf-item.active {
+  background: #e2f3ff; color: #0a72c6; box-shadow: inset 3px 0 0 var(--qq-blue);
+}
+html[data-platform="qq"] .sf-item.active .sf-item-icon {
+  background: #cbeaff; color: #0a72c6;
+}
+
+/* ---------- 聊天区与气泡：QQ 蓝底白字 ---------- */
+html[data-platform="qq"] .chat-pane,
+html[data-platform="qq"] .chat-column { background: #f2f6fb; }
+html[data-platform="qq"] .chat-header { background: #fff; border-bottom-color: #e3eaf2; }
+html[data-platform="qq"] .bubble {
+  border-radius: 14px;
+  border: 1px solid rgba(16, 40, 70, .06);
+  box-shadow: 0 1px 2px rgba(16, 40, 70, .05);
+}
+html[data-platform="qq"] .msg.left .bubble { background: #fff; border-bottom-left-radius: 4px; }
+html[data-platform="qq"] .msg.right .bubble {
+  background: linear-gradient(180deg, #22baff 0%, #0a9bec 100%);
+  color: #fff;
+  border-color: rgba(10, 142, 220, .35);
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 2px 6px rgba(10, 142, 220, .18);
+}
+html[data-platform="qq"] .msg.right .bubble .voice-text,
+html[data-platform="qq"] .msg.right .bubble .card .d,
+html[data-platform="qq"] .msg.right .bubble .card .u { color: rgba(255, 255, 255, .82); }
+html[data-platform="qq"] .msg.right .bubble.card .go { color: #fff; }
+html[data-platform="qq"] .msg.right .bubble .quote-main a { color: #fff; }
+html[data-platform="qq"] .qa-turn .q {
+  background: linear-gradient(180deg, #22baff, #0a9bec);
+  color: #fff;
+  border-radius: 14px;
+  border-bottom-right-radius: 4px;
+}
+html[data-platform="qq"] .assistant-pane .qa-turn .q {
+  background: linear-gradient(180deg, #22baff, #0a9bec); color: #fff;
+}
+
+/* ---------- 系统提示：QQ 是居中灰字，不是微信的胶囊 ---------- */
+html[data-platform="qq"] .sys {
+  background: transparent;
+  border-radius: 0;
+  padding: 2px 0;
+  color: #9aa6b5;
+  font-size: 12px;
+  letter-spacing: .2px;
+  margin: 12px auto;
+}
+html[data-platform="qq"] .recall-tag {
+  color: #f07c5a;
+  font-size: 11px;
+}
+
+/* ---------- 引用他人消息：QQ 为主气泡 + 下方灰色引用条（左竖线） ---------- */
+html[data-platform="qq"] .bubble.quote-bubble { padding: 8px 12px; }
+html[data-platform="qq"] .bubble.quote-bubble .quote-ref { display: none; }
+html[data-platform="qq"] .qq-reply {
+  display: block;
+  margin: 5px 2px 0;
+  padding: 2px 0 2px 9px;
+  border-left: 3px solid #b9c9d8;
+  color: #8a94a2;
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 460px;
+  cursor: pointer;
+  text-align: left;
+}
+html[data-platform="qq"] .msg.right .qq-reply { margin-left: auto; text-align: left; }
+html[data-platform="qq"] .qq-reply .quote-ref-who { color: #6f8499; font-weight: 600; }
+html[data-platform="qq"] .qq-reply .quote-ref-text {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+html[data-platform="qq"] .qq-reply.expanded .quote-ref-text {
+  display: block; overflow: visible;
+}
+html[data-platform="qq"] .qq-reply:hover { border-left-color: var(--qq-blue); }
+
+/* ---------- QQ 消息附件：图片、语音、视频、文件 ---------- */
+html[data-platform="qq"] .qq-media {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+html[data-platform="qq"] .qq-img {
+  display: block;
+  max-width: min(260px, 100%);
+  max-height: 260px;
+  border-radius: 10px;
+  cursor: zoom-in;
+  border: 1px solid rgba(16, 40, 70, .08);
+}
+html[data-platform="qq"] .qq-audio { display: block; width: 240px; max-width: 100%; height: 32px; }
+html[data-platform="qq"] .qq-video {
+  display: block;
+  width: 260px;
+  max-width: 100%;
+  border-radius: 10px;
+  background: #0d1b2a;
+}
+html[data-platform="qq"] .qq-file {
+  display: inline-flex;
+  align-items: center;
+  max-width: 300px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: rgba(16, 40, 70, .08);
+  color: #34495e;
+  font-size: 12px;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-platform="qq"] .msg.right .bubble .qq-file {
+  background: rgba(255, 255, 255, .2);
+  color: #fff;
+}
+html[data-platform="qq"] .qq-file:hover { text-decoration: underline; }
+html[data-platform="qq"] .msg.qq-focus .bubble {
+  box-shadow: 0 0 0 2px rgba(18, 183, 245, .7), 0 2px 8px rgba(10, 142, 220, .2);
+}
+html[data-platform="qq"] .qq-section {
+  padding: 12px 14px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  color: #8a94a2;
+}
+
+/* ---------- 输入区 / 工具栏 / 按钮 ---------- */
+html[data-platform="qq"] .composer-wrap,
+html[data-platform="qq"] .composer { background: #fff; border-top-color: #e3eaf2; }
+html[data-platform="qq"] .composer button,
+html[data-platform="qq"] .settings button:not(.ghost),
+html[data-platform="qq"] #sendBtn,
+html[data-platform="qq"] #assistantSend {
+  background: linear-gradient(135deg, #1ab6ff, #0a8edc);
+  border-color: #0a8edc;
+  color: #fff;
+  box-shadow: 0 4px 10px rgba(10, 142, 220, .16);
+}
+html[data-platform="qq"] .composer button:disabled { background: #a9d9f2; }
+html[data-platform="qq"] .composer button:hover:not(:disabled) { filter: brightness(1.05); }
+html[data-platform="qq"] .ghost-btn,
+html[data-platform="qq"] .settings button.ghost {
+  background: #fff !important;
+  color: #0a8edc !important;
+  border: 1px solid rgba(18, 183, 245, .5) !important;
+}
+html[data-platform="qq"] .input-shell { border-color: #d7e6f3; }
+html[data-platform="qq"] .input-shell:focus-within { box-shadow: 0 0 0 2px rgba(18, 183, 245, .16); }
+html[data-platform="qq"] .mode-segment label:has(input:checked),
+html[data-platform="qq"] .mode-segment.slim-segment label:has(input:checked) {
+  color: #0a72c6; background: #e6f5ff;
+}
+html[data-platform="qq"] .mode-segment label:has(input:checked)::before {
+  border-color: var(--qq-blue); background: var(--qq-blue); box-shadow: inset 0 0 0 2px #e6f5ff;
+}
+html[data-platform="qq"] .tool-pill:has(input:checked),
+html[data-platform="qq"] .tool-pill-toggle:has(input:checked) {
+  color: #0a72c6; background: #e6f5ff; border-color: #a8d9f5;
+}
+html[data-platform="qq"] .tool-pill-toggle:has(input:checked)::before { color: var(--qq-blue); }
+html[data-platform="qq"] .scope-pill .scope-toggle input,
+html[data-platform="qq"] .scope-toggle input,
+html[data-platform="qq"] .composer-wrap input[type="checkbox"] { accent-color: var(--qq-blue); }
+html[data-platform="qq"] .scope-bar .scope-toggle:has(input:checked),
+html[data-platform="qq"] .scope-pill:has(input:checked) { color: #0a72c6; }
+html[data-platform="qq"] .quote-block { background: #f0f9ff; border-left-color: var(--qq-blue); }
+html[data-platform="qq"] .quote-chip { border-color: #a8d9f5; color: #0a72c6; }
+html[data-platform="qq"] .quote-x { color: #6f8499; }
+
+/* ---------- 设置 / 状态 / 链接 / 朋友圈 ---------- */
+html[data-platform="qq"] .settings-status-pill.success,
+html[data-platform="qq"] .job-state.running,
+html[data-platform="qq"] .file-state.ok,
+html[data-platform="qq"] .link-badge.ok {
+  color: #0a72c6; background: #e6f5ff;
+}
+html[data-platform="qq"] .settings-stat b,
+html[data-platform="qq"] .settings-privacy b { color: #0a72c6; }
+html[data-platform="qq"] .msg.ok { color: #0a72c6; }
+html[data-platform="qq"] .form-row input:focus,
+html[data-platform="qq"] .settings-field input:focus { border-color: var(--qq-blue); }
+html[data-platform="qq"] .switch-row input:checked + .switch-track { background: var(--qq-blue); border-color: var(--qq-blue); }
+html[data-platform="qq"] .drawer-scope,
+html[data-platform="qq"] .ref-jump,
+html[data-platform="qq"] .load-more:hover,
+html[data-platform="qq"] .back-btn:hover,
+html[data-platform="qq"] .sns-local { color: #0a8edc; }
+html[data-platform="qq"] .bubble.card .u,
+html[data-platform="qq"] .sns-c-head,
+html[data-platform="qq"] .sns-comment .who,
+html[data-platform="qq"] .sns-link-go,
+html[data-platform="qq"] .rec-who,
+html[data-platform="qq"] .link-plat { color: #3a86c8; }
+html[data-platform="qq"] .sns-link:hover { background: #eef8ff; border-color: var(--qq-blue); }
+html[data-platform="qq"] .dots i,
+html[data-platform="qq"] .live i { background: var(--qq-blue); }
+html[data-platform="qq"] .dots { background: var(--qq-blue); }
+html[data-platform="qq"] .op-live,
+html[data-platform="qq"] .ref-chip { color: #0a8edc; }
+html[data-platform="qq"] .pv-progress i { background: var(--qq-blue); }
+html[data-platform="qq"] .result-item:focus-visible,
+html[data-platform="qq"] .session-item:focus-visible { outline-color: var(--qq-blue); }
+html[data-platform="qq"] .tag { color: #0a8edc; border-color: rgba(18, 183, 245, .35); }
+html[data-platform="qq"] .settings-side-card { background: #f4faff; border-color: #dceefb; }
+html[data-platform="qq"] .settings-card { border-color: #e3eaf2; }
+html[data-platform="qq"] .settings-page-head h2 { color: #17324a; }
+html[data-platform="qq"] .settings-card-icon { background: #e6f5ff; color: #0a8edc; }
+html[data-platform="qq"] .settings-actions { border-top-color: #e3eaf2; }
+/* 设置页按钮在 style.css 里由 #settingsFull 选择器固定成微信绿，QQ 模式要盖回蓝色 */
+html[data-platform="qq"] #settingsFull .settings-actions button:first-child,
+html[data-platform="qq"] #settingsFull .settings-action-card button,
+html[data-platform="qq"] #settingsFull .job-row button:not(.ghost) {
+  color: #fff;
+  background: linear-gradient(135deg, #1ab6ff, #0a8edc);
+  border-color: #0a8edc;
+  box-shadow: 0 4px 10px rgba(10, 142, 220, .16);
+}
+html[data-platform="qq"] #settingsFull .settings-actions button:first-child:hover,
+html[data-platform="qq"] #settingsFull .settings-action-card button:hover,
+html[data-platform="qq"] #settingsFull .job-row button:not(.ghost):hover {
+  box-shadow: 0 6px 14px rgba(10, 142, 220, .24);
+}
+html[data-platform="qq"] #settingsFull .settings-actions button:first-child:disabled,
+html[data-platform="qq"] #settingsFull .settings-action-card button:disabled,
+html[data-platform="qq"] #settingsFull .job-row button:not(.ghost):disabled {
+  background: #a9d9f2;
+  border-color: #a9d9f2;
+  box-shadow: none;
+}
+html[data-platform="qq"] #settingsFull .settings-actions button.ghost,
+html[data-platform="qq"] #settingsFull .job-row button.ghost,
+html[data-platform="qq"] #settingsFull .rescan-actions button {
+  color: #0a8edc;
+  background: #fff;
+  border-color: rgba(18, 183, 245, .5);
+}
+html[data-platform="qq"] #settingsFull .settings-actions button.ghost:hover,
+html[data-platform="qq"] #settingsFull .job-row button.ghost:hover,
+html[data-platform="qq"] #settingsFull .rescan-actions button:hover {
+  color: #0a72c6;
+  background: #eff9ff;
+  border-color: #8ed3f5;
+}
+
+/* QQ 模式里不出现公众号 / 频道入口：保险起见隐藏任何残留 */
+html[data-platform="qq"] [data-qq-hide] { display: none !important; }
+
+/* 防撤回：原消息保留原文 + 「已撤回」徽标；撤回提示为居中灰条 */
+.qq-bubble.recalled, .bubble.recalled { opacity: .78; }
+.qq .recall-badge, .recall-badge {
+  display: inline-block; margin-left: 8px; padding: 1px 7px;
+  border-radius: 4px; font-size: 11px; vertical-align: 1px;
+  color: #b45309; background: rgba(245, 158, 11, .12);
+  border: 1px solid rgba(245, 158, 11, .25);
+}
+.qq-recall-tip { color: #8a8a8a; font-size: 12px; text-align: center; margin: 6px 0; }
+
+/* 置顶：背景加深表示（不显示针形图标），选中时更深 */
+html[data-platform="qq"] #qqConvList .session-item.pinned {
+  background: rgba(10, 142, 220, .07);
+}
+html[data-platform="qq"] #qqConvList .session-item.pinned:hover {
+  background: rgba(10, 142, 220, .12);
+}
+html[data-platform="qq"] #qqConvList .session-item.pinned.active {
+  background: rgba(10, 142, 220, .18);
+}
+html[data-platform="qq"] #qqConvList .session-item.pinned .name { font-weight: 600; }
+
+/* 图片未缓存：灰色占位，别让气泡空着 */
+.qq-img-missing {
+  min-width: 160px; padding: 14px 16px; border-radius: 8px;
+  background: rgba(16, 40, 70, .05); color: #7b8794;
+  font-size: 12px; text-align: center; border: 1px dashed rgba(16, 40, 70, .16);
+}
+.qq-img-missing {
+  min-width: 160px; padding: 14px 16px; border-radius: 8px;
+  background: rgba(16, 40, 70, .05); color: #7b8794;
+  font-size: 12px; text-align: center; border: 1px dashed rgba(16, 40, 70, .16);
+}
+.qq-img-missing small { display: block; margin-top: 5px; font-size: 11px; opacity: .75; }
+.qq-img-fetch { margin: 6px 0 2px; font-size: 11px; padding: 2px 10px; }
+
+/* QQ 分享链接 / 小程序卡片 */
+.qq-link-card {
+  display: block; margin-top: 6px; padding: 8px 10px; border-radius: 8px;
+  background: #fff; border: 1px solid rgba(16, 40, 70, .1);
+  text-decoration: none; color: #1f2937; max-width: 280px;
+}
+.qq-link-card b {
+  display: inline-block; font-size: 11px; font-weight: 600; color: #0a8edc;
+  background: rgba(10, 142, 220, .1); border-radius: 4px; padding: 1px 6px; margin-bottom: 4px;
+}
+.qq-link-card span { display: block; font-size: 13px; line-height: 1.45; }
+.qq-link-card small { display: block; margin-top: 3px; font-size: 11px; color: #7b8794; line-height: 1.4; }
+.qq-link-card:hover { border-color: rgba(10, 142, 220, .35); }
+html[data-platform="qq"] .msg.right .qq-link-card { color: #1f2937; }
