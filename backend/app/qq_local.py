@@ -1427,6 +1427,59 @@ def set_pinned(con: sqlite3.Connection, conv: str, pinned: bool) -> None:
     con.commit()
 
 
+def _lookup_media(md5: str, filename: str = "", account: Path | None = None) -> str:
+    """按 md5/文件名在 QQ 缓存目录里找一张图（含 Ori/Thumb/OriTemp）。
+
+    消息里存的 path 是导入那一刻的快照；QQ 之后才下载的图不会被写进去
+    （增量导入 DO NOTHING 不覆盖），所以读的时候要再查一次。
+    """
+    md5 = (md5 or "").lower()
+    if not md5 and not filename:
+        return ""
+    cache = _MEDIA_IDX_CACHE.get("idx") or {}
+    if cache:
+        hit = (cache.get(md5) if md5 else "") or (
+            cache.get(filename.lower()) if filename else "")
+        if hit:
+            return hit
+    try:
+        acct = account or pick_account()
+    except Exception:
+        return ""
+    base = acct / "nt_qq" / "nt_data" / "Pic"
+    if not base.is_dir():
+        return ""
+    from datetime import datetime as _dt
+    recent = []
+    try:
+        for d in sorted(base.iterdir(), reverse=True)[:6]:
+            if not d.is_dir():
+                continue
+            for sub in ("Ori", "Thumb", "OriTemp", "ThumbTemp"):
+                q = d / sub
+                if q.is_dir():
+                    recent.append(q)
+    except OSError:
+        return ""
+    for d in recent:
+        try:
+            hit = None
+            for f in d.iterdir():
+                name = f.name.lower()
+                if md5 and name.startswith(md5):
+                    # 优先原图（Ori），缩略图次之
+                    if d.name == "Ori" or d.name == "OriTemp":
+                        return str(f)
+                    hit = hit or str(f)
+                elif filename and name == filename.lower():
+                    hit = hit or str(f)
+            if hit:
+                return hit
+        except OSError:
+            continue
+    return ""
+
+
 def hydrate_media(rows: list[dict], account: Path | None = None) -> list[dict]:
     """用媒体索引补齐 parsed.media 里缺失的本地路径。
 
@@ -1464,8 +1517,10 @@ def hydrate_media(rows: list[dict], account: Path | None = None) -> list[dict]:
         if not isinstance(parsed, dict):
             continue
         for m in (parsed.get("media") or []):
-            if m.get("path"):
+            if m.get("path") and Path(m["path"]).is_file():
                 continue
+            if m.get("path"):
+                m["path"] = ""          # 快照路径已失效，重新查
             key = (m.get("md5") or "").lower()
             if key and key in cache:
                 m["path"] = cache[key]
@@ -1473,6 +1528,13 @@ def hydrate_media(rows: list[dict], account: Path | None = None) -> list[dict]:
             fn = (m.get("filename") or "").lower()
             if fn:
                 hit = cache.get(fn) or cache.get(fn.rsplit(".", 1)[0])
+                if hit:
+                    m["path"] = hit
+            if not m.get("path") and m.get("kind") in ("image", "video", "voice"):
+                # 索引没命中但图片可能已经下载到缓存里（QQ 之后才拉下来）：
+                # 按 md5 直接扫最近几个月的 Ori/Thumb 目录
+                hit = _lookup_media(m.get("md5") or "", m.get("filename") or "",
+                                    account)
                 if hit:
                     m["path"] = hit
             if not m.get("path"):

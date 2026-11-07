@@ -207,6 +207,13 @@ async function askStream(question) {
     if (streamState.controller) streamState.controller.abort();
   };
 
+  // 提问范围：全局助手时按下拉选择决定查微信/QQ/两边；具体会话内始终只查当前平台
+  const uiPlatform = (window.Platform && Platform.get()) || "wechat";
+  let askPlatform = uiPlatform;
+  if (isAssistant && isAssistant() && !fileCtx && !linkCtx && !chat) {
+    const pf = typeof assistantPlatformValue === "function" ? assistantPlatformValue() : "auto";
+    askPlatform = (pf === "both" || pf === "wechat" || pf === "qq") ? pf : uiPlatform;
+  }
   streamState.busy = true;
   streamState.controller = new AbortController();
   $("#sendBtn") && ($("#sendBtn").disabled = true);
@@ -220,7 +227,8 @@ async function askStream(question) {
         scope: sc ? sc.key : (chat || "assistant"),
         scope_name: sc ? sc.name : "",
         session_id: aiState.currentSession,
-        platform: (window.Platform && Platform.get()) || "wechat",
+        platform: askPlatform,
+        ui_platform: uiPlatform,
         thinking: $("#thinkToggle") ? $("#thinkToggle").checked : undefined,
         explorer: $("#exploreToggle") ? $("#exploreToggle").checked : false,
         quoted: (fileCtx || linkCtx) ? [] : state.quoted.map(q => q.id),

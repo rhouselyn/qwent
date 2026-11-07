@@ -1106,7 +1106,8 @@ def api_ask(payload: dict):
     use_agent = payload.get("agent", True)
     want_new_session = bool(payload.get("new_session"))
     session_id = payload.get("session_id")
-    platform = payload.get("platform") if payload.get("platform") in ("wechat", "qq") else "wechat"
+    platform = (payload.get("platform")
+                if payload.get("platform") in ("wechat", "qq", "both") else "wechat")
     if not q:
         raise HTTPException(400, "空问题")
     con = db()
@@ -1460,7 +1461,8 @@ def api_ai_session_new(payload: dict):
     ensure_qa_table(con)
     scope = payload.get("scope") or "assistant"
     name = (payload.get("name") or "").strip()
-    platform = payload.get("platform") if payload.get("platform") in ("wechat", "qq") else "wechat"
+    platform = (payload.get("platform")
+                if payload.get("platform") in ("wechat", "qq", "both") else "wechat")
     sid = get_or_create_session(con, scope, new=True, name=name, platform=platform)
     con.commit()
     return {"id": sid, "scope": scope, "name": name, "platform": platform}
@@ -2950,18 +2952,66 @@ def api_image(chat: str, id: int):
     raise HTTPException(415, f"图片无法解码（{last_err}）")
 
 
+_media_refresh_lock = threading.Lock()
+_media_refresh_at = [0.0]
+
+
+def _refresh_media_dbs(force: bool = False) -> None:
+    """按需解密 media_*.db（语音数据在 VoiceInfo 里）。
+
+    启动后只在首次导入时解过 media 库；之后的语音全在源库 WAL 里没进来，
+    播不出来就是这里缺了。这里按指纹增量解密，30 秒内最多做一次。
+    """
+    now = time.time()
+    if not force and now - _media_refresh_at[0] < 30:
+        return
+    if not _media_refresh_lock.acquire(blocking=False):
+        return
+    try:
+        import fastsync
+        import keyvault
+        key = keyvault.load_key(ACCOUNT_ID)
+        if not key:
+            return
+        msg_dir = ACCOUNT_DIR / "db_storage" / "message"
+        dbs = [f"message/{p.name}" for p in msg_dir.glob("media_*.db")] if msg_dir.is_dir() else []
+        if dbs:
+            fastsync.fast_sync_message_dbs(ACCOUNT_DIR, DECRYPTED_DIR, key, dbs=dbs)
+        # MediaService 缓存了 media_*.db 的 Name2Id 映射，刷新后必须失效，
+        # 否则新会话仍然查不到语音
+        try:
+            get_media()._media_name2id = None
+        except Exception:
+            pass
+        _media_refresh_at[0] = time.time()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[media] refresh failed: {exc}")
+    finally:
+        _media_refresh_lock.release()
+
+
 @app.get("/api/media/voice")
 def api_voice(chat: str, id: int):
     con = db()
     m = con.execute("SELECT * FROM message WHERE id=? AND chat_user=?", (id, chat)).fetchone()
+    con.close()
     if not m:
         raise HTTPException(404)
+    media_svc = get_media()
     try:
-        wav = get_media().voice_wav(m["chat_user"], m["src_local_id"], m["ts"] or 0)
-        if wav:
-            return Response(content=wav, media_type="audio/wav")
+        wav = media_svc.voice_wav(m["chat_user"], m["src_local_id"], m["ts"] or 0)
     except Exception as e:
         raise HTTPException(500, f"转码失败: {e}")
+    if not wav:
+        # 解密副本落后于源库：刷新 media 库后再试一次
+        _refresh_media_dbs()
+        media_svc = get_media()
+        try:
+            wav = media_svc.voice_wav(m["chat_user"], m["src_local_id"], m["ts"] or 0)
+        except Exception as e:
+            raise HTTPException(500, f"转码失败: {e}")
+    if wav:
+        return Response(content=wav, media_type="audio/wav")
     raise HTTPException(404, "voice not found")
 
 

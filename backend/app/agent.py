@@ -769,11 +769,13 @@ def t_rag_search(args):
                                 "text": (h.get("text") or "")[:400],
                                 "n_img": h.get("n_img", 0), "kind": "moment"})
         moments.sort(key=lambda m: -(m.get("ts") or 0))
-        moments = moments[:max_links]
     # 聚合上限：消息按相关度(RRF)排序取前 2k（最多 20）；文章/文件按时间新→旧
+    # 上限必须在用到之前定义（之前 max_links 在朋友圈分支之后才赋值，命中朋友圈就 NameError）
     max_msg = min(k * 2, 20)
     max_links = min(k, 6)
     max_files = min(k, 8)
+    if moments:
+        moments = moments[:max_links]
     msg_ids = list(scores.keys())
     msg_ranked = sorted([msgs[m] for m in msg_ids if m in msgs],
                         key=lambda m: (-scores[m["id"]], -m["ts"]))[:max_msg]
@@ -1352,9 +1354,18 @@ def _platform_text(text: str, platform: str = "wechat") -> str:
     return text
 
 
+def _tools_for(platform: str) -> dict:
+    """平台 → 可用工具集。both = 微信 + QQ 全给（跨平台提问）。"""
+    if platform == "both":
+        merged = dict(TOOLS)
+        merged.update(QQ_TOOLS)
+        return merged
+    return QQ_TOOLS if platform == "qq" else TOOLS
+
+
 def _tool_schemas(platform: str = "wechat"):
     out = []
-    all_tools = QQ_TOOLS if platform == "qq" else TOOLS
+    all_tools = _tools_for(platform)
     for name, (fn, desc, params) in all_tools.items():
         out.append({"type": "function",
                     "function": {"name": name,
@@ -1392,11 +1403,20 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
             "换 2~4 组互补关键词、对命中密集的日期用 read_chat(since, until) 按天补读、"
             "发现新实体名就追查一轮；宁可多查一步，不要早停。"
             "普通聊天问题该快还是要快，探索模式不是让你每问必查满。")
-    base_prompt = QQ_SYSTEM_PROMPT if platform == "qq" else _platform_text(SYSTEM_PROMPT, platform)
+    if platform == "both":
+        base_prompt = (QQ_SYSTEM_PROMPT
+                       + "【跨平台模式】你同时拥有微信工具（rag_search / read_file / "
+                         "list_chat_links 等）和 QQ 工具（search_qq / search_qq_contacts / "
+                         "search_qq_files）。用户问微信记录就用微信工具，问 QQ 记录就用 QQ 工具；"
+                         "问「两边/对比」时两边都查，并在回答里写清哪句来自微信、哪句来自 QQ。"
+                         "QQ 工具的引用编号与微信工具共用同一套 [n]。")
+    else:
+        base_prompt = (QQ_SYSTEM_PROMPT if platform == "qq"
+                       else _platform_text(SYSTEM_PROMPT, platform))
     messages = [{"role": "system", "content": base_prompt + chr(10) + time_line}]
     ctx_bits = []
     if chat_ctx:
-        if platform == "qq":
+        if platform in ("qq", "both"):
             ctx_bits.append(
                 f"用户正在浏览 QQ 会话「{chat_name or chat_ctx}」（conv={chat_ctx}）。"
                 f"默认先在该会话内回答：调用 search_qq 时把 conv 设为 {chat_ctx}；"
@@ -1472,7 +1492,7 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
                 args = {}
             emit({"type": "tool", "tool": name, "args": args})
             ckey = name + ":" + json.dumps(args, sort_keys=True, ensure_ascii=False)
-            fn = (QQ_TOOLS if platform == "qq" else TOOLS).get(name, (None,))[0]
+            fn = _tools_for(platform).get(name, (None,))[0]
             if ckey in call_cache:
                 result = call_cache[ckey]
                 result["_note"] = "同一调用已执行过，结果见上，请直接用，不要重复检索"

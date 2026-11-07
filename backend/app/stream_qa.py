@@ -157,7 +157,12 @@ def make_stream(payload: dict, deps: dict):
     ldoc = payload.get("link") or None
     quoted = payload.get("quoted") or []
     explorer = bool(payload.get("explorer"))   # 探索模式：跳过快速回答，工具步数翻倍
-    platform = payload.get("platform") if payload.get("platform") in ("wechat", "qq") else "wechat"
+    ask_platform = (payload.get("platform")
+                    if payload.get("platform") in ("wechat", "qq", "both") else "wechat")
+    # 检索范围可能是 both，但 AI 会话仍归属当前界面平台（否则两边会话树都看不到它）
+    platform = (payload.get("ui_platform")
+                if payload.get("ui_platform") in ("wechat", "qq") else
+                ("wechat" if ask_platform == "both" else ask_platform))
     # 作用域键：不同群聊 / 文件 / 链接各自独立会话，绝不与其他上下文混用
     #   assistant / <chat username> / file:<chat>:<local_id> / link:<hash>
     scope_key = payload.get("scope") or chat or "assistant"
@@ -419,7 +424,7 @@ def make_stream(payload: dict, deps: dict):
                     result_holder.update(agent_mod.run(
                         q, conf, chat_ctx=chat, chat_name=qname,
                         quoted=qn, history=history, on_event=on_event,
-                        explorer=explorer, platform=platform))
+                        explorer=explorer, platform=ask_platform))
                 except Exception as exc:      # noqa: BLE001
                     result_holder["error"] = str(exc)
 

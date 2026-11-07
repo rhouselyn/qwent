@@ -326,7 +326,7 @@ function renderSessions(filter = "") {
   box.appendChild(mkItem(
     `<div class="ava">✦</div>
      <div class="info"><div class="row1"><span class="name">AI 助手<b class="badge">置顶</b></span></div>
-     <div class="row2">微信 QQ Agent · 两边记录都能问</div></div>`,
+     <div class="row2">${Q("全局问答：所有聊天记录 + 随时追问")}</div></div>`,
     "ai", () => openAssistant()));
   const needle = String(filter || "").trim().toLowerCase();
   const list = state.sessions.filter(s => {
@@ -950,10 +950,13 @@ function updateScopeBar() {
 }
 function updateDrawerScope() {
   const scoped = $("#scopeToggle").checked;
+  const pfLabel = () => (typeof assistantPlatformLabel === "function"
+    ? assistantPlatformLabel(assistantPlatformValue()) : "全局");
   $("#drawerScope").textContent =
-    previewFile ? (scoped ? "范围：此文件" : "范围：全局")
-    : previewLink ? (scoped ? "范围：本文" : "范围：全局")
-    : (scoped ? "范围：本会话" : "范围：全局");
+    previewFile ? (scoped ? "范围：此文件" : "范围：" + pfLabel())
+    : previewLink ? (scoped ? "范围：本文" : "范围：" + pfLabel())
+    : (isAssistant() ? "范围：" + pfLabel()
+       : (scoped ? "范围：本会话" : "范围：" + pfLabel()));
 }
 async function loadQA(chat) {
   // 助手页内部用 __assistant__ 标识，后端统一存为 assistant
@@ -1048,14 +1051,35 @@ function assistantScopeLabel(g) {
   if (g.kind === "chat") return "会话：" + g.name;
   return g.name || "全局助手";
 }
+/* 全局助手的来源范围：默认只查当前平台，可手动切到另一侧或两侧 */
+const ASSIST_PLATFORM_KEY = "wk.assistant.platform.v1";
+function assistantPlatformScope() {
+  try { return localStorage.getItem(ASSIST_PLATFORM_KEY) || "auto"; } catch { return "auto"; }
+}
+function assistantPlatformValue() {
+  const v = assistantPlatformScope();
+  if (v === "wechat" || v === "qq" || v === "both") return v;
+  return isQQ() ? "qq" : "wechat";   // auto：跟随当前界面
+}
+function assistantPlatformLabel(v) {
+  return v === "wechat" ? "仅微信记录" : v === "qq" ? "仅 QQ 记录" : "微信 + QQ 记录";
+}
 function syncAssistantScopeSelect() {
   const sel = document.querySelector("#assistantScopeSelect");
   if (!sel) return;
   const scope = aiState.currentScope || "assistant";
-  sel.innerHTML = `<option value="assistant">${T("aiGlobal")}</option>` +
+  const plat = assistantPlatformValue();
+  sel.innerHTML = `<option value="assistant">${T("aiGlobal")}（${assistantPlatformLabel(plat)}）</option>` +
+    `<option value="assistant:wechat">全部微信记录</option>` +
+    `<option value="assistant:qq">全部 QQ 记录</option>` +
+    `<option value="assistant:both">微信 + QQ 记录</option>` +
     aiState.tree.filter(g => g.scope !== "assistant")
       .map(g => `<option value="${attrEsc(g.scope)}">${esc(assistantScopeLabel(g))}</option>`)
       .join("");
+  if (scope === "assistant") {
+    sel.value = "assistant";
+    return;
+  }
   if ([...sel.options].some(o => o.value === scope)) {
     sel.value = scope;
   } else if (scope !== "assistant") {
@@ -1086,6 +1110,17 @@ function updateAssistantScopeUI() {
 }
 /* 在 AI 助手右侧列表或范围下拉里选择会话/文件后，提问范围随之切换 */
 async function selectAssistantScope(scope, sessionId) {
+  // 下拉里的 assistant:wechat / assistant:qq / assistant:both = 全局助手的来源范围
+  if (typeof scope === "string" && scope.startsWith("assistant:")) {
+    const pf = scope.split(":")[1];
+    try { localStorage.setItem(ASSIST_PLATFORM_KEY, pf); } catch {}
+    aiState.currentScope = "assistant";
+    syncAssistantScopeSelect();
+    updateAssistantScopeUI();
+    updateDrawerScope();
+    toast("提问范围：" + assistantPlatformLabel(pf));
+    return;
+  }
   aiState.currentScope = scope || "assistant";
   const toggle = document.querySelector("#assistantScopeToggle");
   if (toggle && aiState.currentScope !== "assistant") toggle.checked = true;
@@ -3380,7 +3415,7 @@ async function loadQqConversations() {
   ai.className = "session-item ai";
   ai.innerHTML = `<div class="ava">✦</div>
     <div class="info"><div class="row1"><span class="name">AI 助手<b class="badge">置顶</b></span></div>
-    <div class="row2">微信 QQ Agent · 两边记录都能问</div></div>`;
+    <div class="row2">${Q("全局问答：QQ 聊天记录 + 随时追问")}</div></div>`;
   ai.onclick = () => openAssistant();
   list.appendChild(ai);
 

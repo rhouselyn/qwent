@@ -271,6 +271,12 @@ class TestQQAgentTools(unittest.TestCase):
         self.assertNotIn("rag_search", names)
         self.assertNotIn("search_moments", names)
 
+    def test_both_platform_merges_tools(self):
+        """跨平台提问（微信+QQ）时两套工具都要可用。"""
+        import agent
+        names = {x["function"]["name"] for x in agent._tool_schemas("both")}
+        self.assertTrue({"search_qq", "rag_search"} <= names, names)
+
 
 class TestQQLocalParse(unittest.TestCase):
     @staticmethod
