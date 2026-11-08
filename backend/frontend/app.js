@@ -419,7 +419,7 @@ async function openChat(username, name, isGroup, sessionId, options = {}) {
   if (typeof previewLink !== "undefined") previewLink = null;
   $("#previewPane").style.display = "none";
   $("#msgList").style.display = "block";
-  $(".composer #input").placeholder = "问 AI（Enter 发送，Shift+Enter 换行）";
+  $(".composer #input").placeholder = "输入想了解的问题…";
   if (!options.keepListPane) {
     showPane("#sessionList");
     renderSessions($("#searchInput").value);
@@ -986,6 +986,7 @@ function renderQA() {
       : (stripDsml(rawAns) !== rawAns.trim()
          ? "<i style='color:#9a9aa0'>（该轮回答是模型输出乱码，已自动清理）</i>" : "");
     d.innerHTML = `
+      <div class="q">${esc(turn.question)}</div>
       <div class="qa-head">
         <span class="mode">${
           turn.mode === "agent" || turn.mode === "llm" || turn.mode === "stream" ? "AI 回答"
@@ -994,13 +995,13 @@ function renderQA() {
           : turn.mode === "file" ? "文件问答" : "检索结果"}</span>
         <span class="qa-time">${turn.ts ? fmtTime(turn.ts) : ""}</span>
       </div>
-      <div class="q">${esc(turn.question)}</div>
       <div class="a md">${ansHtml}</div>`;
     // 正文里的 [n] 是可点击引用；文件类来源以 chips 附在答案后；下方保留可展开的引用来源合集
     const ansEl = d.querySelector(".a");
     if (typeof bindRefLinks === "function") bindRefLinks(ansEl, turn.refs);
     if (typeof attachSourceFiles === "function") attachSourceFiles(d, turn.refs);
     if (typeof insertRefsWrap === "function") insertRefsWrap(d, turn.refs);
+    // 思考过程放在回答上方，回答下面只留引用
     if (turn.trace && turn.trace.length) {
       const tw = document.createElement("div");
       tw.className = "trace-wrap";
@@ -1017,7 +1018,8 @@ function renderQA() {
           `思考过程 · ${turn.trace.length} 步 ${open ? "▸" : "▾"}`;
       };
       tw.appendChild(tl);
-      d.appendChild(tw);
+      if (ansEl && ansEl.parentNode) ansEl.parentNode.insertBefore(tw, ansEl);
+      else d.appendChild(tw);
     }
     box.appendChild(d);
   }
@@ -1051,7 +1053,7 @@ function assistantScopeLabel(g) {
   if (g.kind === "chat") return "会话：" + g.name;
   return g.name || "全局助手";
 }
-/* 全局助手的来源范围：默认只查当前平台，可手动切到另一侧或两侧 */
+/* 全局助手的来源范围：默认只查当前平台，想跨平台要显式选「微信 + QQ」 */
 const ASSIST_PLATFORM_KEY = "wk.assistant.platform.v1";
 function assistantPlatformScope() {
   try { return localStorage.getItem(ASSIST_PLATFORM_KEY) || "auto"; } catch { return "auto"; }
@@ -1069,23 +1071,24 @@ function syncAssistantScopeSelect() {
   if (!sel) return;
   const scope = aiState.currentScope || "assistant";
   const plat = assistantPlatformValue();
-  sel.innerHTML = `<option value="assistant">${T("aiGlobal")}（${assistantPlatformLabel(plat)}）</option>` +
-    `<option value="assistant:wechat">全部微信记录</option>` +
+  // 只有三项全局范围，默认跟随当前平台；具体群聊/文件/链接从右侧「AI 会话」
+  // 树里选，选中的那个再动态补进下拉，避免把几百个群都塞进来。
+  sel.innerHTML = `<option value="assistant:wechat">全部微信记录</option>` +
     `<option value="assistant:qq">全部 QQ 记录</option>` +
-    `<option value="assistant:both">微信 + QQ 记录</option>` +
-    aiState.tree.filter(g => g.scope !== "assistant")
-      .map(g => `<option value="${attrEsc(g.scope)}">${esc(assistantScopeLabel(g))}</option>`)
-      .join("");
+    `<option value="assistant:both">微信 + QQ 记录</option>`;
   if (scope === "assistant") {
-    sel.value = "assistant";
+    sel.value = "assistant:" + plat;
     return;
   }
   if ([...sel.options].some(o => o.value === scope)) {
     sel.value = scope;
-  } else if (scope !== "assistant") {
+  } else {
     const opt = document.createElement("option");
     opt.value = scope;
-    opt.textContent = scopeNameOf(scope);
+    const g = scopeGroup(scope);
+    // 当前打开的 QQ 会话可能还没进 AI 会话树，用列表里的显示名，别露出 group:xxx
+    const qqName = (scope === state.qqConv && state.qqConvName) ? "会话：" + state.qqConvName : "";
+    opt.textContent = g ? assistantScopeLabel(g) : (qqName || scopeNameOf(scope));
     sel.appendChild(opt);
     sel.value = scope;
   }
@@ -1234,7 +1237,7 @@ async function jumpToRef(r) {
   previewFile = null;
   if (typeof previewLink !== "undefined") previewLink = null;
   if (typeof previewMoment !== "undefined") previewMoment = null;
-  $(".composer #input").placeholder = "问 AI（Enter 发送，Shift+Enter 换行）";
+  $(".composer #input").placeholder = "输入想了解的问题…";
   const data = await api(`/api/messages/context?id=${r.id}&around=15`);
   state.current = { username: data.chat, name: data.chat_name,
                     is_group: data.chat.includes("@chatroom") };
@@ -1394,6 +1397,13 @@ async function openAssistant(sessionId) {
   if (typeof previewLink !== "undefined") previewLink = null;
   if (previewFile) exitPreview();
   state.current = { username: "assistant", name: "AI 助手", is_group: false };
+  // 进 AI 助手等于离开 QQ 会话：清掉会话上下文，左侧高亮也一起复原
+  state.qqConv = null;
+  state.qqConvKind = null;
+  qqLiveStop();
+  syncQqConvActive();
+  document.querySelectorAll("#sessionList .session-item.active")
+    .forEach((el) => el.classList.remove("active"));
   $("#chatEmpty").style.display = "none";
   $("#chatMain").style.display = "flex";
   document.querySelector(".chat-column").style.display = "none";
@@ -1476,30 +1486,39 @@ async function showQqContacts(q = "") {
   }
   const groups = items.filter(x => x.kind === "group");
   const friends = items.filter(x => x.kind !== "group");
-  const add = (title, rows) => {
-    if (!rows.length) return;
+  const addHeader = (title) => {
     const h = document.createElement("div");
     h.className = "contact-group";
-    h.textContent = `${title}（${rows.length}）`;
+    h.textContent = title;
     box.appendChild(h);
-    for (const c of rows) {
-      const d = document.createElement("div");
-      d.className = "session-item";
-      const name = c.name || c.nickname || String(c.uin || c.uid);
-      d.innerHTML = `${qqAvatarHtml(c.kind === "group" ? "group" : "friend",
-        c.kind === "group" ? (c.uin || "") : (c.uin || c.uid || ""), name)}
-        <div class="info"><div class="row1"><span class="name">${esc(name)}</span>
-        ${c.kind === "group" ? '<span class="tag">群</span>' : ""}</div>
-        <div class="row2">${esc(String(c.uin || c.uid || ""))}${c.cnt ? " · " + c.cnt + " 条" : ""}</div></div>`;
-      d.onclick = () => {
-        if (c.conv) openQqLocalConversation(c.conv, name, c.kind === "group");
-        else toast("这个联系人还没有 QQ 会话");
-      };
-      box.appendChild(d);
-    }
   };
-  add("好友", friends);
-  add("群聊", groups);
+  const addRow = (c) => {
+    const d = document.createElement("div");
+    d.className = "session-item";
+    const name = c.name || c.nickname || String(c.uin || c.uid);
+    d.innerHTML = `${qqAvatarHtml(c.kind === "group" ? "group" : "friend",
+      c.kind === "group" ? (c.uin || "") : (c.uin || c.uid || ""), name)}
+      <div class="info"><div class="row1"><span class="name">${esc(name)}</span>
+      ${c.kind === "group" ? '<span class="tag">群</span>' : ""}</div>
+      <div class="row2">${esc(String(c.uin || c.uid || ""))}${c.cnt ? " · " + c.cnt + " 条" : ""}</div></div>`;
+    d.onclick = () => {
+      if (c.conv) openQqLocalConversation(c.conv, name, c.kind === "group");
+      else toast("这个联系人还没有 QQ 会话");
+    };
+    box.appendChild(d);
+  };
+  // 好友按拼音首字母分组（A→Z，# 收尾），与微信通讯录一致；群聊单独放最后
+  let lastInitial = "";
+  for (const c of friends) {
+    const init = c.initial || "#";
+    if (init !== lastInitial) {
+      lastInitial = init;
+      addHeader(init);
+    }
+    addRow(c);
+  }
+  if (groups.length) addHeader(`群聊（${groups.length}）`);
+  for (const c of groups) addRow(c);
   showPane("#contactList");
 }
 
@@ -3434,6 +3453,7 @@ async function loadQqConversations() {
     for (const c of sorted) {
       const item = document.createElement("div");
       item.className = "session-item qq-conv" + (state.qqConv === c.conv ? " active" : "");
+      item.dataset.conv = c.conv;
       const last = (c.last_is_sender ? "我：" : "") + (c.last_text || "");
       if (c.pinned) item.classList.add("pinned");
       const akind = c.is_group ? "group" : "friend";
@@ -3478,6 +3498,7 @@ async function loadQqConversations() {
     for (const c of convs) {
       const item = document.createElement("div");
       item.className = "session-item qq-conv" + (state.qqConv === c.conv ? " active" : "");
+      item.dataset.conv = c.conv;
       item.innerHTML = `${qqAvatarHtml(c.scene === "group" ? "group" : "friend", String(c.conv || "").replace(/^(group|c2c):/, ""), c.name)}
         <div class="info"><div class="row1"><span class="name">${esc(c.name)}</span>
         <span class="time">${c.last_ts ? fmtTime(c.last_ts).split(" ").pop() : ""}</span></div>
@@ -3603,6 +3624,7 @@ async function openQqConversation(conv, name, scene, focusId = 0) {
   state.searchMode = false;
   stopLiveStream();
   if (typeof previewLink !== "undefined") previewLink = null;
+  syncQqConvActive();
   showChatPane();
   $("#assistantPane").style.display = "none";
   $("#aiSessionsPanel").style.display = "none";
@@ -3822,13 +3844,26 @@ function renderQqLocalMessage(it) {
   return wrap;
 }
 
+/* 左侧 QQ 会话选中态：列表不重建时也要跟着当前会话走，
+   否则点进去没高亮、切走后又一直留着高亮。 */
+function syncQqConvActive() {
+  const conv = (state.qqConvKind === "local" && state.qqConv) ? state.qqConv : "";
+  document.querySelectorAll("#qqConvList .qq-conv").forEach((el) => {
+    el.classList.toggle("active", !!conv && el.dataset.conv === conv);
+  });
+}
+
 async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
+  // 消息请求先发出去（最慢的一步）；自己的 QQ 信息只在第一次进来时补，
+  // 不阻塞首屏——以前是串行 await self → messages → AI 树，点一下要等一拍。
+  const msgsPromise = api("/api/qq/local/messages?conv=" +
+    encodeURIComponent(conv) + "&limit=80" +
+    (focusId ? "&around=" + focusId : ""));
   if (!state.selfQqUin) {
-    try {
-      const me = await api("/api/qq/local/self");
+    api("/api/qq/local/self").then((me) => {
       state.selfQqUin = me.uin || 0;
       state.selfQqName = me.name || "";
-    } catch {}
+    }).catch(() => {});
   }
   state.qqConv = conv;
   state.qqConvKind = "local";
@@ -3837,6 +3872,7 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
   state.searchMode = false;
   stopLiveStream();
   if (typeof previewLink !== "undefined") previewLink = null;
+  syncQqConvActive();
   showChatPane();
   $("#assistantPane").style.display = "none";
   $("#aiSessionsPanel").style.display = "none";
@@ -3849,9 +3885,7 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
   $("#msgs").innerHTML = `<div class="sys">来自本机 QQ 数据库的聊天记录（只读）</div>`;
   let oldest = 0;
   try {
-    const d = await api("/api/qq/local/messages?conv=" +
-      encodeURIComponent(conv) + "&limit=200" +
-      (focusId ? "&around=" + focusId : ""));
+    const d = await msgsPromise;
     const items = d.messages || [];
     oldest = items.length ? (items[0].ts || 0) : 0;
     const frag = document.createDocumentFragment();
@@ -3862,7 +3896,7 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
       lastTs = it.ts || lastTs;
     }
     $("#msgs").appendChild(frag);
-    if (items.length >= 200) {
+    if (items.length >= 80) {
       const more = document.createElement("div");
       more.className = "load-more";
       more.textContent = "加载更早的 QQ 消息…";
@@ -3870,7 +3904,7 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
         more.textContent = "加载中…";
         try {
           const prev = await api("/api/qq/local/messages?conv=" +
-            encodeURIComponent(conv) + "&limit=200&before=" + oldest);
+            encodeURIComponent(conv) + "&limit=120&before=" + oldest);
           const rows = prev.messages || [];
           if (!rows.length) { more.textContent = "没有更早的消息了"; return; }
           const frag2 = document.createDocumentFragment();
@@ -3882,8 +3916,8 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
           }
           more.after(frag2);
           oldest = rows[0].ts || oldest;
-          more.textContent = rows.length >= 200 ? "加载更早的 QQ 消息…" : "没有更早的消息了";
-          if (rows.length < 200) more.onclick = null;
+          more.textContent = rows.length >= 120 ? "加载更早的 QQ 消息…" : "没有更早的消息了";
+          if (rows.length < 120) more.onclick = null;
         } catch (e) { more.textContent = "加载失败：" + e.message; }
       };
       $("#msgs").prepend(more);
@@ -3910,7 +3944,8 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
   toggleDrawer(true);
   updateScopeBar();
   updateDrawerScope();
-  await enterAiScope(conv, name || conv);
+  // AI 会话树/历史与消息无关，别挡着消息上屏；失败也不影响浏览
+  enterAiScope(conv, name || conv).catch(() => {});
 }
 
 /* ---------------------------------------------------------------- 平台切换钩子 */

@@ -469,7 +469,11 @@ try:
     js("[...document.querySelectorAll('#settingsNav .sf-item')].find(x=>x.dataset.sec==='model').click()")
     time.sleep(1.2)
     bg = str(js("getComputedStyle(document.querySelector('#saveCfg')).backgroundImage") or "")
-    check("QQ 设置主按钮为蓝色", "26, 182, 255" in bg or "10, 142, 220" in bg, bg[:120])
+    bgc = str(js("getComputedStyle(document.querySelector('#saveCfg')).backgroundColor") or "")
+    # 现在主按钮是纯色（不再渐变）：backgroundImage=none，颜色看 backgroundColor
+    check("QQ 设置主按钮为蓝色",
+          "26, 182, 255" in bg or "10, 142, 220" in bg or "18, 183, 245" in bgc,
+          (bg + " / " + bgc)[:120])
     # 打开 QQ 机器人分区
     js("[...document.querySelectorAll('#settingsNav .sf-item')].find(x=>x.dataset.sec==='qqbot').click()")
     time.sleep(1.4)
@@ -480,7 +484,10 @@ try:
     check("QQ 机器人无 QQ 消息留存卡", "查看 QQ 消息" not in body, body[:100])
     shot("12-qq-bot-settings")
     bg2 = str(js("getComputedStyle(document.querySelector('#qqSave')).backgroundImage") or "")
-    check("QQ 机器人保存按钮为蓝色", "26, 182, 255" in bg2 or "10, 142, 220" in bg2, bg2[:120])
+    bg2c = str(js("getComputedStyle(document.querySelector('#qqSave')).backgroundColor") or "")
+    check("QQ 机器人保存按钮为蓝色",
+          "26, 182, 255" in bg2 or "10, 142, 220" in bg2 or "18, 183, 245" in bg2c,
+          (bg2 + " / " + bg2c)[:120])
 
     # QQ 本地记录分区
     js("[...document.querySelectorAll('#settingsNav .sf-item')].find(x=>x.dataset.sec==='qqlocal').click()")

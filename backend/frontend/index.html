@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#07c160">
 <link rel="icon" id="appIcon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='64'%20height='64'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2307c160'/%3E%3Ctext%20x='32'%20y='43'%20text-anchor='middle'%20font-size='34'%20font-family='Microsoft%20YaHei,sans-serif'%20font-weight='700'%20fill='white'%3E%E5%BE%AE%3C/text%3E%3C/svg%3E">
 <title>Qwent</title>
-<link rel="stylesheet" href="style.css?v=65">
-<link rel="stylesheet" href="qq.css?v=13">
+<link rel="stylesheet" href="style.css?v=70">
+<link rel="stylesheet" href="qq.css?v=18">
 </head>
 <body>
 <div class="app">
@@ -97,7 +97,7 @@
           </div>
           <div class="composer">
             <div class="input-shell">
-              <textarea id="input" rows="1" placeholder="输入你想查询的问题…" title="Enter 发送 · Shift+Enter 换行；在消息上右键可加入引用"></textarea>
+              <textarea id="input" rows="1" placeholder="输入想了解的问题…" title="Enter 发送 · Shift+Enter 换行；在消息上右键可加入引用"></textarea>
             </div>
             <div class="composer-actions">
               <button id="newSessionBtn" class="icon-btn" title="新建 AI 会话">＋</button>
@@ -123,7 +123,7 @@
           <div class="composer-toolbar">
             <div class="scope-pill assistant-scope-pill">
               <select id="assistantScopeSelect" class="assistant-scope-select" aria-label="选择回答范围">
-                <option value="assistant">全部聊天记录</option>
+                <option value="assistant:wechat">全部微信记录</option>
               </select>
               <label class="scope-toggle" id="assistantScopeWrap" title="勾选后只在这个范围内检索" style="display:none">
                 <input type="checkbox" id="assistantScopeToggle" checked><span id="assistantScopeToggleText">仅本会话</span><b id="assistantScopeName"></b>
@@ -166,8 +166,8 @@
 </div>
 <div id="toast" class="toast"></div>
 <script src="platform.js?v=4"></script>
-<script src="app.js?v=139"></script>
+<script src="app.js?v=145"></script>
 <script src="settings_bot.js?v=4"></script>
-<script src="stream_qa.js?v=21"></script>
+<script src="stream_qa.js?v=24"></script>
 </body>
 </html>

@@ -17,12 +17,12 @@ html[data-platform="qq"] {
 
 /* ---------- 左侧导航：QQ 蓝 + 圆形头像 ---------- */
 html[data-platform="qq"] .rail {
-  background: linear-gradient(180deg, #159ee8 0%, #0a72c6 100%);
+  background: #12b7f5;
   box-shadow: 2px 0 14px rgba(10, 114, 198, .16);
 }
 html[data-platform="qq"] .rail .avatar {
   border-radius: 50%;
-  background: linear-gradient(145deg, #ffffff, #d9f1ff);
+  background: #ffffff;
   color: #0a8edc;
   font-family: "Trebuchet MS", "Microsoft YaHei", sans-serif;
   font-weight: 800;
@@ -63,7 +63,7 @@ html[data-platform="qq"] .rail-btn:hover {
 }
 html[data-platform="qq"] .logo-big {
   border-radius: 50%;
-  background: linear-gradient(145deg, #21c0ff, #0a8edc);
+  background: #12b7f5;
   color: #fff;
   font-family: "Trebuchet MS", "Microsoft YaHei", sans-serif;
   font-size: 40px;
@@ -81,10 +81,10 @@ html[data-platform="qq"] .session-item.active {
 }
 html[data-platform="qq"] .session-item:hover { background: #eef7ff; }
 html[data-platform="qq"] .session-item.ai {
-  background: linear-gradient(90deg, #e6f5ff, #f7fbff);
+  background: #eef7ff;
 }
 html[data-platform="qq"] .session-item.ai .ava {
-  background: linear-gradient(135deg, #12b7f5, #6ad6ff);
+  background: #12b7f5;
 }
 html[data-platform="qq"] .session-item.ai .badge {
   color: #0a8edc; border: 1px solid rgba(18, 183, 245, .4);
@@ -111,7 +111,7 @@ html[data-platform="qq"] .bubble {
 }
 html[data-platform="qq"] .msg.left .bubble { background: #fff; border-bottom-left-radius: 4px; }
 html[data-platform="qq"] .msg.right .bubble {
-  background: linear-gradient(180deg, #22baff 0%, #0a9bec 100%);
+  background: #12b7f5;
   color: #fff;
   border-color: rgba(10, 142, 220, .35);
   border-bottom-right-radius: 4px;
@@ -122,15 +122,6 @@ html[data-platform="qq"] .msg.right .bubble .card .d,
 html[data-platform="qq"] .msg.right .bubble .card .u { color: rgba(255, 255, 255, .82); }
 html[data-platform="qq"] .msg.right .bubble.card .go { color: #fff; }
 html[data-platform="qq"] .msg.right .bubble .quote-main a { color: #fff; }
-html[data-platform="qq"] .qa-turn .q {
-  background: linear-gradient(180deg, #22baff, #0a9bec);
-  color: #fff;
-  border-radius: 14px;
-  border-bottom-right-radius: 4px;
-}
-html[data-platform="qq"] .assistant-pane .qa-turn .q {
-  background: linear-gradient(180deg, #22baff, #0a9bec); color: #fff;
-}
 
 /* ---------- 系统提示：QQ 是居中灰字，不是微信的胶囊 ---------- */
 html[data-platform="qq"] .sys {
@@ -233,7 +224,7 @@ html[data-platform="qq"] .composer button,
 html[data-platform="qq"] .settings button:not(.ghost),
 html[data-platform="qq"] #sendBtn,
 html[data-platform="qq"] #assistantSend {
-  background: linear-gradient(135deg, #1ab6ff, #0a8edc);
+  background: #12b7f5;
   border-color: #0a8edc;
   color: #fff;
   box-shadow: 0 4px 10px rgba(10, 142, 220, .16);
@@ -313,7 +304,7 @@ html[data-platform="qq"] #settingsFull .settings-actions button:first-child,
 html[data-platform="qq"] #settingsFull .settings-action-card button,
 html[data-platform="qq"] #settingsFull .job-row button:not(.ghost) {
   color: #fff;
-  background: linear-gradient(135deg, #1ab6ff, #0a8edc);
+  background: #12b7f5;
   border-color: #0a8edc;
   box-shadow: 0 4px 10px rgba(10, 142, 220, .16);
 }
@@ -397,3 +388,44 @@ html[data-platform="qq"] #qqConvList .session-item.pinned .name { font-weight: 6
 .qq-link-card small { display: block; margin-top: 3px; font-size: 11px; color: #7b8794; line-height: 1.4; }
 .qq-link-card:hover { border-color: rgba(10, 142, 220, .35); }
 html[data-platform="qq"] .msg.right .qq-link-card { color: #1f2937; }
+
+/* ---------- AI 问答页的品牌色 ----------
+ * 布局在 style.css 里统一实现（两个平台都是 ChatGPT 风格），
+ * 这里只把品牌色换成 QQ 蓝：发送按钮、助手标记、选中态。
+ */
+html[data-platform="qq"] .assistant-pane .assistant-mark { background: #12b7f5; }
+html[data-platform="qq"] .assistant-composer-wrap #assistantSend { background: #12b7f5; }
+html[data-platform="qq"] .assistant-composer-wrap #assistantSend:hover:not(:disabled) { background: #0aa7e4; }
+html[data-platform="qq"] .assistant-composer-wrap #assistantSend:disabled { background: #c9e9f7; }
+
+/* 左侧置顶 AI 助手项：去掉渐变底色与彩色头像（style.css 里用了 !important） */
+html[data-platform="qq"] .session-item.ai { background: #eef7ff !important; }
+html[data-platform="qq"] .session-item.ai:hover { background: #e2f3ff !important; }
+html[data-platform="qq"] .session-item.ai .ava { background: #12b7f5; box-shadow: none; }
+
+/* AI 助手输入框：点进去不要蓝色描边（ChatGPT 风格只让外框轻微加深） */
+html[data-platform="qq"] .assistant-composer-wrap .input-shell:focus,
+html[data-platform="qq"] .assistant-composer-wrap .input-shell:focus-within {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+html[data-platform="qq"] .assistant-composer-wrap textarea:focus,
+html[data-platform="qq"] .assistant-composer-wrap textarea:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* 提问范围 / 快速问答 / 深度思考：QQ 模式统一走蓝色，别留微信绿 */
+html[data-platform="qq"] .chat-column > .composer-wrap .scope-pill .scope-toggle,
+html[data-platform="qq"] .scope-pill .scope-toggle,
+html[data-platform="qq"] .scope-pill .assistant-scope-select {
+  border-color: #d7e6f3; background: #f6fafe; color: #59636d;
+}
+html[data-platform="qq"] .chat-column > .composer-wrap .scope-pill .scope-toggle:has(input:checked) {
+  color: #0a72c6; background: #e6f5ff; border-color: #a8d9f5;
+}
+html[data-platform="qq"] .chat-column > .composer-wrap .scope-pill .scope-toggle input,
+html[data-platform="qq"] .scope-pill .scope-toggle input { accent-color: var(--qq-blue); }
+html[data-platform="qq"] .mode-segment.slim-segment label:has(input:checked) { color: #0a72c6; background: #e6f5ff; }
+html[data-platform="qq"] .tool-pill-toggle:has(input:checked) { color: #0a72c6; background: #e6f5ff; border-color: #a8d9f5; }

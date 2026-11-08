@@ -788,31 +788,85 @@ def _conv_for(uid: str, uin: int, group: int, by_uid: dict, by_uin: dict) -> tup
 
 
 _MEDIA_IDX_CACHE = {"key": "", "ts": 0.0, "idx": {}}
+# 最近几个月的 Pic 目录轻量索引（几十~几千个文件，毫秒级），给「全量索引还没建好」兜底
+_RECENT_MEDIA_CACHE = {"key": "", "ts": 0.0, "map": {}}
 
 
-def _media_index_cached(account: Path, ttl: int = 600, allow_empty: bool = False) -> dict:
-    """轻量同步用：媒体索引 10 分钟内复用（全量导入仍现扫，保证准确）。
+def _recent_media_map(account: Path, ttl: int = 60) -> dict:
+    """扫最近 6 个月的 Ori/Thumb 目录建一张小索引，60 秒内复用。
 
-    allow_empty=True（实时同步）：缓存未热时不在同步路径里扫 6 万个文件
-    （实测 14 秒），直接返回空索引并后台补建——图片/文件路径下一轮就有，
-    不拖慢新消息入库。
+    全量索引要 20 秒，实时轮询/打开会话等不起；这里只扫最近的目录，
+    覆盖绝大多数新消息里的图片。
     """
     key = str(account)
     now = time.time()
-    if _MEDIA_IDX_CACHE["key"] == key and now - _MEDIA_IDX_CACHE["ts"] < ttl:
-        return _MEDIA_IDX_CACHE["idx"]
+    if _RECENT_MEDIA_CACHE["key"] == key and now - _RECENT_MEDIA_CACHE["ts"] < ttl:
+        return _RECENT_MEDIA_CACHE["map"]
+    out: dict[str, str] = {}
+    base = account / "nt_qq" / "nt_data" / "Pic"
+    try:
+        months = sorted(base.iterdir(), reverse=True)[:6]
+    except OSError:
+        months = []
+    for d in months:
+        if not d.is_dir():
+            continue
+        for sub in ("Ori", "OriTemp", "Thumb", "ThumbTemp"):
+            q = d / sub
+            if not q.is_dir():
+                continue
+            try:
+                for f in q.iterdir():
+                    if not f.is_file():
+                        continue
+                    name = f.name.lower()
+                    stem = f.stem.lower()
+                    out.setdefault(name, str(f))
+                    out.setdefault(stem, str(f))
+                    for suffix in ("_720", "_0"):
+                        if stem.endswith(suffix) and len(stem) - len(suffix) == 32:
+                            out.setdefault(stem[:-len(suffix)], str(f))
+                            break
+            except OSError:
+                continue
+    _RECENT_MEDIA_CACHE.update({"key": key, "ts": now, "map": out})
+    return out
+
+
+def _start_index_build(account: Path, key: str) -> None:
+    """后台重建媒体索引。索引扫 6 万多个文件要 20 秒上下，绝不能在请求里等它。"""
+    if _MEDIA_IDX_CACHE.get("building"):
+        return
+    _MEDIA_IDX_CACHE["building"] = True
+
+    def _build():
+        try:
+            idx = _media_index(account)
+            _MEDIA_IDX_CACHE.update({"key": key, "ts": time.time(),
+                                     "idx": idx, "building": False})
+        except Exception:
+            _MEDIA_IDX_CACHE["building"] = False
+
+    import threading
+    threading.Thread(target=_build, daemon=True).start()
+
+
+def _media_index_cached(account: Path, ttl: int = 3600, allow_empty: bool = False) -> dict:
+    """媒体索引按账号缓存 1 小时；过期也不清空，后台重建期间继续用旧索引。
+
+    以前 TTL 一到就把空索引发出去、等后台重扫完才恢复，用户点开会话会卡住
+    （hydrate_media 里还会同步等索引建完，实测 30 秒）。改成 stale-while-revalidate：
+    过期时先返回旧索引、后台重建，任何时刻读消息都不会被扫描拖住。
+    """
+    key = str(account)
+    now = time.time()
+    idx = _MEDIA_IDX_CACHE.get("idx") or {}
+    if _MEDIA_IDX_CACHE["key"] == key and idx:
+        if now - _MEDIA_IDX_CACHE["ts"] >= ttl:
+            _start_index_build(account, key)
+        return idx
     if allow_empty:
-        if not _MEDIA_IDX_CACHE.get("building"):
-            _MEDIA_IDX_CACHE["building"] = True
-            def _build():
-                try:
-                    idx = _media_index(account)
-                    _MEDIA_IDX_CACHE.update({"key": key, "ts": time.time(),
-                                             "idx": idx, "building": False})
-                except Exception:
-                    _MEDIA_IDX_CACHE["building"] = False
-            import threading
-            threading.Thread(target=_build, daemon=True).start()
+        _start_index_build(account, key)
         return {}
     idx = _media_index(account)
     _MEDIA_IDX_CACHE.update({"key": key, "ts": now, "idx": idx})
@@ -1438,67 +1492,60 @@ def set_pinned(con: sqlite3.Connection, conv: str, pinned: bool) -> None:
     con.commit()
 
 
+_ACCOUNT_CACHE: dict[str, Path] = {}
+
+
+def _cached_account(account: Path | None = None) -> Path | None:
+    """pick_account 会遍历登录目录，每条缺图消息都调一次太亏；按进程缓存。"""
+    if account is not None:
+        return account
+    key = "default"
+    if key in _ACCOUNT_CACHE:
+        return _ACCOUNT_CACHE[key]
+    try:
+        acct = pick_account()
+    except Exception:
+        return None
+    _ACCOUNT_CACHE[key] = acct
+    return acct
+
+
 def _lookup_media(md5: str, filename: str = "", account: Path | None = None) -> str:
     """按 md5/文件名在 QQ 缓存目录里找一张图（含 Ori/Thumb/OriTemp）。
 
     消息里存的 path 是导入那一刻的快照；QQ 之后才下载的图不会被写进去
     （增量导入 DO NOTHING 不覆盖），所以读的时候要再查一次。
+    只查两份索引：全量索引 + 「最近几个月」小索引。以前还有一层逐目录扫描，
+    但 200 条消息里 60 张缺图时它就是 60 次目录遍历（实测 0.5 秒），
+    打开会话要等明显一拍——小索引覆盖了同样范围，扫描层删掉。
     """
     md5 = (md5 or "").lower()
-    if not md5 and not filename:
+    fn = (filename or "").lower()
+    if not md5 and not fn:
         return ""
     cache = _MEDIA_IDX_CACHE.get("idx") or {}
     if cache:
-        hit = (cache.get(md5) if md5 else "") or (
-            cache.get(filename.lower()) if filename else "")
+        hit = (cache.get(md5) if md5 else "") or (cache.get(fn) if fn else "")
         if hit:
             return hit
-    try:
-        acct = account or pick_account()
-    except Exception:
+    acct = _cached_account(account)
+    if acct is None:
         return ""
-    base = acct / "nt_qq" / "nt_data" / "Pic"
-    if not base.is_dir():
+    recent_idx = _recent_media_map(acct)
+    if not recent_idx:
         return ""
-    from datetime import datetime as _dt
-    recent = []
-    try:
-        for d in sorted(base.iterdir(), reverse=True)[:6]:
-            if not d.is_dir():
-                continue
-            for sub in ("Ori", "Thumb", "OriTemp", "ThumbTemp"):
-                q = d / sub
-                if q.is_dir():
-                    recent.append(q)
-    except OSError:
-        return ""
-    for d in recent:
-        try:
-            hit = None
-            for f in d.iterdir():
-                name = f.name.lower()
-                if md5 and name.startswith(md5):
-                    # 优先原图（Ori），缩略图次之
-                    if d.name == "Ori" or d.name == "OriTemp":
-                        return str(f)
-                    hit = hit or str(f)
-                elif filename and name == filename.lower():
-                    hit = hit or str(f)
-            if hit:
-                return hit
-        except OSError:
-            continue
-    return ""
+    return (recent_idx.get(md5) if md5 else "") or (recent_idx.get(fn) if fn else "")
 
 
 def hydrate_media(rows: list[dict], account: Path | None = None) -> list[dict]:
     """用媒体索引补齐 parsed.media 里缺失的本地路径。
 
     实时同步启用的瞬间索引还没建好（异步 15 秒），那批消息入库时 path 为空；
-    增量导入是 DO NOTHING（防撤回不能覆盖），所以只能读取时补。索引全局缓存，
-    这里只是字典查询，开销可忽略。
+    增量导入是 DO NOTHING（防撤回不能覆盖），所以只能读取时补。
+
+    性能：索引命中是纯字典查询；索引没建好时**不再同步等它建完**（以前会卡
+    30~90 秒），而是本次用「最近几个 Pic 目录」的一次性扫描兜底，同时后台建索引。
     """
-    # 缓存未就绪（刚启动、异步索引还在建）：等它建（一次约 50 秒），别返回空
     cache = _MEDIA_IDX_CACHE.get("idx") or {}
     if not cache:
         # 启动时后台拉的 CDN 缓存也纳入索引（否则新拉的图读不到）
@@ -1507,22 +1554,19 @@ def hydrate_media(rows: list[dict], account: Path | None = None) -> list[dict]:
             try:
                 for f in fetched.iterdir():
                     if f.is_file():
+                        cache = dict(cache)
                         cache.setdefault(f.stem.lower(), str(f))
                         cache.setdefault(f.name.lower(), str(f))
             except OSError:
                 pass
     if not cache:
-        if _MEDIA_IDX_CACHE.get("building"):
-            deadline = time.time() + 90
-            while _MEDIA_IDX_CACHE.get("building") and time.time() < deadline:
-                time.sleep(0.5)
-            cache = _MEDIA_IDX_CACHE.get("idx") or {}
-        if not cache:
-            try:
-                cache = _media_index_cached(account or pick_account(), ttl=600,
-                                            allow_empty=True)
-            except Exception:
-                cache = {}
+        try:
+            acct = account or pick_account()
+        except Exception:
+            acct = None
+        if acct is not None:
+            _media_index_cached(acct, allow_empty=True)   # 只起后台线程，不阻塞
+            cache = _recent_media_map(acct)               # 本批共用的轻量兜底
     for r in rows:
         parsed = r.get("parsed")
         if not isinstance(parsed, dict):
@@ -1611,6 +1655,29 @@ def messages(con: sqlite3.Connection, conv: str, limit: int = 200,
     return hydrate_media(out)
 
 
+_INITIAL_CACHE: dict[str, str] = {}
+
+
+def name_initial(name: str) -> str:
+    """名字首字母（中文走拼音，英文取首字母，数字/符号归 #），与微信通讯录一致。"""
+    s = (name or "").strip()
+    if not s:
+        return "#"
+    ch = s[0]
+    if ch.isascii():
+        return ch.upper() if ch.isalpha() else "#"
+    if ch in _INITIAL_CACHE:
+        return _INITIAL_CACHE[ch]
+    try:
+        from pypinyin import lazy_pinyin
+        letter = (lazy_pinyin(ch)[0][:1] or "").upper()
+    except Exception:
+        letter = ""
+    letter = letter if letter.isalpha() else "#"
+    _INITIAL_CACHE[ch] = letter
+    return letter
+
+
 def contacts(con: sqlite3.Connection, q: str = "", kind: str = "",
              limit: int = 500) -> list[dict]:
     ensure_schema(con)
@@ -1627,7 +1694,15 @@ def contacts(con: sqlite3.Connection, q: str = "", kind: str = "",
     sql += " ORDER BY last_ts DESC, name LIMIT ?"
     args.append(max(1, min(limit, 2000)))
     keys = ["key", "kind", "uid", "uin", "name", "nickname", "conv", "last_ts", "cnt"]
-    return [dict(zip(keys, r)) for r in con.execute(sql, args).fetchall()]
+    out = []
+    for r in con.execute(sql, args).fetchall():
+        d = dict(zip(keys, r))
+        d["initial"] = name_initial(d.get("name") or d.get("nickname") or "")
+        out.append(d)
+    # 通讯录按首字母 A→Z、同字母按名字排；数字/符号排最后（前端只按这个顺序渲染）
+    out.sort(key=lambda d: (0 if d["initial"].isalpha() else 1,
+                            d["initial"], d.get("name") or d.get("nickname") or ""))
+    return out
 
 
 def files(con: sqlite3.Connection, q: str = "", kind: str = "", conv: str = "",

@@ -134,17 +134,34 @@ function makeTurnShell(question) {
   turn.className = "qa-turn streaming";
     const askTime = new Date().toLocaleTimeString("zh-CN", {hour:"2-digit", minute:"2-digit"});
     turn.innerHTML = `
+    <div class="q">${esc(question)}</div>
     <div class="qa-head">
       <span class="mode">思考中<span class="dots"><i></i><i></i><i></i></span></span>
       <span class="qa-time">${askTime}</span>
       <span class="qa-ops"><a class="op-stop" title="停止">■ 停止</a></span>
     </div>
-    <div class="q">${esc(question)}</div>
+    <div class="trace-wrap stream-trace" style="display:none">
+      <div class="trace-toggle stream-trace-label">思考过程</div>
+      <div class="trace-list stream-trace-list"></div>
+    </div>
     <div class="live" style="display:none"></div>
     <div class="a md"></div>`;
   box.appendChild(turn);
   box.scrollTop = box.scrollHeight;
   return turn;
+}
+
+/* 流式阶段的工具步骤：实时追加在回答上方，结束后由服务端记录重建 */
+function addTraceStep(turn, tool, summary) {
+  const wrap = turn.querySelector(".stream-trace");
+  const list = turn.querySelector(".stream-trace-list");
+  if (!wrap || !list) return;
+  wrap.style.display = "block";
+  const n = list.children.length + 1;
+  const step = document.createElement("div");
+  step.className = "trace-step";
+  step.innerHTML = `${n}. <b>${esc(tool || "")}</b> ${esc(summary || "")}`;
+  list.appendChild(step);
 }
 
 function setLive(turn, text) {
@@ -211,7 +228,7 @@ async function askStream(question) {
   const uiPlatform = (window.Platform && Platform.get()) || "wechat";
   let askPlatform = uiPlatform;
   if (isAssistant && isAssistant() && !fileCtx && !linkCtx && !chat) {
-    const pf = typeof assistantPlatformValue === "function" ? assistantPlatformValue() : "auto";
+    const pf = typeof assistantPlatformValue === "function" ? assistantPlatformValue() : "";
     askPlatform = (pf === "both" || pf === "wechat" || pf === "qq") ? pf : uiPlatform;
   }
   streamState.busy = true;
@@ -262,6 +279,8 @@ async function askStream(question) {
             break;
           case "tool_result":
             setLive(turn, `${ev.tool} → ${ev.summary}（已收集 ${ev.refs || 0} 条引用）`);
+            addTraceStep(turn, ev.tool,
+              `${ev.summary || ""}${ev.refs ? ` · ${ev.refs} 条引用` : ""}`);
             break;
           case "reset":
             answerText = "";
