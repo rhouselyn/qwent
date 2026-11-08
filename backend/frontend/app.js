@@ -742,7 +742,27 @@ function renderQuoteMessage(col, bubble, p) {
 }
 function renderBubbleContent(m, p) {
   const el = document.createElement("div");
-  if (p.text !== undefined) { el.textContent = p.text; return el; }
+  if (p.text !== undefined) {
+    // 纯文本里的分享链接 / 裸链接：和 QQ 一样可点（站内预览）
+    const card = typeof parseTextCard === "function" ? parseTextCard(p.text) : null;
+    if (card) {
+      el.className = "card";
+      el.innerHTML = `<span class="t">[链接] ${esc(card.title)}</span>`
+        + (card.tag ? `<div class="d">${esc(card.tag)}</div>` : "")
+        + (card.url ? `<div class="u">${esc(card.url)}</div>` : "")
+        + `<div class="go">点击阅读正文 ↗</div>`;
+      el.style.cursor = "pointer";
+      el.onclick = () => openLinkPreview(card.url, card.title);
+      return el;
+    }
+    if (/https?:\/\//.test(p.text) && typeof linkifyMsgText === "function") {
+      el.innerHTML = linkifyMsgText(p.text);
+      if (typeof bindMsgLinks === "function") bindMsgLinks(el);
+      return el;
+    }
+    el.textContent = p.text;
+    return el;
+  }
   switch (p.kind) {
     case "image": {
       const img = document.createElement("img");
@@ -1808,7 +1828,7 @@ function renderQqLinkShell() {
         <select id="qqLinkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"],
           ["bili", "B站"], ["article", "文章"], ["generic", "网页"]], qqLinkView.platform)}</select>
         <select id="qqLinkState">${opts([["", "全部状态"], ["parsed", "已解析"],
-          ["pending", "待解析"]], qqLinkView.state)}</select>
+          ["pending", "待解析"], ["failed", "解析失败"]], qqLinkView.state)}</select>
         <select id="qqLinkDays">${opts([[0, "不限时间"], [7, "最近 7 天"],
           [30, "最近 30 天"], [365, "最近一年"]], qqLinkView.days)}</select>
         <select id="qqLinkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], qqLinkView.sort)}</select>
@@ -1883,7 +1903,9 @@ function renderQqLinkItems() {
     d.className = "result-item";
     const badge = l.parsed
       ? `<span class="link-badge ok">已解析</span>`
-      : `<span class="link-badge">解析中</span>`;
+      : l.state === "failed"
+        ? `<span class="link-badge fail" title="${attrEsc(l.error || "抓取失败")}">解析失败</span>`
+        : `<span class="link-badge">解析中</span>`;
     const title = (l.title || l.url).split("\n")[0];
     d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(l.conv_name || l.conv)} · ${fmtTime(l.ts)}</span> ${badge}</div>
       <div class="snippet"><span class="file-badge">${esc(l.platform || "网页")}</span> ${esc(title)}</div>`;
@@ -3723,21 +3745,72 @@ function isGroupChat() {
   return !!(state.current && state.current.is_group);
 }
 
+/* 单行系统通知（加群/退群/撤回/改群名…）：和微信一样居中灰字，不套气泡 */
+const QQ_SYS_NOTICE_RE = /^[^\n]{0,60}(加入了群聊|加入群聊|退出了群聊|退出群聊|撤回了一条消息|修改群名为[^\n]{0,40}|群名已修改[^\n]{0,40}|被移出群聊|移出了群聊|被管理员禁言|已被禁言|解除禁言|成为群成员|成为新群主|(开启|关闭)了全员禁言|邀请[^\n]{0,40}加入了?群聊)[。！!]?$/;
+
+/* 纯文本里的卡片式分享（bilibili 等转发到 QQ 会变成「[标题-bilibili] https://...」） */
+function parseTextCard(text) {
+  const t = String(text || "").trim();
+  const m = t.match(/^\[([^\]\n]{1,120})[-－]([^\]\n]{1,20})\]\s*(https?:\/\/\S+)$/);
+  if (m) return { title: m[1].trim(), tag: m[2].trim(), url: m[3] };
+  const m2 = t.match(/^\[([^\]\n]{1,120})\]\s*(https?:\/\/\S+)$/);
+  if (m2) return { title: m2[1].trim(), tag: "", url: m2[2] };
+  return null;
+}
+
+/* 正文里的裸链接：可点，走站内预览（和微信点链接一致） */
+function linkifyMsgText(text) {
+  return String(text || "").split(/(https?:\/\/[^\s<>"'）)】]+)/g).map((part, i) => {
+    if (i % 2 === 0) return esc(part);
+    const url = part.replace(/[.,;:!?]+$/, "");
+    return '<a class="msg-link" href="#" data-url="' + attrEsc(url) + '">' + esc(url) + "</a>";
+  }).join("");
+}
+
+function bindMsgLinks(root) {
+  root.querySelectorAll("a.msg-link").forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const url = a.dataset.url || "";
+      if (url) openLinkPreview(url, url);
+    };
+  });
+}
+
 function renderQqLocalMessage(it) {
   const parsed = it.parsed || {};
   const kind = parsed.kind || "text";
-  // 撤回提示：渲染成居中灰条（原消息本身已保留原文并打「已撤回」标）
-  if (kind !== "system" && kind !== "call" &&
-      /撤回了一条消息/.test(parsed.text || it.text || "")) {
+  const rawText = String(parsed.text || it.text || "");
+  const media = Array.isArray(parsed.media) ? parsed.media : [];
+  // 单行撤回/加群等系统通知：居中灰条（原来的 /撤回了一条消息/ 判定太宽，
+  // 会把「消息：…」这类正文也误判成提示）
+  if (kind !== "system" && kind !== "call" && !media.length
+      && QQ_SYS_NOTICE_RE.test(rawText.trim())) {
     const sys = document.createElement("div");
     sys.className = "sys qq-recall-tip";
-    sys.textContent = parsed.text || it.text || "";
+    sys.textContent = rawText.trim();
     return sys;
   }
   if (kind === "system" || kind === "call") {
     const sys = document.createElement("div");
     sys.className = "sys";
-    sys.textContent = parsed.text || it.text || "";
+    sys.textContent = rawText;
+    sys.setAttribute("data-nol10n", "");
+    return sys;
+  }
+  // 解析不出内容的占位（全库剩 31 条，原始记录已被 QQ 清掉）：不显示脏数据
+  if (rawText.trim() === "[消息]" && !media.length) {
+    const blank = document.createElement("div");
+    blank.style.display = "none";
+    return blank;
+  }
+  // 拍一拍：QQ 里就是一行居中灰字「张三 拍了拍 我」
+  if (kind === "poke") {
+    const sys = document.createElement("div");
+    sys.className = "sys qq-recall-tip";
+    const who = it.is_sender ? "我" : (it.sender_name || "有人");
+    sys.textContent = rawText.startsWith("拍了拍") ? `${who} ${rawText}` : rawText;
     sys.setAttribute("data-nol10n", "");
     return sys;
   }
@@ -3763,68 +3836,128 @@ function renderQqLocalMessage(it) {
   }
   const b = document.createElement("div");
   b.className = "bubble" + (it.recalled ? " recalled" : "");
-  b.textContent = parsed.text || it.text || "";
   b.setAttribute("data-nol10n", "");
+
+  // 先算哪些媒体真的渲染出来了：只有渲染成功才去掉正文里的 [图片]/[语音] 占位
+  const rendered = { image: 0, voice: 0, video: 0, file: 0, card: 0 };
+  for (const m of media) {
+    if (!m || !m.kind) continue;
+    if (m.kind === "card" && (m.url || m.title)) rendered.card++;
+    else if (m.kind === "file") rendered.file++;
+    else if (qqLocalMediaSrc(m.path || "")) rendered[m.kind] = (rendered[m.kind] || 0) + 1;
+  }
+  let text = rawText.replace(/\[com\.tencent\.miniapp[^\]]*\]/gi, "[小程序]");
+  if (rendered.image) text = text.replace(/\[图片\]/g, "");
+  if (rendered.video) text = text.replace(/\[视频\]/g, "");
+  if (rendered.voice) text = text.replace(/\[语音\]/g, "");
+  if (rendered.file) text = text.split("\n").filter((x) => !/^\s*\[文件\]/.test(x)).join("\n");
+  if (rendered.card) text = text.split("\n").filter((x) => !/^\s*\[[^\]]{1,20}\]\s/.test(x)).join("\n");
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+
+  // 整条正文就是一条分享链接（bilibili 等）：直接渲染成可点卡片
+  const textCard = (!rendered.card && text) ? parseTextCard(text) : null;
+  if (textCard) {
+    text = "";
+    rendered.card++;
+  }
+
+  if (text) {
+    b.innerHTML = linkifyMsgText(text);
+    bindMsgLinks(b);
+  }
   if (it.recalled) {
     const tag = document.createElement("span");
     tag.className = "recall-badge";
     tag.textContent = "已撤回" + (it.recall_who ? " · " + it.recall_who : "");
     b.appendChild(tag);
   }
-  const media = Array.isArray(parsed.media) ? parsed.media : [];
-  if (media.length) {
-    const mbox = document.createElement("div");
-    mbox.className = "qq-media";
-    for (const m of media) {
-      const src = qqLocalMediaSrc(m.path || "");
-      if (m.kind === "image") {
-        if (src) {
-          const img = document.createElement("img");
-          img.className = "qq-img";
-          img.loading = "lazy";
-          // 用缩略图（<200px，几百 KB）做展示源，点开才加载原图；
-          // 首屏几十张图时差别很大
-          img.src = src.replace("/api/qq/local/media?", "/api/qq/local/media/thumb?") + "&w=240";
-          img.alt = m.filename || "图片";
-          img.onclick = () => window.open("/api/qq/local/media?path=" +
-            encodeURIComponent(m.path || ""), "_blank");
-          mbox.appendChild(img);
-        }
-        // 未缓存到本机的图片：直接不显示（QQ 只缓存看过的图，占位和拉取失败反而碍眼）
-      } else if (m.kind === "voice") {
-        if (src) {
-          const au = document.createElement("audio");
-          au.className = "qq-audio";
-          au.controls = true;
-          au.preload = "none";
-          au.src = src;
-          mbox.appendChild(au);
-        }
-      } else if (m.kind === "video") {
-        if (src) {
-          const vd = document.createElement("video");
-          vd.className = "qq-video";
-          vd.controls = true;
-          vd.preload = "none";
-          vd.src = src;
-          mbox.appendChild(vd);
-        }
-      } else if (m.kind === "file") {
-        const a = document.createElement("a");
-        a.className = "qq-file";
-        a.textContent = "文件 · " + (m.filename || "未命名文件");
-        if (src) {
-          a.href = src;
-          a.setAttribute("download", m.filename || "");
-        }
-        mbox.appendChild(a);
+
+  const mbox = document.createElement("div");
+  mbox.className = "qq-media";
+  for (const m of media) {
+    if (!m || !m.kind) continue;
+    const src = qqLocalMediaSrc(m.path || "");
+    if (m.kind === "image") {
+      if (src) {
+        const img = document.createElement("img");
+        img.className = "qq-img";
+        img.loading = "lazy";
+        // 用缩略图（<200px，几百 KB）做展示源，点开才加载原图；
+        // 首屏几十张图时差别很大
+        img.src = src.replace("/api/qq/local/media?", "/api/qq/local/media/thumb?") + "&w=240";
+        img.alt = m.filename || "图片";
+        img.onclick = () => window.open("/api/qq/local/media?path=" +
+          encodeURIComponent(m.path || ""), "_blank");
+        mbox.appendChild(img);
       }
+      // 未缓存到本机的图片：直接不显示（QQ 只缓存看过的图，占位和拉取失败反而碍眼）
+    } else if (m.kind === "voice") {
+      if (src) {
+        const au = document.createElement("audio");
+        au.className = "qq-audio";
+        au.controls = true;
+        au.preload = "none";
+        au.src = src;
+        mbox.appendChild(au);
+      }
+    } else if (m.kind === "video") {
+      if (src) {
+        const vd = document.createElement("video");
+        vd.className = "qq-video";
+        vd.controls = true;
+        vd.preload = "none";
+        vd.src = src;
+        mbox.appendChild(vd);
+      }
+    } else if (m.kind === "file") {
+      const a = document.createElement("a");
+      a.className = "qq-file";
+      a.textContent = "文件 · " + (m.filename || "未命名文件");
+      if (src) {
+        a.href = src;
+        a.setAttribute("download", m.filename || "");
+      }
+      mbox.appendChild(a);
+    } else if (m.kind === "card" && (m.url || m.title)) {
+      // 分享卡片：点击走站内预览（和微信点链接卡片一致）
+      const a = document.createElement("a");
+      a.className = "qq-link-card";
+      if (m.url) a.href = m.url;
+      const tag = /miniapp/i.test(m.tag || "") ? "小程序" : (m.tag || "");
+      a.innerHTML = (tag ? "<b>" + esc(tag) + "</b>" : "")
+        + "<span>" + esc(m.title || m.url || "分享") + "</span>"
+        + (m.desc ? "<small>" + esc(m.desc) + "</small>" : "");
+      a.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (m.url) openLinkPreview(m.url, m.title || m.url);
+      };
+      mbox.appendChild(a);
     }
-    if (mbox.children.length) b.appendChild(mbox);
+  }
+  if (textCard) {
+    const a = document.createElement("a");
+    a.className = "qq-link-card";
+    a.href = textCard.url;
+    a.innerHTML = "<b>" + esc(textCard.tag || "链接") + "</b><span>" + esc(textCard.title) + "</span>";
+    a.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openLinkPreview(textCard.url, textCard.title);
+    };
+    mbox.appendChild(a);
+  }
+  if (mbox.children.length) b.appendChild(mbox);
+  // 只有媒体的消息（图片/视频/卡片）不套气泡底色，和 QQ/微信一致
+  if (!text && !it.recalled && mbox.children.length
+      && rendered.image + rendered.video + rendered.card > 0
+      && !rendered.voice && !rendered.file) {
+    b.classList.add("media-only");
   }
   col.appendChild(b);
+
   const refer = parsed.refer && parsed.refer.text;
-  if (refer && refer !== (parsed.text || "")) {
+  if (refer && refer !== rawText) {
     const q = document.createElement("div");
     q.className = "qq-reply";
     q.textContent = refer;

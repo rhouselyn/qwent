@@ -1797,3 +1797,12 @@ html[data-platform="qq"] .quote-ref { display: none; }
 .composer .icon-btn:hover, .composer-actions .icon-btn:hover {
   background: #f2f2f2 !important; color: #374151 !important;
 }
+
+/* QQ 聊天里的分享卡片 / 裸链接 / 纯媒体消息 */
+.msg-link { color: #2f6fd0; text-decoration: none; word-break: break-all; }
+.msg-link:hover { text-decoration: underline; }
+.bubble.media-only {
+  background: transparent !important; border: 0 !important;
+  padding: 0 !important; box-shadow: none !important;
+}
+.link-badge.fail { background: #fef2f2; color: #b91c1c; }

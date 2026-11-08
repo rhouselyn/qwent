@@ -6462,9 +6462,22 @@ def _qq_link_parse_worker(limit: int):
             _qq_link_parse_state["progress"] = f"解析 {i + 1}/{len(items)}…"
             _qq_link_parse_state["last"] = url[:80]
             try:
-                fetch_article(url)
+                res = fetch_article(url) or {}
+                if res.get("error"):
+                    # 记失败原因：列表里显示「解析失败」而不是永远「解析中」
+                    qq_local.mark_link_state(con, _rid, "failed", res["error"])
+                elif res.get("pending"):
+                    pass      # 平台解析还在后台跑，下一轮再判定
+                elif res.get("text") or res.get("cached"):
+                    qq_local.mark_link_state(con, _rid, "ok", "")
+                else:
+                    qq_local.mark_link_state(con, _rid, "failed", "没有抓到正文")
             except Exception as exc:  # noqa: BLE001
                 log.warning("qq link parse failed: %s %s", url[:60], exc)
+                try:
+                    qq_local.mark_link_state(con, _rid, "failed", str(exc)[:240])
+                except Exception:
+                    pass
         _qq_link_parse_state["progress"] = "解析完成"
     except Exception as exc:  # noqa: BLE001
         _qq_link_parse_state["error"] = str(exc)[:300]
@@ -6519,6 +6532,27 @@ def api_qq_local_reparse_cards():
         res = qq_local.reparse_cards(con, live_dir)
     finally:
         con.close()
+    return {"ok": True, **res}
+
+
+@app.post("/api/qq/local/reparse-placeholders")
+def api_qq_local_reparse_placeholders():
+    """把历史「[消息]」占位重新解析（40800/8 的拍一拍现在能还原成「拍了拍 xxx」）。
+
+    现解一份最新的 nt_msg.db（data/qq_live 那份可能落后好几天），用完即删。
+    """
+    import shutil
+    try:
+        acct = qq_local.pick_account()
+        tmp = qq_local.decrypt_targets(acct, only=("nt_msg.db",))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(409, f"QQ 数据库解密失败：{exc}")
+    con = db()
+    try:
+        res = qq_local.reparse_placeholders(con, tmp)
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
     return {"ok": True, **res}
 
 

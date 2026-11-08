@@ -506,6 +506,70 @@ def _hexb(v) -> str:
     return v.hex() if isinstance(v, bytes) else ""
 
 
+def _card_fields_json(obj, depth: int = 0) -> tuple[str, str, str]:
+    """在任意嵌套的卡片 JSON 里找 标题/描述/跳转地址（分享类型字段名不统一）。"""
+    title = desc = url = ""
+    if depth > 6:
+        return title, desc, url
+    if isinstance(obj, list):
+        for it in obj:
+            t, d, u = _card_fields_json(it, depth + 1)
+            title = title or t
+            desc = desc or d
+            url = url or u
+        return title, desc, url
+    if not isinstance(obj, dict):
+        return title, desc, url
+    for k, v in obj.items():
+        lk = str(k).lower()
+        if isinstance(v, (dict, list)):
+            t, d, u = _card_fields_json(v, depth + 1)
+            title = title or t
+            desc = desc or d
+            url = url or u
+            continue
+        if not isinstance(v, str):
+            continue
+        val = v.strip()
+        if not val or len(val) > 2000:
+            continue
+        if lk in ("jumpurl", "url", "qqdocurl", "source_url", "h5url", "link",
+                  "jump_url", "share_url") and not url and val.startswith("http"):
+            url = val
+        elif lk in ("title", "summary", "preview") and not title and not val.startswith("http"):
+            title = val
+        elif lk in ("desc", "description", "content", "brief") and not desc:
+            desc = val
+    return title, desc, url
+
+
+def _card_fields_from(raw: str) -> tuple[str, str, str]:
+    """从卡片原始载荷（JSON 或 XML）里抽 标题/描述/链接。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return "", "", ""
+    if raw[:1] in "{[":
+        try:
+            return _card_fields_json(json.loads(raw))
+        except Exception:
+            pass
+    title = desc = url = ""
+    m = re.search(r"<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", raw, re.S)
+    if m:
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+    m = re.search(r"<summary[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</summary>", raw, re.S)
+    if m:
+        desc = re.sub(r"\s+", " ", m.group(1)).strip()
+    m = re.search(r"<url[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</url>", raw, re.S)
+    if m and m.group(1).strip().lower().startswith("http"):
+        url = m.group(1).strip()
+    if not url:
+        m = re.search(r"https?://[^\s<>\"']+", raw)
+        if m:
+            url = m.group(0)
+    return title, desc, url
+
+
 def _parse_message(blob: bytes, mtype: int) -> dict:
     segs = _segments(blob)
     if not segs:
@@ -561,17 +625,40 @@ def _parse_message(blob: bytes, mtype: int) -> dict:
             elif ref:
                 texts.append(ref)
         elif ct == 8:
-            kind = "reply"
+            # 40800/8：正常回复；既没正文也没引用文本的是「拍一拍」，
+            # 47705 是被拍的人昵称（以前一律落成 "[消息]"，827 条全是这种）
+            target = (_dec(one(47705, b"")) or _dec(one(47714, b"")) or "").strip()
             ref = _dec(one(47713, b"")) or _nested_text((seg["d"].get(5) or [b""])[0])
-            if ref:
-                refer = {"who": "", "text": ref}
-            if text or ref:
-                texts.append(text or ref)
+            if not text and not ref and target:
+                kind = "poke"
+                texts.append("拍了拍 " + target)
+            else:
+                kind = "reply"
+                if ref:
+                    refer = {"who": "", "text": ref}
+                if text or ref:
+                    texts.append(text or ref)
         elif ct == 9:
+            # 小程序 / 应用卡片：正文在 48403，跳转地址/标题常在 47901 JSON 或 48602 XML 里
             kind = "card"
-            t = (_nested_text((seg["d"].get(48403) or [b""])[0])
-                 or _loose_text((seg["d"].get(48403) or [b""])[0]) or text)
-            texts.append("[卡片] " + (t[:80] if t else ""))
+            tl = (_nested_text((seg["d"].get(48403) or [b""])[0])
+                  or _loose_text((seg["d"].get(48403) or [b""])[0]) or text)
+            c_title = c_desc = c_url = ""
+            raws = [_dec(one(47901, b"")), _dec(one(48602, b""))]
+            for raw in raws:
+                if not raw:
+                    continue
+                t2, d2, u2 = _card_fields_from(raw)
+                c_title = c_title or t2
+                c_desc = c_desc or d2
+                c_url = c_url or u2
+            if c_title or c_url:
+                label = "小程序" if "miniapp" in (tl or "").lower() or not tl else ""
+                texts.append(("[" + (label or "卡片") + "] " + (c_title or tl))[:120])
+                media.append({"kind": "card", "title": c_title or tl, "desc": c_desc,
+                              "url": c_url, "tag": label or "卡片"})
+            else:
+                texts.append("[卡片] " + (tl[:80] if tl else ""))
         elif ct == 10:
             # 40800/10 = 结构化卡片（JSON）：分享链接 / 小程序 / 聊天记录转发
             meta = _dec(one(47901, b""))
@@ -588,6 +675,12 @@ def _parse_message(blob: bytes, mtype: int) -> dict:
                     title = str(desc or "")
             except Exception:
                 pass
+            # 卡片结构各式各样（news/detail/miniapp/appmsg…）：再递归捞一遍标题/描述/链接
+            if not jump or not title:
+                t2, d2, u2 = _card_fields_from(meta)
+                title = title or t2
+                desc = desc or d2
+                jump = jump or u2
             is_forward = bool(re.search(r"viewMultiMsg|聊天记录|multi_msg", meta or ""))
             if is_forward:
                 kind = "forward"
@@ -596,6 +689,8 @@ def _parse_message(blob: bytes, mtype: int) -> dict:
                 # 分享链接 / 小程序：保留标题与跳转地址，前端渲染成卡片
                 kind = "card"
                 label = tag.strip() or "分享"
+                if label.lower().startswith("com.tencent.miniapp"):
+                    label = "小程序"
                 texts.append(f"[{label}] {title}".strip())
                 card = {"kind": "card", "title": title, "desc": desc,
                         "url": jump, "tag": label}
@@ -909,7 +1004,7 @@ def _media_index(account: Path) -> dict:
 
 def _ctype_of(parsed: dict) -> int:
     return {"text": 1, "image": 2, "file": 3, "voice": 4, "video": 5,
-            "sticker": 6, "reply": 7, "card": 9, "forward": 10,
+            "sticker": 6, "reply": 7, "poke": 8, "card": 9, "forward": 10,
             "system": 17, "call": 21}.get(str(parsed.get("kind") or ""), 0)
 
 
@@ -1092,6 +1187,50 @@ def reparse_cards(con: sqlite3.Connection, decrypt_dir: Path, limit: int = 0,
     finally:
         con_msg.close()
     return {"scanned": len(targets), "patched": patched}
+
+
+def reparse_placeholders(con: sqlite3.Connection, decrypt_dir: Path,
+                         progress=None) -> dict:
+    """重解析历史占位消息（text='[消息]'）。
+
+    以前 40800/8 的「拍一拍」没有正文，一律落成 [消息]（827 条）。现在按
+    47705 的被拍人昵称还原成「拍了拍 xxx」。只更新能解析出内容的行。
+    """
+    con_msg = sqlite3.connect(str(Path(decrypt_dir) / "nt_msg.db"))
+    patched = 0
+    missing = 0
+    try:
+        rows = con.execute(
+            "SELECT id, msg_id, conv FROM qq_local_message WHERE text='[消息]'"
+        ).fetchall()
+        targets = {int(r[1]): (int(r[0]), r[2] or "") for r in rows if r[1]}
+        if not targets:
+            return {"scanned": 0, "patched": 0, "missing": 0}
+        for table in ("c2c_msg_table", "group_msg_table"):
+            for row in _rows_chunked(con_msg, table,
+                                     ["40001", "40011", "40800"], chunk=500):
+                _rid, msg_id, mtype, blob = row
+                mid = int(msg_id or 0)
+                if mid not in targets:
+                    continue
+                try:
+                    parsed = _parse_message(blob or b"", int(mtype or 0))
+                except Exception:
+                    continue
+                if (parsed.get("text") or "") in ("", "[消息]"):
+                    continue
+                con.execute(
+                    "UPDATE qq_local_message SET text=?, parsed=?, ctype=? WHERE id=?",
+                    (parsed.get("text") or "", json.dumps(parsed, ensure_ascii=False),
+                     _ctype_of(parsed), targets[mid][0]))
+                patched += 1
+                if progress and patched % 100 == 0:
+                    progress(f"已重解析 {patched} 条…")
+        con.commit()
+        missing = max(0, len(targets) - patched)
+    finally:
+        con_msg.close()
+    return {"scanned": len(targets), "patched": patched, "missing": missing}
 
 
 def db_fingerprints(qq: str | None = None) -> dict:
@@ -1437,6 +1576,15 @@ def ensure_schema(con: sqlite3.Connection) -> None:
             con.execute("ALTER TABLE qq_local_message ADD COLUMN recall_who TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+    # 旧库升级：链接解析状态（ok / failed + 失败原因），避免失败的链接一直显示「解析中」
+    lcols = {r[1] for r in con.execute("PRAGMA table_info(qq_link)")}
+    for col, ddl in (("state", "TEXT DEFAULT ''"), ("error", "TEXT DEFAULT ''"),
+                     ("try_ts", "INTEGER DEFAULT 0")):
+        if col not in lcols:
+            try:
+                con.execute(f"ALTER TABLE qq_link ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass
     con.commit()
 
 
@@ -1840,7 +1988,8 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
         args.append(int(time.time()) - int(days) * 86400)
     cond = (" WHERE " + " AND ".join(where)) if where else ""
     order = "l.ts ASC" if sort == "old" else "l.ts DESC"
-    sql = ("SELECT l.id,l.url,l.title,l.conv,c.name AS conv_name,l.msg_id,l.ts "
+    sql = ("SELECT l.id,l.url,l.title,l.conv,c.name AS conv_name,l.msg_id,l.ts,"
+           "IFNULL(l.state,''),IFNULL(l.error,'') "
            "FROM qq_link l LEFT JOIN qq_chat c ON c.conv=l.conv" + cond +
            f" ORDER BY {order} LIMIT ? OFFSET ?")
     page_args = args + [max(1, min(limit, 500)), max(0, offset)]
@@ -1855,7 +2004,8 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
             parsed_urls.add(normalize_url(u))
     except Exception:
         parsed_urls = set()
-    keys = ["id", "url", "title", "conv", "conv_name", "msg_id", "ts"]
+    keys = ["id", "url", "title", "conv", "conv_name", "msg_id", "ts",
+            "state", "error"]
     out = []
     for r in con.execute(sql, page_args).fetchall():
         d = dict(zip(keys, r))
@@ -1863,7 +2013,12 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
             d["parsed"] = normalize_url(d["url"]) in parsed_urls
         except Exception:
             d["parsed"] = False
-        d["state"] = 1 if d["parsed"] else 0
+        d["stored_state"] = d.pop("state") or ""
+        d["error"] = d.get("error") or ""
+        if d["parsed"]:
+            d["state"] = "ok"
+        else:
+            d["state"] = d["stored_state"] or "pending"
         d["platform_key"] = _link_platform(d["url"])
         d["platform"] = {"xhs": "小红书", "bili": "B站",
                          "article": "文章", "generic": "网页"}.get(
@@ -1877,14 +2032,28 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
     if state == "parsed":
         out = [x for x in out if x["parsed"]]
     elif state == "pending":
-        out = [x for x in out if not x["parsed"]]
+        out = [x for x in out if not x["parsed"] and x["state"] != "failed"]
+    elif state == "failed":
+        out = [x for x in out if not x["parsed"] and x["state"] == "failed"]
     total = con.execute("SELECT COUNT(*) FROM qq_link").fetchone()[0] or 0
     return {"links": out, "hasMore": len(out) >= max(1, min(limit, 500)),
             "stats": {"total": total, "parsed": len(parsed_urls)}}
 
 
+RETRY_FAILED_AFTER = 3 * 86400      # 解析失败的链接 3 天后重试
+
+
+def mark_link_state(con: sqlite3.Connection, link_id: int, state: str,
+                    error: str = "") -> None:
+    """记录链接解析结果：ok / failed（+ 原因），失败的不再无限重试。"""
+    ensure_schema(con)
+    con.execute("UPDATE qq_link SET state=?, error=?, try_ts=? WHERE id=?",
+                (state, (error or "")[:240], int(time.time()), int(link_id)))
+    con.commit()
+
+
 def links_to_parse(con: sqlite3.Connection, limit: int = 20) -> list[tuple[int, str]]:
-    """待解析 QQ 链接（没有正文缓存的），按时间倒序。"""
+    """待解析 QQ 链接（没有正文缓存的），按时间倒序；失败过的 3 天后才重试。"""
     ensure_schema(con)
     try:
         from link_media import normalize_url
@@ -1896,9 +2065,13 @@ def links_to_parse(con: sqlite3.Connection, limit: int = 20) -> list[tuple[int, 
             parsed_urls.add(normalize_url(u))
     except Exception:
         return []
-    rows = con.execute("SELECT id,url FROM qq_link ORDER BY ts DESC LIMIT 2000").fetchall()
+    rows = con.execute("SELECT id,url,IFNULL(state,''),IFNULL(try_ts,0) "
+                       "FROM qq_link ORDER BY ts DESC LIMIT 2000").fetchall()
+    now = time.time()
     out = []
-    for rid, url in rows:
+    for rid, url, st, try_ts in rows:
+        if st == "failed" and now - int(try_ts or 0) < RETRY_FAILED_AFTER:
+            continue
         try:
             if normalize_url(url) not in parsed_urls:
                 out.append((rid, url))
