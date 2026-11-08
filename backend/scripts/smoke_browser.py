@@ -286,18 +286,15 @@ try:
     time.sleep(0.6)
     js("[...document.querySelectorAll('#settingsNav .sf-item')].find(x=>x.dataset.sec==='about').click()")
     time.sleep(1.6)
+    for _ in range(30):
+        if (js("document.querySelectorAll('#kbStats .settings-stat').length") or 0) >= 6:
+            break
+        time.sleep(0.4)
+    time.sleep(0.3)
     qqAbout = js("document.querySelector('#sfBody').textContent") or ""
-    check("QQ 关于页显示 QQ 概览", "QQ 消息" in qqAbout, qqAbout.strip().replace("\n", " ")[:120])
+    check("QQ 关于页显示 QQ 概览", ("QQ 消息" in qqAbout) and ("QQ 占用" in qqAbout),
+          qqAbout.strip().replace("\n", " ")[:140])
     check("QQ 关于页不显示微信统计", "545" not in qqAbout and "843" not in qqAbout, "qqAbout length " + str(len(qqAbout)))
-    js("""
-      (async () => {
-        if (window.__pinnedConv) {
-          await fetch('/api/qq/local/session/pin', {method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({conv: window.__pinnedConv, pinned:0})});
-        }
-      })()
-    """)
     shot("10-qq-about")
     # 回到 AI 模型页，避免后续设置测试停留在 about 分区
     js("[...document.querySelectorAll('#settingsNav .sf-item')].find(x=>x.dataset.sec==='model').click()")
@@ -337,11 +334,14 @@ try:
           js("document.querySelectorAll('#qqConvList .qq-conv .pin-act').length"))
     check("QQ 会话显示真实头像", (js("document.querySelectorAll('#qqConvList .qq-ava img').length") or 0) > 0,
           js("document.querySelectorAll('#qqConvList .qq-ava img').length"))
-    # 先置顶一个会话，验证「背景加深、不显示针形图标」
+    # 先置顶一个会话，验证「背景加深、不显示针形图标」；记下用户原有置顶，结束后原样恢复
     js("""
       (async () => {
-        const d = await fetch('/api/qq/local/sessions?limit=1').then(r=>r.json());
-        const conv = (d.sessions||[{}])[0].conv;
+        const d = await fetch('/api/qq/local/sessions?limit=200').then(r=>r.json());
+        const all = d.sessions || [];
+        window.__origPins = all.filter(x => x.pinned).map(x => x.conv);
+        const target = all.find(x => !x.pinned);
+        const conv = target ? target.conv : (all[0] || {}).conv;
         if (conv) {
           await fetch('/api/qq/local/session/pin', {method:'POST',
             headers:{'Content-Type':'application/json'},
@@ -350,7 +350,7 @@ try:
         }
         window.__pinnedConv = conv || '';
       })()
-    """)
+    """, await_promise=True)
     time.sleep(1.2)
     check("QQ 置顶用底色不用针形图标",
           (js("document.querySelectorAll('#qqConvList .pin-mark').length") or 0) == 0,
@@ -363,6 +363,25 @@ try:
     check("QQ 会话详情走 SSE 订阅",
           "EventSource" in str(js("String(qqLiveStart)")) and
           "/api/qq/local/stream" in str(js("String(qqLiveStart)")), "qqLiveStart uses EventSource")
+    # 还原用户原有置顶（测试临时加的取消掉，原有的恢复）
+    js("""
+      (async () => {
+        const orig = window.__origPins || [];
+        const mine = window.__pinnedConv;
+        if (mine && !orig.includes(mine)) {
+          await fetch('/api/qq/local/session/pin', {method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({conv: mine, pinned:0})});
+        }
+        for (const c of orig) {
+          await fetch('/api/qq/local/session/pin', {method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({conv: c, pinned:1})});
+        }
+        await loadQqConversations();
+      })()
+    """, await_promise=True)
+    time.sleep(0.5)
     # 打开一个本地会话，验证中置时间与气泡对齐
     js("""
       (async () => {

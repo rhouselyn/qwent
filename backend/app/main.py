@@ -6318,6 +6318,14 @@ def api_qq_local_session_pin(payload: dict):
     con = db()
     try:
         qq_local.set_pinned(con, conv, bool(payload.get("pinned")))
+        # 留痕：置顶被意外改动时能从日志追溯是谁改的
+        try:
+            import traceback
+            caller = " / ".join(
+                f"{f.name}:{f.lineno}" for f in traceback.extract_stack()[-4:-1])
+        except Exception:
+            caller = ""
+        print(f"[qq_pin] {conv} -> {bool(payload.get('pinned'))} ({caller})")
     finally:
         con.close()
     return {"ok": True, "conv": conv, "pinned": bool(payload.get("pinned"))}

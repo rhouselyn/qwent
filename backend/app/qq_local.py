@@ -1076,6 +1076,13 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
     """
     ensure_schema(con)
     if rebuild:
+        # 置顶是用户偏好，全量重建也不能丢：先存下来，重建后恢复
+        pinned_rows = []
+        try:
+            pinned_rows = con.execute(
+                "SELECT conv, IFNULL(pinned,0) FROM qq_chat WHERE IFNULL(pinned,0)=1").fetchall()
+        except sqlite3.OperationalError:
+            pinned_rows = []
         for t in ("qq_local_message", "qq_chat", "qq_contact", "qq_file", "qq_link"):
             con.execute(f"DELETE FROM {t}")
         con.commit()
@@ -1318,6 +1325,10 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
                 "last_text=excluded.last_text,last_is_sender=excluded.last_is_sender",
                 (conv, a["name"], a["is_group"], a["uin"], a["uid"],
                  a["last_ts"], a["cnt"], a["last_text"][:200], a["last_is_sender"]))
+        # 全量重建后恢复置顶（只有会话仍存在时才写回）
+        if rebuild and pinned_rows:
+            for conv, _p in pinned_rows:
+                con.execute("UPDATE qq_chat SET pinned=1 WHERE conv=?", (conv,))
         # 增量模式：窗口内计数只是增量，受影响会话按全表重算，保证可重复执行
         if since_ts and conv_agg:
             affected = list(conv_agg.keys())

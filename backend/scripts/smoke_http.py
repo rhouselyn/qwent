@@ -173,13 +173,19 @@ check("qq realtime config present", "realtime" in sync_st.get("config", {}),
 check("qq sync imported data", (sync_st.get("stats") or {}).get("messages", 0) > 0,
       (sync_st.get("stats") or {}).get("messages"))
 call("POST", "/api/qq/local/sync/config", {"auto": True, "interval_min": 10})
+# 置顶测试：用测试专用会话，并完整还原用户原有的置顶状态
+_orig_pins = {(x.get("conv") or "") for x in (ls.get("sessions") or []) if x.get("pinned")}
 pinv = (ls.get("sessions") or [{}])[0].get("conv") if ls.get("sessions") else ""
 if pinv:
     call("POST", "/api/qq/local/session/pin", {"conv": pinv, "pinned": 1})
     ls2, _ = call("GET", "/api/qq/local/sessions?limit=5")
     top = (ls2.get("sessions") or [{}])[0]
     check("qq pin moves session to top", top.get("conv") == pinv and top.get("pinned") == 1, top.get("conv"))
-    call("POST", "/api/qq/local/session/pin", {"conv": pinv, "pinned": 0})
+    # 还原：测试新增的取消掉，用户原来的恢复
+    if pinv not in _orig_pins:
+        call("POST", "/api/qq/local/session/pin", {"conv": pinv, "pinned": 0})
+    else:
+        call("POST", "/api/qq/local/session/pin", {"conv": pinv, "pinned": 1})
 call("POST", "/api/qq/local/session/pin", {"conv": "bad", "pinned": 1}, expect=400)
 
 # 4b. 微信 / QQ 两套 Agent 的 AI 会话互不混用

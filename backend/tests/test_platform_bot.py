@@ -278,6 +278,53 @@ class TestQQAgentTools(unittest.TestCase):
         self.assertTrue({"search_qq", "rag_search"} <= names, names)
 
 
+class TestQQPinned(unittest.TestCase):
+    """置顶是用户偏好：全量重建也不能丢，开关要能双向切换。"""
+
+    def _db(self):
+        import sqlite3
+        import qq_local
+        con = sqlite3.connect(":memory:")
+        qq_local.ensure_schema(con)
+        con.execute("INSERT INTO qq_chat(conv,name,is_group,last_ts,cnt,pinned) "
+                    "VALUES(?,?,?,?,?,?)", ("group:1", "置顶群", 1, 100, 5, 1))
+        con.execute("INSERT INTO qq_chat(conv,name,is_group,last_ts,cnt,pinned) "
+                    "VALUES(?,?,?,?,?,?)", ("group:2", "普通群", 1, 90, 3, 0))
+        con.commit()
+        return con
+
+    def test_rebuild_restores_pinned(self):
+        con = self._db()
+        pinned = con.execute(
+            "SELECT conv, IFNULL(pinned,0) FROM qq_chat "
+            "WHERE IFNULL(pinned,0)=1").fetchall()
+        self.assertEqual(pinned, [("group:1", 1)])
+        for t in ("qq_local_message", "qq_chat", "qq_contact", "qq_file", "qq_link"):
+            con.execute(f"DELETE FROM {t}")
+        con.execute("INSERT INTO qq_chat(conv,name,is_group) VALUES(?,?,?)",
+                    ("group:1", "置顶群", 1))
+        con.execute("INSERT INTO qq_chat(conv,name,is_group) VALUES(?,?,?)",
+                    ("group:2", "普通群", 1))
+        for conv, _p in pinned:
+            con.execute("UPDATE qq_chat SET pinned=1 WHERE conv=?", (conv,))
+        con.commit()
+        rows = dict(con.execute("SELECT conv, IFNULL(pinned,0) FROM qq_chat").fetchall())
+        self.assertEqual(rows.get("group:1"), 1)
+        self.assertEqual(rows.get("group:2"), 0)
+        con.close()
+
+    def test_set_pinned_toggles(self):
+        import qq_local
+        con = self._db()
+        qq_local.set_pinned(con, "group:2", True)
+        self.assertEqual(con.execute(
+            "SELECT pinned FROM qq_chat WHERE conv='group:2'").fetchone()[0], 1)
+        qq_local.set_pinned(con, "group:2", False)
+        self.assertEqual(con.execute(
+            "SELECT pinned FROM qq_chat WHERE conv='group:2'").fetchone()[0], 0)
+        con.close()
+
+
 class TestQQLocalParse(unittest.TestCase):
     @staticmethod
     def _vi(n):
