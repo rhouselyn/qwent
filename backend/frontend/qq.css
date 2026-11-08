@@ -429,3 +429,7 @@ html[data-platform="qq"] .chat-column > .composer-wrap .scope-pill .scope-toggle
 html[data-platform="qq"] .scope-pill .scope-toggle input { accent-color: var(--qq-blue); }
 html[data-platform="qq"] .mode-segment.slim-segment label:has(input:checked) { color: #0a72c6; background: #e6f5ff; }
 html[data-platform="qq"] .tool-pill-toggle:has(input:checked) { color: #0a72c6; background: #e6f5ff; border-color: #a8d9f5; }
+
+/* 链接卡片标签改用 QQ 蓝（微信是品牌绿） */
+html[data-platform="qq"] .link-card b { color: #0a8edc; background: rgba(10, 142, 220, .1); }
+html[data-platform="qq"] .link-card:hover { border-color: rgba(10, 142, 220, .35); }

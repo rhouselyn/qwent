@@ -1806,3 +1806,22 @@ html[data-platform="qq"] .quote-ref { display: none; }
   padding: 0 !important; box-shadow: none !important;
 }
 .link-badge.fail { background: #fef2f2; color: #b91c1c; }
+
+/* 简洁链接卡片（微信/QQ 共用；QQ 的标签底色在 qq.css 覆盖成蓝色） */
+.link-card {
+  display: block; margin-top: 6px; padding: 8px 10px;
+  border-radius: 8px; background: #fff; border: 1px solid rgba(16, 40, 70, .1);
+  text-decoration: none; color: #1f2937; max-width: 280px;
+}
+.bubble .link-card:first-child, .qq-media .link-card:first-child { margin-top: 0; }
+.link-card b {
+  display: inline-block; font-size: 11px; font-weight: 600; color: var(--green-deep);
+  background: rgba(7, 169, 87, .1); border-radius: 4px;
+  padding: 1px 6px; margin-bottom: 4px;
+}
+.link-card span { display: block; font-size: 13px; line-height: 1.45; }
+.link-card small { display: block; margin-top: 3px; font-size: 11px; color: #7b8794; line-height: 1.4; }
+.link-card:hover { border-color: rgba(10, 142, 220, .35); }
+.msg.right .bubble .link-card span,
+.msg.right .bubble .link-card small { color: #1f2937; }
+.msg.right .bubble .link-card small { color: #7b8794; }

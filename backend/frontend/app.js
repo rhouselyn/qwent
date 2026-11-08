@@ -746,13 +746,8 @@ function renderBubbleContent(m, p) {
     // 纯文本里的分享链接 / 裸链接：和 QQ 一样可点（站内预览）
     const card = typeof parseTextCard === "function" ? parseTextCard(p.text) : null;
     if (card) {
-      el.className = "card";
-      el.innerHTML = `<span class="t">[链接] ${esc(card.title)}</span>`
-        + (card.tag ? `<div class="d">${esc(card.tag)}</div>` : "")
-        + (card.url ? `<div class="u">${esc(card.url)}</div>` : "")
-        + `<div class="go">点击阅读正文 ↗</div>`;
-      el.style.cursor = "pointer";
-      el.onclick = () => openLinkPreview(card.url, card.title);
+      el.appendChild(makeLinkCard({ tag: card.tag || linkSiteLabel(card.url),
+                                    title: card.title, desc: "", url: card.url }));
       return el;
     }
     if (/https?:\/\//.test(p.text) && typeof linkifyMsgText === "function") {
@@ -895,15 +890,12 @@ function renderBubbleContent(m, p) {
       return el;
     }
     case "link": {
-      el.className = "card";
-      el.innerHTML = `<span class="t">[链接] ${esc(p.title || "")}</span>` +
-        (p.des ? `<div class="d">${esc(p.des)}</div>` : "") +
-        (p.url ? `<div class="u">${esc(p.url)}</div>` : "") +
-        (p.url ? '<div class="go">点击阅读正文 ↗</div>' : "");
-      if (p.url) {
-        el.style.cursor = "pointer";
-        el.onclick = () => openLinkPreview(p.url, p.title || "网页");
-      }
+      el.appendChild(makeLinkCard({
+        tag: p.platform || linkSiteLabel(p.url),
+        title: p.title || p.url || "链接",
+        desc: p.des || "",
+        url: p.url || "",
+      }));
       return el;
     }
     default: el.textContent = p.text || "[不支持的消息]"; return el;
@@ -3611,15 +3603,9 @@ function renderQqMessage(it) {
         }
         mbox.appendChild(a);
       } else if (m.kind === "card" && m.url) {
-        // 分享链接 / 小程序卡片：点击打开对应链接
-        const a = document.createElement("a");
-        a.className = "qq-link-card";
-        a.href = m.url;
-        a.target = "_blank";
-        a.rel = "noopener";
-        a.innerHTML = `<b>${esc(m.tag || "分享")}</b><span>${esc(m.title || m.url)}</span>`
-          + (m.desc ? `<small>${esc(m.desc)}</small>` : "");
-        mbox.appendChild(a);
+        // 分享链接 / 小程序卡片：点击打开站内预览
+        mbox.appendChild(makeLinkCard({ tag: m.tag || "分享", title: m.title || m.url,
+                                        desc: m.desc || "", url: m.url }));
       }
     }
     if (mbox.children.length) b.appendChild(mbox);
@@ -3765,6 +3751,36 @@ function linkifyMsgText(text) {
     const url = part.replace(/[.,;:!?]+$/, "");
     return '<a class="msg-link" href="#" data-url="' + attrEsc(url) + '">' + esc(url) + "</a>";
   }).join("");
+}
+
+/* 站点标签：链接卡片左上角的小 chip（和 QQ 分享卡片一致） */
+function linkSiteLabel(url) {
+  const u = String(url || "").toLowerCase();
+  if (!u) return "";
+  if (u.includes("xiaohongshu.com")) return "小红书";
+  if (u.includes("bilibili.com") || u.includes("b23.tv")) return "B站";
+  if (u.includes("mp.weixin.qq.com")) return "公众号";
+  if (u.includes("xiaoheihe.cn")) return "小黑盒";
+  if (u.includes("zhihu.com")) return "知乎";
+  if (u.includes("weibo.com") || u.includes("weibo.cn")) return "微博";
+  if (u.includes("douyin.com")) return "抖音";
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return "链接"; }
+}
+
+/* 简洁链接卡片：小的站点标签 + 标题 + 可选描述，整块可点（站内预览） */
+function makeLinkCard({ tag, title, desc, url }) {
+  const a = document.createElement("a");
+  a.className = "link-card";
+  if (url) a.href = url;
+  a.innerHTML = (tag ? `<b>${esc(tag)}</b>` : "")
+    + `<span>${esc(title || url || "链接")}</span>`
+    + (desc ? `<small>${esc(desc)}</small>` : "");
+  a.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (url) openLinkPreview(url, title || url);
+  };
+  return a;
 }
 
 function bindMsgLinks(root) {
@@ -3920,32 +3936,14 @@ function renderQqLocalMessage(it) {
       mbox.appendChild(a);
     } else if (m.kind === "card" && (m.url || m.title)) {
       // 分享卡片：点击走站内预览（和微信点链接卡片一致）
-      const a = document.createElement("a");
-      a.className = "qq-link-card";
-      if (m.url) a.href = m.url;
       const tag = /miniapp/i.test(m.tag || "") ? "小程序" : (m.tag || "");
-      a.innerHTML = (tag ? "<b>" + esc(tag) + "</b>" : "")
-        + "<span>" + esc(m.title || m.url || "分享") + "</span>"
-        + (m.desc ? "<small>" + esc(m.desc) + "</small>" : "");
-      a.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (m.url) openLinkPreview(m.url, m.title || m.url);
-      };
-      mbox.appendChild(a);
+      mbox.appendChild(makeLinkCard({ tag, title: m.title || m.url || "分享",
+                                      desc: m.desc || "", url: m.url || "" }));
     }
   }
   if (textCard) {
-    const a = document.createElement("a");
-    a.className = "qq-link-card";
-    a.href = textCard.url;
-    a.innerHTML = "<b>" + esc(textCard.tag || "链接") + "</b><span>" + esc(textCard.title) + "</span>";
-    a.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      openLinkPreview(textCard.url, textCard.title);
-    };
-    mbox.appendChild(a);
+    mbox.appendChild(makeLinkCard({ tag: textCard.tag || linkSiteLabel(textCard.url),
+                                    title: textCard.title, desc: "", url: textCard.url }));
   }
   if (mbox.children.length) b.appendChild(mbox);
   // 只有媒体的消息（图片/视频/卡片）不套气泡底色，和 QQ/微信一致
