@@ -637,13 +637,22 @@ function avatarImgHtml(username, name, extraStyle) {
       <span class="ava-fallback">${letter}</span></div>`;
 }
 
-/* QQ 真实头像：好友用 QQ 号、群用群号请求 /api/qq/avatar，失败回退首字母 */
-const noQqAvatar = new Set();
+/* QQ 真实头像：好友用 QQ 号、群用群号请求 /api/qq/avatar，失败回退首字母。
+   失败缓存带 10 分钟有效期：CDN 抖动/限流导致一次失败，不该整场会话都看不到头像
+   （新加好友最容易撞上这一下）。 */
+const noQqAvatar = new Map();
+const QQ_AVATAR_RETRY_MS = 10 * 60 * 1000;
+function qqAvatarBlocked(k) {
+  const ts = noQqAvatar.get(k);
+  if (!ts) return false;
+  if (Date.now() - ts > QQ_AVATAR_RETRY_MS) { noQqAvatar.delete(k); return false; }
+  return true;
+}
 function qqAvatarHtml(kind, key, name, extra) {
   key = key == null ? "" : String(key);      // uin 是数字，hue() 只接受字符串
   const letter = esc(initial(name || "Q"));
   const bg = `background:${hue(key || String(name || ""))};`;
-  if (!key || noQqAvatar.has(kind + ":" + key)) {
+  if (!key || qqAvatarBlocked(kind + ":" + key)) {
     return `<div class="ava qq-ava" style="${extra || bg}"><span class="ava-fallback">${letter}</span></div>`;
   }
   return `<div class="ava qq-ava" style="${extra || bg}">
@@ -651,7 +660,7 @@ function qqAvatarHtml(kind, key, name, extra) {
            loading="lazy" onerror="this.style.display='none';this.parentNode.classList.add('ava-letter');window.__qqNoAvatar('${kind}:${encodeURIComponent(key)}')">
       <span class="ava-fallback">${letter}</span></div>`;
 }
-window.__qqNoAvatar = (k) => { if (k) noQqAvatar.add(k); };
+window.__qqNoAvatar = (k) => { if (k) noQqAvatar.set(k, Date.now()); };
 
 function avatarFor(m) {
   const d = document.createElement("div");

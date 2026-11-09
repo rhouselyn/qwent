@@ -855,6 +855,62 @@ def _contacts(dbdir: Path, progress=None) -> tuple[dict, dict, dict, set]:
     return by_uid, by_uin, groups, friend_uids
 
 
+def sync_contacts(con: sqlite3.Connection, account: Path | None = None) -> dict:
+    """把 QQ 好友/群名单增量同步进来。
+
+    实时同步以前只维护 nt_msg.db，新加的好友、改过的备注都要等一次全量导入
+    才出现在通讯录（头像也拿不到 uin）。这里单独解密 profile_info.db /
+    group_info.db（约 1~3 秒）做 upsert，不改 last_ts/cnt。
+    """
+    ensure_schema(con)
+    import shutil
+    account = account or pick_account()
+    tmp = decrypt_targets(account, only=("profile_info.db", "group_info.db"))
+    try:
+        by_uid, _by_uin, groups, friend_uids = _contacts(Path(tmp))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    self_uin = int(account.name) if str(account.name).isdigit() else 0
+    rows = []
+    for uid, info in by_uid.items():
+        if uid not in friend_uids:      # by_uid 里还混着群成员（陌生人），只收好友
+            continue
+        uin = int(info.get("uin") or 0)
+        if self_uin and uin == self_uin:
+            continue
+        rows.append((f"c2c:{uid}", "friend", uid, uin,
+                     info.get("name") or "", info.get("nickname") or "",
+                     f"c2c:{uin}" if uin else f"c2c:{uid}"))
+    for code, g in groups.items():
+        rows.append((f"group:{code}", "group", "", int(code),
+                     g.get("name") or str(code), "", f"group:{code}"))
+    if not rows:
+        return {"friends": 0, "groups": 0, "added": 0}
+    before = {r[0] for r in con.execute("SELECT key FROM qq_contact").fetchall()}
+    con.executemany(
+        "INSERT INTO qq_contact(key,kind,uid,uin,name,nickname,conv) "
+        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+        "kind=excluded.kind, uid=excluded.uid, uin=excluded.uin, "
+        "nickname=excluded.nickname, "
+        "name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE qq_contact.name END, "
+        "conv=CASE WHEN excluded.conv<>'' THEN excluded.conv ELSE qq_contact.conv END",
+        rows)
+    # 清掉不在好友名单里的旧好友记录（早期误收的群成员）
+    removed = 0
+    if friend_uids:
+        keep = {f"c2c:{u}" for u in friend_uids}
+        existing = [r[0] for r in con.execute(
+            "SELECT key FROM qq_contact WHERE kind='friend'").fetchall()]
+        stale = [k for k in existing if k not in keep]
+        if stale:
+            con.executemany("DELETE FROM qq_contact WHERE key=?", [(k,) for k in stale])
+            removed = len(stale)
+    con.commit()
+    added = sum(1 for r in rows if r[0] not in before)
+    return {"friends": len(rows), "groups": len(groups), "added": added,
+            "removed": removed}
+
+
 def _file_kind(name: str) -> str:
     ext = Path(name or "").suffix.lower()
     if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):

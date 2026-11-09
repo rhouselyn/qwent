@@ -5877,6 +5877,18 @@ def _qq_sync_run(reason: str = "", light: bool = False):
         _qq_sync_state["last"] = time.strftime("%m-%d %H:%M")
         _qq_sync_state["last_ok"] = time.time()
         _qq_sync_state["finger"] = qq_local.db_fingerprints()
+        # 新加好友 / 改备注：名单最多 5 分钟同步一次（解密 profile_info/group_info 约 1~3s）
+        if time.time() - _QQ_CONTACT_SYNC["ts"] > 300:
+            _QQ_CONTACT_SYNC["ts"] = time.time()
+            try:
+                con = db()
+                try:
+                    got = qq_local.sync_contacts(con)
+                finally:
+                    con.close()
+                _QQ_CONTACT_SYNC["last"] = got
+            except Exception as exc:  # noqa: BLE001
+                print(f"[qq_sync] contacts failed: {exc}")
         if result.get("messages") or result.get("files") or result.get("links"):
             threading.Thread(target=_qq_auto_parse_after_sync, daemon=True).start()
         if reason:
@@ -5888,6 +5900,8 @@ def _qq_sync_run(reason: str = "", light: bool = False):
     finally:
         _qq_sync_state["running"] = False
 
+
+_QQ_CONTACT_SYNC = {"ts": 0.0, "last": {}}
 
 _QQ_WATCH = {"handle": None}
 
@@ -6191,9 +6205,12 @@ def _qq_avatar_fetch(kind: str, key: str, size: int = 100):
     """QQ 头像：好友走 qlogo 号接口，群走群头像接口。列表用 100px（省带宽），详情 640。"""
     import qqagent
     big = "640" if size >= 200 else "100"
-    urls = ([f"https://p.qlogo.cn/gh/{key}/{key}/{big}"]
+    urls = ([f"https://p.qlogo.cn/gh/{key}/{key}/{big}",
+             f"https://q4.qlogo.cn/gh/{key}/{key}/{big}"]
             if kind == "group" else
-            [f"https://q1.qlogo.cn/g?b=qq&nk={key}&s={big}"])
+            [f"https://q1.qlogo.cn/g?b=qq&nk={key}&s={big}",
+             f"https://q4.qlogo.cn/g?b=qq&nk={key}&s={big}",
+             f"https://q.qlogo.cn/g?b=qq&nk={key}&s={big}"])
     for url in urls:
         try:
             r = qqagent._req("GET", url, timeout=8,
@@ -6217,6 +6234,11 @@ def api_qq_avatar(kind: str = "friend", key: str = "", size: int = 100):
         try:
             row = con.execute("SELECT uin FROM qq_contact WHERE uid=? OR key=? LIMIT 1",
                               (key, f"c2c:{key}")).fetchone()
+            if not (row and row[0]):
+                # 新加的好友还没进通讯录/名单：从消息里反查 uid→uin
+                row = con.execute(
+                    "SELECT sender_uin FROM qq_local_message WHERE sender_uid=? "
+                    "AND IFNULL(sender_uin,0)>0 ORDER BY id DESC LIMIT 1", (key,)).fetchone()
         finally:
             con.close()
         key = str(row[0]) if row and row[0] else ""
@@ -6227,7 +6249,8 @@ def api_qq_avatar(kind: str = "friend", key: str = "", size: int = 100):
     if fp.is_file() and fp.stat().st_size > 500:
         return FileResponse(str(fp), headers={"Cache-Control": "public, max-age=86400"})
     ck = f"{kind}:{key}"
-    if _QQ_AV_FAIL.get(ck, 0) > time.time() - 3600:
+    # 失败缓存只留 5 分钟：CDN 抖动/限流导致的一次失败不该长期锁死头像
+    if _QQ_AV_FAIL.get(ck, 0) > time.time() - 300:
         raise HTTPException(404, "no avatar")
     with _QQ_AV_SEM:
         data = _qq_avatar_fetch(kind, key, size)
