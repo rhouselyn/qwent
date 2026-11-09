@@ -2042,6 +2042,25 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
     if days:
         where.append("l.ts>=?")
         args.append(int(time.time()) - int(days) * 86400)
+    # 状态筛选必须进 SQL：以前在 Python 里过滤，但分页已经先按 ts 取了 100 条，
+    # 于是「解析失败/未解析」这类老链接永远筛不出来。
+    now = time.time()
+    stale_before = int(now - 7 * 86400)
+    if state == "parsed":
+        where.append("EXISTS(SELECT 1 FROM link_cache lc WHERE lc.url=l.url)")
+    elif state == "failed":
+        where.append("IFNULL(l.state,'')='failed'")
+        where.append("NOT EXISTS(SELECT 1 FROM link_cache lc WHERE lc.url=l.url)")
+    elif state == "stale":
+        where.append("IFNULL(l.state,'')=''")
+        where.append("l.ts<?")
+        args.append(stale_before)
+        where.append("NOT EXISTS(SELECT 1 FROM link_cache lc WHERE lc.url=l.url)")
+    elif state == "pending":
+        where.append("IFNULL(l.state,'')=''")
+        where.append("l.ts>=?")
+        args.append(stale_before)
+        where.append("NOT EXISTS(SELECT 1 FROM link_cache lc WHERE lc.url=l.url)")
     cond = (" WHERE " + " AND ".join(where)) if where else ""
     order = "l.ts ASC" if sort == "old" else "l.ts DESC"
     sql = ("SELECT l.id,l.url,l.title,l.conv,c.name AS conv_name,l.msg_id,l.ts,"
@@ -2073,8 +2092,12 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
         d["error"] = d.get("error") or ""
         if d["parsed"]:
             d["state"] = "ok"
+        elif d["stored_state"]:
+            d["state"] = d["stored_state"]
+        elif d.get("ts") and d["ts"] < time.time() - 7 * 86400:
+            d["state"] = "stale"      # 较早的历史链接：按需解析，不挂着「解析中」
         else:
-            d["state"] = d["stored_state"] or "pending"
+            d["state"] = "pending"
         d["platform_key"] = _link_platform(d["url"])
         d["platform"] = {"xhs": "小红书", "bili": "B站",
                          "article": "文章", "generic": "网页"}.get(
@@ -2082,21 +2105,22 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
         if platform and d["platform_key"] != platform:
             continue
         out.append(d)
-    # 平台 / 状态筛选在 Python 侧完成，分页游标仍按原始页推进
+    # 平台筛选仍在 Python 侧完成（URL 规则判断），状态已经在 SQL 里过滤
     if platform:
         out = [x for x in out if x["platform_key"] == platform]
-    if state == "parsed":
-        out = [x for x in out if x["parsed"]]
-    elif state == "pending":
-        out = [x for x in out if not x["parsed"] and x["state"] != "failed"]
-    elif state == "failed":
-        out = [x for x in out if not x["parsed"] and x["state"] == "failed"]
     total = con.execute("SELECT COUNT(*) FROM qq_link").fetchone()[0] or 0
     return {"links": out, "hasMore": len(out) >= max(1, min(limit, 500)),
             "stats": {"total": total, "parsed": len(parsed_urls)}}
 
 
 RETRY_FAILED_AFTER = 3 * 86400      # 解析失败的链接 3 天后重试
+
+
+def touch_link(con: sqlite3.Connection, link_id: int) -> None:
+    """只更新尝试时间（平台解析还在后台跑的时候用，避免下一轮重复提交）。"""
+    con.execute("UPDATE qq_link SET try_ts=? WHERE id=?",
+                (int(time.time()), int(link_id)))
+    con.commit()
 
 
 def mark_link_state(con: sqlite3.Connection, link_id: int, state: str,
@@ -2108,8 +2132,13 @@ def mark_link_state(con: sqlite3.Connection, link_id: int, state: str,
     con.commit()
 
 
-def links_to_parse(con: sqlite3.Connection, limit: int = 20) -> list[tuple[int, str]]:
-    """待解析 QQ 链接（没有正文缓存的），按时间倒序；失败过的 3 天后才重试。"""
+def links_to_parse(con: sqlite3.Connection, limit: int = 20, days: int = 0,
+                   oldest_first: bool = False) -> list[tuple[int, str]]:
+    """待解析 QQ 链接（没有正文缓存的）。
+
+    days>0 只在这个时间窗内找；oldest_first=True 从最老的开始（清历史积压）。
+    以前固定扫「最新 2000 行」，两万条历史链接永远轮不到，页面上一直挂着待解析。
+    """
     ensure_schema(con)
     try:
         from link_media import normalize_url
@@ -2121,18 +2150,29 @@ def links_to_parse(con: sqlite3.Connection, limit: int = 20) -> list[tuple[int, 
             parsed_urls.add(normalize_url(u))
     except Exception:
         return []
-    rows = con.execute("SELECT id,url,IFNULL(state,''),IFNULL(try_ts,0) "
-                       "FROM qq_link ORDER BY ts DESC LIMIT 2000").fetchall()
+    where, args = [], []
+    if days:
+        where.append("ts>=?")
+        args.append(int(time.time()) - int(days) * 86400)
+    cond = (" WHERE " + " AND ".join(where)) if where else ""
+    order = "ASC" if oldest_first else "DESC"
+    rows = con.execute(
+        f"SELECT id,url,IFNULL(state,''),IFNULL(try_ts,0) FROM qq_link{cond} "
+        f"ORDER BY ts {order} LIMIT 5000", args).fetchall()
     now = time.time()
     out = []
     for rid, url, st, try_ts in rows:
+        # 10 分钟内试过的先跳过（平台解析还在后台跑，别每轮重复提交）
+        if now - int(try_ts or 0) < 600:
+            continue
         if st == "failed" and now - int(try_ts or 0) < RETRY_FAILED_AFTER:
             continue
         try:
-            if normalize_url(url) not in parsed_urls:
-                out.append((rid, url))
+            if normalize_url(url) in parsed_urls:
+                continue
         except Exception:
             continue
+        out.append((rid, url))
         if len(out) >= max(1, min(limit, 100)):
             break
     return out

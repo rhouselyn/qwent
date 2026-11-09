@@ -1667,6 +1667,10 @@ def _on_startup():
     threading.Thread(target=_autostart_ensure_default, daemon=True).start()
     # QQ 实时同步：文件通知 + WAL 帧补丁 + rowid 游标，新消息约 0.5~1 秒可查
     threading.Thread(target=_qq_rt_loop, daemon=True).start()
+    # QQ 链接正文：常驻后台解析（新链接即时，历史积压空闲时清）
+    if not _QQ_LINK_DAEMON["started"]:
+        _QQ_LINK_DAEMON["started"] = True
+        threading.Thread(target=_qq_link_daemon_loop, daemon=True).start()
     # 媒体索引（6 万个文件，约 15 秒）启动就在后台建好，图片/文件路径读取时即补
     def _qq_media_boot():
         try:
@@ -6475,11 +6479,12 @@ _qq_link_parse_state = {"running": False, "done": 0, "total": 0, "progress": "",
                         "error": "", "last": ""}
 
 
-def _qq_link_parse_worker(limit: int):
+def _qq_link_parse_worker(limit: int, backlog: bool = False):
     con = None
     try:
         con = db()
-        items = qq_local.links_to_parse(con, limit)
+        items = (qq_local.links_to_parse(con, limit, days=7, oldest_first=True)
+                 if backlog else qq_local.links_to_parse(con, limit, days=7))
         _qq_link_parse_state["total"] = len(items)
         for i, (_rid, url) in enumerate(items):
             _qq_link_parse_state["progress"] = f"解析 {i + 1}/{len(items)}…"
@@ -6490,7 +6495,8 @@ def _qq_link_parse_worker(limit: int):
                     # 记失败原因：列表里显示「解析失败」而不是永远「解析中」
                     qq_local.mark_link_state(con, _rid, "failed", res["error"])
                 elif res.get("pending"):
-                    pass      # 平台解析还在后台跑，下一轮再判定
+                    # 平台解析还在后台跑：只记尝试时间，10 分钟内不再重复提交
+                    qq_local.touch_link(con, _rid)
                 elif res.get("text") or res.get("cached"):
                     qq_local.mark_link_state(con, _rid, "ok", "")
                 else:
@@ -6512,6 +6518,42 @@ def _qq_link_parse_worker(limit: int):
             except Exception:
                 pass
         _qq_link_parse_state["running"] = False
+
+
+_QQ_LINK_DAEMON = {"started": False}
+
+
+def _qq_link_daemon_loop():
+    """常驻后台：近 7 天的新链接立即解析；没有新链接时按「最老优先」清积压。
+
+    更早的历史链接标记为「未解析」（点开预览时才抓），避免几万条旧链接
+    在后台把 CDN/磁盘跑满。
+
+    以前只有「同步后解析 10 条」+「打开链接页解析 5 条」两个入口，两万条历史
+    链接永远轮不到，用户看到的就是「不点开就不处理」。
+    """
+    while True:
+        try:
+            if _qq_link_parse_state["running"]:
+                time.sleep(2)
+                continue
+            con = db()
+            try:
+                batch = qq_local.links_to_parse(con, 8, days=7)
+                backlog = False
+                if not batch:
+                    batch = qq_local.links_to_parse(con, 12, days=7, oldest_first=True)
+                    backlog = True
+            finally:
+                con.close()
+            if batch:
+                _qq_link_parse_state.update({"running": True, "done": 0,
+                                             "total": len(batch), "error": "", "last": ""})
+                _qq_link_parse_worker(len(batch), backlog=backlog)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            print(f"[qq_link] daemon error: {exc}")
+        time.sleep(5)
 
 
 @app.post("/api/qq/local/links/parse")

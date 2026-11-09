@@ -1,7 +1,7 @@
 [package]
 name = "wechat-assistant"
 version = "1.0.0"
-description = "微信知识助手桌面壳"
+description = "Qwent 桌面壳（QQ + WeChat Agent）"
 edition = "2021"
 rust-version = "1.77"
 

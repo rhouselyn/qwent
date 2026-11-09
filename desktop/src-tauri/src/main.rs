@@ -170,7 +170,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let icon = app.default_window_icon().cloned().expect("缺少应用图标");
     TrayIconBuilder::with_id("main-tray")
         .icon(icon)
-        .tooltip("微信知识助手")
+        .tooltip("Qwent")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

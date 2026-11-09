@@ -1837,7 +1837,8 @@ function renderQqLinkShell() {
         <select id="qqLinkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"],
           ["bili", "B站"], ["article", "文章"], ["generic", "网页"]], qqLinkView.platform)}</select>
         <select id="qqLinkState">${opts([["", "全部状态"], ["parsed", "已解析"],
-          ["pending", "待解析"], ["failed", "解析失败"]], qqLinkView.state)}</select>
+          ["pending", "待解析"], ["failed", "解析失败"],
+          ["stale", "未解析（历史）"]], qqLinkView.state)}</select>
         <select id="qqLinkDays">${opts([[0, "不限时间"], [7, "最近 7 天"],
           [30, "最近 30 天"], [365, "最近一年"]], qqLinkView.days)}</select>
         <select id="qqLinkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], qqLinkView.sort)}</select>
@@ -1866,10 +1867,8 @@ async function showQqLinks() {
   renderQqLinkShell();
   await refreshQqLinks(true);
   showPane("#linkList");
-  // 自动解析：进页面时小批量补正文（与微信链接的自动解析对齐）
-  let st = null;
-  try { st = await api("/api/qq/local/links/parse/status"); } catch {}
-  if (!st || !st.running) startQqLinkParse(5, true);
+  // 正文由后台常驻 worker 负责解析（新链接即时、历史积压空闲时清），
+  // 打开页面不再触发解析，避免「点开才开始处理」的错觉。
 }
 
 async function refreshQqLinks(reset = true) {
@@ -1914,7 +1913,9 @@ function renderQqLinkItems() {
       ? `<span class="link-badge ok">已解析</span>`
       : l.state === "failed"
         ? `<span class="link-badge fail" title="${attrEsc(l.error || "抓取失败")}">解析失败</span>`
-        : `<span class="link-badge">解析中</span>`;
+        : l.state === "stale"
+          ? `<span class="link-badge" title="较早的历史链接，点开时再解析">未解析</span>`
+          : `<span class="link-badge">解析中</span>`;
     const title = (l.title || l.url).split("\n")[0];
     d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(l.conv_name || l.conv)} · ${fmtTime(l.ts)}</span> ${badge}</div>
       <div class="snippet"><span class="file-badge">${esc(l.platform || "网页")}</span> ${esc(title)}</div>`;
