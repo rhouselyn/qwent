@@ -1825,3 +1825,5 @@ html[data-platform="qq"] .quote-ref { display: none; }
 .msg.right .bubble .link-card span,
 .msg.right .bubble .link-card small { color: #1f2937; }
 .msg.right .bubble .link-card small { color: #7b8794; }
+/* 直接放在会话里的卡片（不套气泡）不要额外上边距 */
+.col > .link-card { margin-top: 0; }

@@ -701,8 +701,14 @@ function renderMsg(m) {
   if (p.kind === "quote") {
     renderQuoteMessage(col, b, p);
   } else {
-    b.appendChild(renderBubbleContent(m, p));
-    col.appendChild(b);
+    const content = renderBubbleContent(m, p);
+    // 链接卡片这类消息不套气泡，直接放在会话里（白色卡片，无绿色边框）
+    if (content.dataset && content.dataset.cardOnly === "1") {
+      col.appendChild(content);
+    } else {
+      b.appendChild(content);
+      col.appendChild(b);
+    }
   }
   wrap.appendChild(col);
   return wrap;
@@ -746,6 +752,7 @@ function renderBubbleContent(m, p) {
     // 纯文本里的分享链接 / 裸链接：和 QQ 一样可点（站内预览）
     const card = typeof parseTextCard === "function" ? parseTextCard(p.text) : null;
     if (card) {
+      el.dataset.cardOnly = "1";
       el.appendChild(makeLinkCard({ tag: card.tag || linkSiteLabel(card.url),
                                     title: card.title, desc: "", url: card.url }));
       return el;
@@ -890,6 +897,7 @@ function renderBubbleContent(m, p) {
       return el;
     }
     case "link": {
+      el.dataset.cardOnly = "1";
       el.appendChild(makeLinkCard({
         tag: p.platform || linkSiteLabel(p.url),
         title: p.title || p.url || "链接",
@@ -4098,24 +4106,31 @@ function onPlatformChange(p) {
   });
   if (typeof renderQqViewTabs === "function") renderQqViewTabs();
   if (typeof resetSettingsSectionForPlatform === "function") resetSettingsSectionForPlatform();
+  // 切换平台一律当刷新：清掉当前会话/预览/搜索，避免出现「QQ 配色 + 微信内容」
+  // 或「微信配色 + QQ 内容」的残留（两个方向行为一致）。
+  if (previewFile) { try { exitPreview(); } catch (e) { /* ignore */ } }
+  if (typeof previewLink !== "undefined") previewLink = null;
+  state.current = null;
   state.qqConv = null;
+  state.qqConvKind = null;
+  state.msgs = {};
+  state.qaHistory = [];
+  state.searchMode = false;
+  state.pinBottom = true;
+  $("#searchInput") && ($("#searchInput").value = "");
+  $("#msgs") && ($("#msgs").innerHTML = "");
+  $("#msgList") && ($("#msgList").style.display = "block");
+  $("#previewPane") && ($("#previewPane").style.display = "none");
+  $("#chatTitle") && ($("#chatTitle").textContent = "");
+  $("#chatMeta") && ($("#chatMeta").textContent = "");
+  $("#chatMain").style.display = "none";
+  $("#chatEmpty").style.display = "flex";
+  $("#assistantPane").style.display = "none";
+  $("#aiSessionsPanel").style.display = "none";
+  $("#settingsFull").style.display = "none";
+  $("#drawer") && ($("#drawer").style.display = "none");
+  syncQqConvActive();
   if (state.view === "settings") { showSettings(); toast(p === "qq" ? "已切换到 QQ 界面" : "已切换到微信界面"); return; }
-  // 已打开的聊天按新平台重画（系统提示措辞、引用样式）
-  const key = state.current && state.current.username;
-  if (key && (state.msgs[key] || []).length && $("#msgs")) {
-    const frag = document.createDocumentFragment();
-    (state.msgs[key] || []).forEach(m => frag.appendChild(renderMsg(m)));
-    $("#msgs").innerHTML = "";
-    $("#msgs").appendChild(frag);
-    scrollMsgsToBottom();
-  } else if (!isQQ() && $("#msgs")) {
-    // 从 QQ 会话切回微信：state.current 为空，上面不会重画，
-    // 不清理的话 QQ 消息会残留成微信皮肤下的「幽灵聊天」。
-    $("#msgs").innerHTML = "";
-    $("#chatMain").style.display = "none";
-    $("#chatEmpty").style.display = "flex";
-    state.qqConv = null;
-  }
   switchView(state.view || "chats");
   toast(p === "qq" ? "已切换到 QQ 界面 · 设置与微信互相独立" : "已切换到微信界面");
 }
