@@ -1635,6 +1635,13 @@ def _on_startup():
             _refresh_dirs()
         except Exception:      # noqa: BLE001
             pass
+        # 设置页「关于」要算各目录占用（2 秒），启动时先热一遍
+        try:
+            for d in ("media_cache", "decrypted", "qq_live", "qq_media",
+                      "qq_avatar", "qq_thumbs", "qq_fetched"):
+                _dir_size_cached(DATA / d)
+        except Exception:      # noqa: BLE001
+            pass
     threading.Thread(target=_dirs_boot, daemon=True).start()
     # 链接后台解析：历史回填 + 常驻 worker（新收到的链接即时解析入库）
     def _links_boot():
@@ -3315,6 +3322,224 @@ def _backfill_chat_links(limit_msgs: int = 8000, enqueue_newest: int = 30):
     return n
 
 
+_HEAD_REFRESH = {"ts": 0.0, "lock": threading.Lock()}
+_WX_AV_DIR = KNOWLEDGE_DB.parent / "wx_avatar"
+_WX_AV_FAIL: dict[str, float] = {}
+
+
+def _refresh_decrypted_copy() -> bool:
+    """增量解密一次（含 head_image.db），120 秒内只做一次。
+
+    新加好友的头像在微信自己的 head_image.db 里，但解密副本只在「消息/联系人
+    库变化」时才会刷新；头像往往是加好友之后才下载下来的，于是副本里没有，
+    接口一直 404。这里做一次按需刷新，前端再重试就能拿到。
+    """
+    now = time.time()
+    if now - _HEAD_REFRESH["ts"] < 120:
+        return False
+    with _HEAD_REFRESH["lock"]:
+        if time.time() - _HEAD_REFRESH["ts"] < 120:
+            return False
+        _HEAD_REFRESH["ts"] = time.time()
+        try:
+            _decrypt_quick()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[avatar] head_image refresh failed: {exc}")
+            return False
+
+
+_WX_CONTACT_DB_CACHE = {"ts": 0.0, "path": ""}
+_WX_CONTACT_DB_LOCK = threading.Lock()
+_WX_AV_SEM = threading.Semaphore(4)      # 头像下载限并发，别把别的接口拖慢
+_WX_AV_PENDING: set[str] = set()
+
+
+def _fresh_contact_db() -> Path | None:
+    """现解一份 contact.db 到临时目录（解密副本可能残缺，读不了时用）。
+
+    120 秒内复用同一份，避免每次头像请求都解密 14MB。
+    """
+    now = time.time()
+    cached = _WX_CONTACT_DB_CACHE.get("path") or ""
+    if cached and now - _WX_CONTACT_DB_CACHE["ts"] < 120 and Path(cached).is_file():
+        return Path(cached)
+    # 页面一次要加载几十个头像，不加锁会同时解密几十份 contact.db（把接口拖死）
+    with _WX_CONTACT_DB_LOCK:
+        now = time.time()
+        cached = _WX_CONTACT_DB_CACHE.get("path") or ""
+        if cached and now - _WX_CONTACT_DB_CACHE["ts"] < 120 and Path(cached).is_file():
+            return Path(cached)
+        return _fresh_contact_db_locked(now)
+
+
+def _fresh_contact_db_locked(now: float) -> Path | None:
+    src = ACCOUNT_DIR / "db_storage" / "contact" / "contact.db"
+    if not src.is_file():
+        return None
+    cached = _WX_CONTACT_DB_CACHE.get("path") or ""
+    try:
+        import keyvault
+        from chattrace.service.decryptor import decrypt_file
+        pw = keyvault.load_key(ACCOUNT_ID)
+        if not pw:
+            return None
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="wxav_")) / "contact.db"
+        decrypt_file(src, tmp, pw)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[avatar] fresh contact.db decrypt failed: {exc}")
+        return None
+    if cached:
+        try:
+            Path(cached).unlink()
+        except OSError:
+            pass
+    _WX_CONTACT_DB_CACHE.update({"ts": now, "path": str(tmp)})
+    return tmp
+
+
+def _contact_avatar_from(db: Path, username: str) -> list[str]:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, check_same_thread=False)
+    try:
+        row = con.execute(
+            "SELECT head_img_md5, big_head_url, small_head_url FROM contact "
+            "WHERE username=? LIMIT 1", (username,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        return []
+    md5, big, small = (row[0] or ""), (row[1] or ""), (row[2] or "")
+    urls = []
+    if md5:
+        local = ACCOUNT_DIR / "temp" / "head_image" / str(md5)
+        if local.is_file():
+            urls.append(str(local))
+    if small.startswith("http"):
+        urls.append(small)
+    if big.startswith("http"):
+        urls.append(big)
+    return urls
+
+
+def _wx_contact_avatar_urls(username: str) -> list[str]:
+    """从 contact.db 取头像地址（head_image 里没有时用）。"""
+    p = DECRYPTED_DIR / "contact" / "contact.db"
+    if p.is_file():
+        try:
+            urls = _contact_avatar_from(p, username)
+            if urls:
+                return urls
+        except sqlite3.DatabaseError:
+            pass          # 副本残缺（微信正在写）→ 走现解
+    fresh = _fresh_contact_db()
+    if fresh:
+        try:
+            return _contact_avatar_from(fresh, username)
+        except sqlite3.DatabaseError:
+            return []
+    return []
+
+
+def _img_media(buf: bytes) -> str:
+    if buf[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if buf[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if buf[:4] == b"RIFF" and buf[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+_WX_AV_QUEUE: "queue.Queue" = queue.Queue(maxsize=600)
+_WX_AV_WORKERS = {"started": False}
+
+
+def _wx_avatar_worker() -> None:
+    while True:
+        try:
+            username, cache = _WX_AV_QUEUE.get(timeout=30)
+        except queue.Empty:
+            continue
+        try:
+            with _WX_AV_SEM:
+                for src in _wx_contact_avatar_urls(username):
+                    data = b""
+                    try:
+                        if src.startswith("http"):
+                            import requests
+                            r = requests.get(src, timeout=8,
+                                             headers={"User-Agent": "Mozilla/5.0",
+                                                      "Referer": "https://wx.qq.com/"})
+                            if r.status_code != 200:
+                                continue
+                            data = r.content
+                        else:
+                            data = Path(src).read_bytes()
+                    except Exception:
+                        continue
+                    if len(data) > 500 and (data[:2] == b"\xff\xd8"
+                                            or data[:8] == b"\x89PNG\r\n\x1a\n"):
+                        try:
+                            cache.write_bytes(data)
+                        except OSError:
+                            pass
+                        break
+                else:
+                    _WX_AV_FAIL[username] = time.time()
+        except Exception:
+            _WX_AV_FAIL[username] = time.time()
+        finally:
+            _WX_AV_PENDING.discard(username)
+            _WX_AV_QUEUE.task_done()
+
+
+def _wx_avatar_start_workers(n: int = 4) -> None:
+    if _WX_AV_WORKERS["started"]:
+        return
+    _WX_AV_WORKERS["started"] = True
+    for _ in range(n):
+        threading.Thread(target=_wx_avatar_worker, daemon=True).start()
+
+
+def _wx_avatar_fallback(username: str):
+    """head_image.db 里没有头像时的兜底：本地 temp 缓存 / 微信 CDN。
+
+    新加的好友往往还没被微信写进 head_image.db，但 contact.db 里已经有
+    big_head_url/small_head_url；抓下来缓存到 data/wx_avatar 复用。
+    请求路径只查缓存，缺失就丢进固定大小的工作队列（4 个 worker），立即返回
+    404——以前每个头像起一个线程，整页 800 个会话会把线程池和磁盘打满。
+    """
+    import hashlib
+    key = hashlib.sha1(username.encode("utf-8")).hexdigest()
+    _WX_AV_DIR.mkdir(parents=True, exist_ok=True)
+    cache = _WX_AV_DIR / f"{key}.img"
+    if cache.is_file() and cache.stat().st_size > 500:
+        data = cache.read_bytes()
+        return data, _img_media(data)
+    if (username not in _WX_AV_PENDING
+            and _WX_AV_FAIL.get(username, 0) <= time.time() - 600):
+        _wx_avatar_start_workers()
+        _WX_AV_PENDING.add(username)
+        try:
+            _WX_AV_QUEUE.put_nowait((username, cache))
+        except queue.Full:
+            _WX_AV_PENDING.discard(username)
+    return None, "image/jpeg"
+
+
+def _avatar_row(p: Path, name: str):
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
+        con.execute("PRAGMA busy_timeout=10000")
+        row = con.execute("SELECT image_buffer FROM head_image WHERE username=? "
+                          "ORDER BY update_time DESC LIMIT 1", (name,)).fetchone()
+        con.close()
+        return row
+    except sqlite3.OperationalError:
+        return None
+
+
 @app.get("/api/avatar")
 def api_avatar(u: str):
     """联系人真实头像（微信 head_image.db）。找不到返回 404，前端回落字母头像。"""
@@ -3324,15 +3549,21 @@ def api_avatar(u: str):
     p = DECRYPTED_DIR / "head_image" / "head_image.db"
     if not p.exists():
         raise HTTPException(404, "no avatar db")
-    try:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
-        con.execute("PRAGMA busy_timeout=10000")
-        row = con.execute("SELECT image_buffer FROM head_image WHERE username=? "
-                          "ORDER BY update_time DESC LIMIT 1", (name,)).fetchone()
-        con.close()
-    except sqlite3.OperationalError:
-        raise HTTPException(404, "avatar db busy")
+    row = _avatar_row(p, name)
     if not row or not row[0]:
+        # 源库比解密副本新（新好友/新换头像）→ 增量解密后再查一次
+        src = ACCOUNT_DIR / "db_storage" / "head_image" / "head_image.db"
+        try:
+            newer = src.is_file() and src.stat().st_mtime > p.stat().st_mtime
+        except OSError:
+            newer = False
+        if newer and time.time() - _HEAD_REFRESH["ts"] > 120:
+            threading.Thread(target=_refresh_decrypted_copy, daemon=True).start()
+    if not row or not row[0]:
+        data, media = _wx_avatar_fallback(name)
+        if data:
+            return Response(content=data, media_type=media,
+                            headers={"Cache-Control": "max-age=604800"})
         raise HTTPException(404, "no avatar")
     buf = bytes(row[0])
     media = "image/jpeg"
@@ -5232,6 +5463,21 @@ def _dir_size(path: Path, limit_files: int = 200000) -> tuple[int, int]:
     return total, n
 
 
+_DIR_SIZE_CACHE: dict[str, dict] = {}
+
+
+def _dir_size_cached(path: Path, ttl: int = 120):
+    """目录大小 2 分钟内复用：媒体目录几百 MB，每次设置页都全量遍历要 2 秒。"""
+    key = str(path)
+    now = time.time()
+    hit = _DIR_SIZE_CACHE.get(key)
+    if hit and now - hit["ts"] < ttl:
+        return hit["bytes"], hit["files"]
+    size, n = _dir_size(path)
+    _DIR_SIZE_CACHE[key] = {"ts": now, "bytes": size, "files": n}
+    return size, n
+
+
 @app.get("/api/storage")
 def api_storage():
     """本机数据占用总览：knowledge.db + 各媒体/缓存目录，微信与 QQ 分开统计。"""
@@ -5281,7 +5527,7 @@ def api_storage():
                        ("qq_live", qq_live), ("qq_media", qq_media),
                        ("qq_avatar", qq_av), ("qq_thumbs", qq_th),
                        ("qq_fetched", qq_fetched)):
-        size, n = _dir_size(path)
+        size, n = _dir_size_cached(path)
         dirs[name] = {"bytes": size, "files": n, "path": str(path)}
     wx_media_bytes = dirs["media_cache"]["bytes"] + dirs["decrypted"]["bytes"]
     qq_media_bytes = (dirs["qq_live"]["bytes"] + dirs["qq_media"]["bytes"]

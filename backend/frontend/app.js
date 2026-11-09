@@ -619,18 +619,42 @@ function showChatPane() {
 
 /* ---------------- 消息渲染 ---------------- */
 /* 真实头像：微信 head_image.db 里有就显示，没有/加载失败回落字母块。
-   后端对无头像账号返回 404，缓存这些账号避免列表每 30s 刷新时反复打后端
-   （本机 800+ 会话时会产生成片的 404 请求）。 */
-const noAvatar = new Set();
-window.__markNoAvatar = (u) => { if (u) noAvatar.add(u); };
-const AVATAR_ONERROR =
-  "this.style.display='none';this.parentNode.classList.add('ava-letter');window.__markNoAvatar(this.dataset.u)";
+   失败缓存带 10 分钟有效期 + 自动重试：新加好友的头像往往是加完之后才
+   同步进解密库，一次 404 不该让这个号整场会话都只有字母头像。 */
+const noAvatar = new Map();
+const AVATAR_RETRY_MS = 10 * 60 * 1000;
+function avatarBlocked(u) {
+  const ts = noAvatar.get(u);
+  if (!ts) return false;
+  if (Date.now() - ts > AVATAR_RETRY_MS) { noAvatar.delete(u); return false; }
+  return true;
+}
+window.__markNoAvatar = (u) => { if (u) noAvatar.set(u, Date.now()); };
+const AVATAR_ONERROR = "window.__avatarFail(this)";
+window.__avatarFail = (img) => {
+  img.style.display = "none";
+  img.parentNode && img.parentNode.classList.add("ava-letter");
+  const u = img.dataset.u || "";
+  if (u) noAvatar.set(u, Date.now());
+  const n = +(img.dataset.retry || 0);
+  if (n >= 3) return;
+  img.dataset.retry = String(n + 1);
+  // 后端在首次 404 时会增量解密 head_image，6/12/18 秒后重试基本都能命中
+  setTimeout(() => {
+    if (!img.isConnected) return;
+    if (u) noAvatar.delete(u);
+    img.parentNode && img.parentNode.classList.remove("ava-letter");
+    img.style.display = "";
+    const base = (img.src || "").split("&r=")[0];
+    img.src = base + "&r=" + Date.now();
+  }, 6000 * (n + 1));
+};
 
 function avatarImgHtml(username, name, extraStyle) {
   const letter = esc(initial(name || username || "?"));
   const bg = `background:${hue(username || name || "")};`;
   const style = extraStyle || bg;
-  if (!username || noAvatar.has(username)) return `<div class="ava" style="${style}">${letter}</div>`;
+  if (!username || avatarBlocked(username)) return `<div class="ava" style="${style}">${letter}</div>`;
   return `<div class="ava" style="${style}">
       <img class="ava-img" src="/api/avatar?u=${encodeURIComponent(username)}" alt=""
            loading="lazy" data-u="${attrEsc(username)}" onerror="${AVATAR_ONERROR}">
@@ -667,7 +691,7 @@ function avatarFor(m) {
   d.className = "ava";
   const username = m.is_sender ? (state.selfUsername || "") : (m.sender || "");
   const name = m.is_sender ? "我" : m.sender_name;
-  d.innerHTML = (username && !noAvatar.has(username)
+  d.innerHTML = (username && !avatarBlocked(username)
     ? `<img class="ava-img" src="/api/avatar?u=${encodeURIComponent(username)}" alt=""
             loading="lazy" data-u="${attrEsc(username)}" onerror="${AVATAR_ONERROR}">
        <span class="ava-fallback">${esc(initial(name))}</span>`
