@@ -1025,6 +1025,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible,
 .settings-field input, .inline-setting input { width: 100%; min-height: 38px; padding: 8px 11px; border: 1px solid #dfe5e9; border-radius: 9px; background: #fbfcfd; color: var(--ink); outline: none; }
 .settings-field input:focus, .inline-setting input:focus { border-color: rgba(7,193,96,.55); background: #fff; box-shadow: 0 0 0 4px rgba(7,193,96,.09); }
 .settings-field small, .switch-row small { color: #9aa2aa; font-size: 11px; line-height: 1.45; }
+/* 云端分流：两列紧凑表单、下拉框与状态键值行沿用 settings-field 的视觉语言 */
+.settings-form.cloud-form { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
+.cloud-form .cloud-span { grid-column: 1 / -1; }
+.settings-field select { width: 100%; min-height: 38px; padding: 8px 11px; border: 1px solid #dfe5e9; border-radius: 9px; background: #fbfcfd; color: var(--ink); outline: none; font: inherit; }
+.settings-field select:focus { border-color: rgba(7,193,96,.55); background: #fff; box-shadow: 0 0 0 4px rgba(7,193,96,.09); }
+.settings-kv { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid #f0f3f5; font-size: 12px; line-height: 1.5; }
+.settings-kv:last-child { border-bottom: 0; }
+.settings-kv span { color: #8b929b; flex: 0 0 auto; }
+.settings-kv b { color: var(--ink); font-weight: 500; text-align: right; word-break: break-all; }
+.settings-key-note { display: flex; align-items: flex-start; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid #e4efe9; border-radius: 9px; background: #f5fbf7; color: #4a6b58; font-size: 12px; line-height: 1.55; }
+.settings-key-dot { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: #07c160; flex: 0 0 7px; }
+@media (max-width: 760px) { .settings-form.cloud-form { grid-template-columns: 1fr; } .cloud-form .cloud-span { grid-column: auto; } }
 .settings-switch-card { padding: 12px; border: 1px solid #edf0f2; border-radius: 11px; background: #fafcfb; }
 .switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 /* 开关卡紧凑化：主开关一行占满，子项两列网格，说明文字短灰字放标题右侧 */

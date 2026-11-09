@@ -274,7 +274,7 @@ function mdToHtml(text) {
   return out.join("\n");
 }
 
-function esc(s) { return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function esc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 function attrEsc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 function safeHttpUrl(url) {
   try {
@@ -356,13 +356,7 @@ function renderSessions(filter = "") {
     const pinBtn = item.querySelector(".pin-act");
     pinBtn.onclick = async (e) => {
       e.stopPropagation();
-      await api("/api/sessions/pin", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: s.username, pinned: s.pinned ? 0 : 1 }),
-      });
-      s.pinned = s.pinned ? 0 : 1;
-      await loadSessions();
-      toast(s.pinned ? "已置顶" : "已取消置顶");
+      await pinWechat(s, s.pinned ? 0 : 1);
     };
     box.appendChild(item);
   };
@@ -400,15 +394,17 @@ function closeSessionMenu() {
   if (m) m.remove();
 }
 
-async function setPin(s, pinned) {
-  await api("/api/sessions/pin", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: s.username, pinned }),
+/* 置顶共用 ChatData.setPin：微信 / QQ 只提供端点与请求体 */
+function pinWechat(s, pinned) {
+  return ChatData.setPin({
+    endpoint: "/api/sessions/pin",
+    body: { username: s.username, pinned },
+    pinned: !!pinned,
+    onDone: async () => { s.pinned = pinned ? 1 : 0; await loadSessions(); },
   });
-  s.pinned = pinned;
-  await loadSessions();
-  toast(pinned ? "已置顶" : "已取消置顶");
 }
+
+async function setPin(s, pinned) { return pinWechat(s, pinned); }
 
 /* ---------------- 打开会话 ---------------- */
 async function openChat(username, name, isGroup, sessionId, options = {}) {
@@ -522,12 +518,11 @@ function startLiveStream(chat) {
   // 最后一条不一定是最新 id。
   const afterId = (state.msgs[chat] || [])
     .reduce((mx, m) => Math.max(mx, m.id || 0), 0);
-  const es = new EventSource(`/api/messages/stream?chat=${encodeURIComponent(chat)}&after_id=${afterId}`);
-  liveState.es = es;
-  es.onmessage = (ev) => {
-    let d = null;
-    try { d = JSON.parse(ev.data); } catch { return; }
-    if (!d || !d.messages) return;
+  ChatData.startLive({
+    store: liveState,
+    url: () => `/api/messages/stream?chat=${encodeURIComponent(chat)}&after_id=${afterId}`,
+    onData: (d) => {
+      if (!d || !d.messages) return;
     if (!state.current || state.current.username !== chat) return;
     const prevLast = (state.msgs[chat] || []).slice(-1)[0];
     const add = mergeMessages(chat, d.messages);
@@ -547,9 +542,9 @@ function startLiveStream(chat) {
         ((b.last_ts || 0) - (a.last_ts || 0)));
       if (!state.searchMode) renderSessions($("#searchInput").value);
     }
-    if (typeof onNewMessages === "function") onNewMessages(chat, add);
-  };
-  es.onerror = () => { /* EventSource 自带重连，这里不主动关闭 */ };
+      if (typeof onNewMessages === "function") onNewMessages(chat, add);
+    },
+  });
 }
 
 /* 进入会话/跳转时启动订阅 */
@@ -1581,74 +1576,90 @@ let fileQueryTimer = null;
 const FILE_KIND_LABELS = { doc: "文档", sheet: "表格", slide: "演示", image: "图片",
                            archive: "压缩包", media: "音视频", other: "其他" };
 
-function renderFileShell() {
-  const box = $("#fileList");
-  const opts = (rows, cur) => rows.map(([v, label]) =>
-    `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
-  const chats = [["", "全部会话"], ...fileSessions.slice(0, 150).map(s => [s.username, s.name || s.username])];
-  const kindRows = Object.entries(FILE_KIND_LABELS).map(([k, label]) => {
-    const st = fileView.stats && fileView.stats.kinds && fileView.stats.kinds[k];
-    return [k, st ? `${label} ${st.parsed}/${st.total}` : label];
-  });
-  box.innerHTML = `
+async function ensureWxSessions() {
+  if (!fileSessions) { try { fileSessions = await api("/api/sessions"); } catch { fileSessions = []; } }
+}
+
+/* 四个「文件 / 链接中心」共用 ChatData.createList 的一套加载与渲染；
+   这里只声明微信文件中心的差异（端点、字段、模板、文案）。 */
+const fileList = ChatData.createList({
+  view: fileView,
+  ids: { box: "#fileList", meta: "#fileMeta", items: "#fileItems", more: "#fileMore" },
+  endpoint: "/api/files",
+  query: (v) => {
+    const qs = new URLSearchParams({ n: "200", offset: String(v.offset), sort: v.sort });
+    if (v.chat) qs.set("chat", v.chat);
+    if (v.kind) qs.set("kind", v.kind);
+    if (v.q) qs.set("q", v.q);
+    if (v.days) qs.set("since", String(Math.floor(Date.now() / 1000) - v.days * 86400));
+    return qs;
+  },
+  parse: (list) => ({ items: list, hasMore: list.length >= 200 }),
+  selectors: [
+    { id: "#fileChat", key: "chat" }, { id: "#fileKind", key: "kind" },
+    { id: "#fileDays", key: "days", numeric: true }, { id: "#fileSort", key: "sort" },
+  ],
+  shellHtml: (v) => {
+    const opts = ChatData.optionsHtml;
+    const chats = [["", "全部会话"], ...fileSessions.slice(0, 150).map(s => [s.username, s.name || s.username])];
+    const kindRows = Object.entries(FILE_KIND_LABELS).map(([k, label]) => {
+      const st = v.stats && v.stats.kinds && v.stats.kinds[k];
+      return [k, st ? `${label} ${st.parsed}/${st.total}` : label];
+    });
+    return `
     <div class="files-toolbar">
       <div class="files-filters">
-        <select id="fileChat">${opts(chats, fileView.chat)}</select>
+        <select id="fileChat">${opts(chats, v.chat)}</select>
         <select id="fileState">${opts([["", "全部状态"], ["parsed", "已解析"],
-          ["missing", "未下载/失败"], ["unprocessed", "未处理"]], fileView.state)}</select>
-        <select id="fileKind">${opts([["", "全部类型"], ...kindRows], fileView.kind)}</select>
-        <select id="fileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], fileView.days)}</select>
-        <select id="fileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], fileView.sort)}</select>
+          ["missing", "未下载/失败"], ["unprocessed", "未处理"]], v.state)}</select>
+        <select id="fileKind">${opts([["", "全部类型"], ...kindRows], v.kind)}</select>
+        <select id="fileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], v.days)}</select>
+        <select id="fileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], v.sort)}</select>
       </div>
       <div class="files-meta" id="fileMeta">加载中…</div>
     </div>
     <div id="fileItems"></div>
     <button id="fileMore" class="mini ghost files-more" style="display:none">加载更多</button>`;
-  const onChange = () => {
-    fileView.chat = $("#fileChat").value;
-    fileView.kind = $("#fileKind").value;
-    fileView.days = +$("#fileDays").value || 0;
-    fileView.sort = $("#fileSort").value;
-    refreshFiles(true);
-  };
-  ["#fileChat", "#fileKind", "#fileDays", "#fileSort"].forEach(sel => $(sel).onchange = onChange);
-  $("#fileMore").onclick = () => refreshFiles(false);
-}
-
-function renderFileItems() {
-  const box = $("#fileItems");
-  if (!box) return;
-  box.innerHTML = "";
-  if (!fileView.items.length) {
-    box.innerHTML = `<div class="qa-empty">没有找到文件消息。<br>换个会话或类型试试，文件消息同步后会自动出现在这里。</div>`;
-  }
-  for (const f of fileView.items) {
-    const d = document.createElement("div");
-    d.className = "result-item";
-    const badge = (f.ext || "").replace(".", "").toUpperCase() || FILE_KIND_LABELS[f.kind] || "文件";
+  },
+  itemHtml: (f) => {
     const state = f.parsed ? "已解析" : (f.status === "missing" ? "未下载/解析失败" : "未处理");
     const stateCls = f.parsed ? "file-state ok" : "file-state warn";
-    d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(f.chat_name)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</span>
+    return `<div class="meta"><span class="meta-trunc">${esc(f.chat_name)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</span>
         <span class="${stateCls}">${state}</span></div>
       <div class="snippet">${esc(f.title)}</div>`;
-    d.onclick = () => openFilePreview(f);
-    box.appendChild(d);
-  }
-  const meta = $("#fileMeta");
-  if (meta) {
+  },
+  onItem: (f) => openFilePreview(f),
+  emptyHtml: () => `<div class="qa-empty">没有找到文件消息。<br>换个会话或类型试试，文件消息同步后会自动出现在这里。</div>`,
+  metaText: (v) => {
     let statsText = "";
-    const st = fileView.stats;
+    const st = v.stats;
     if (st) {
-      if (fileView.kind && st.kinds && st.kinds[fileView.kind]) {
-        const k = st.kinds[fileView.kind];
-        statsText = `${FILE_KIND_LABELS[fileView.kind] || "当前类型"} 已解析 ${k.parsed}/${k.total} · `;
+      if (v.kind && st.kinds && st.kinds[v.kind]) {
+        const k = st.kinds[v.kind];
+        statsText = `${FILE_KIND_LABELS[v.kind] || "当前类型"} 已解析 ${k.parsed}/${k.total} · `;
       }
       statsText += `全部 已解析 ${st.parsed}/${st.total}（未下载/失败 ${st.missing || 0} · 未处理 ${st.unprocessed || 0}）`;
     }
-    meta.textContent = `${fileView.items.length} 个文件${statsText ? " · " + statsText : ""}${fileView.hasMore ? " · 还有更多" : ""}`;
-  }
-  const more = $("#fileMore");
-  if (more) more.style.display = fileView.hasMore ? "" : "none";
+    return `${v.items.length} 个文件${statsText ? " · " + statsText : ""}${v.hasMore ? " · 还有更多" : ""}`;
+  },
+  sessions: ensureWxSessions,
+  beforeShow: async () => {
+    if (!fileView.stats) {
+      try { fileView.stats = await api("/api/files/stats"); } catch { fileView.stats = null; }
+    }
+  },
+});
+
+function renderFileShell() { fileList.renderShell(); }
+function renderFileItems() { fileList.renderItems(); }
+async function refreshFiles(reset = true) {
+  if (isQQ()) return refreshQqFiles(reset);
+  return fileList.refresh(reset);
+}
+async function showFiles(opts = {}) {
+  if (typeof opts === "string") opts = { q: opts };
+  if (isQQ()) return showQqFiles(opts);
+  return fileList.show(opts);
 }
 
 /* QQ 模式的文件 / 链接：来自 QQ NT 本地库，功能与微信文件/链接中心对齐 */
@@ -1661,117 +1672,83 @@ const QQ_FILE_KIND_LABELS = { doc: "文档", sheet: "表格", slide: "演示", i
                               pdf: "PDF", archive: "压缩包", audio: "音频",
                               video: "音视频", other: "其他", file: "文件" };
 
-function renderQqFileShell() {
-  const box = $("#fileList");
-  const opts = (rows, cur) => rows.map(([v, label]) =>
-    `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
-  const chats = [["", "全部会话"], ...(qqFileSessions || []).slice(0, 150).map(s => [s.conv, s.name || s.conv])];
-  const kindRows = Object.entries(QQ_FILE_KIND_LABELS).map(([k, label]) => {
-    const st = qqFileView.stats && qqFileView.stats.kinds && qqFileView.stats.kinds[k];
-    return [k, st ? `${label} ${st.parsed}/${st.total}` : label];
-  });
-  box.innerHTML = `
+const qqFileList = ChatData.createList({
+  view: qqFileView,
+  ids: { box: "#fileList", meta: "#qqFileMeta", items: "#qqFileItems", more: "#qqFileMore" },
+  endpoint: "/api/qq/local/files",
+  query: (v) => {
+    const qs = new URLSearchParams({ limit: "100", offset: String(v.offset), sort: v.sort });
+    if (v.chat) qs.set("conv", v.chat);
+    if (v.kind) qs.set("kind", v.kind);
+    if (v.state) qs.set("state", v.state);
+    if (v.days) qs.set("days", String(v.days));
+    if (v.q) qs.set("q", v.q);
+    return qs;
+  },
+  parse: (d) => ({ items: d.files || [], hasMore: !!d.hasMore, stats: d.stats || null }),
+  selectors: [
+    { id: "#qqFileChat", key: "chat" }, { id: "#qqFileState", key: "state" },
+    { id: "#qqFileKind", key: "kind" }, { id: "#qqFileDays", key: "days", numeric: true },
+    { id: "#qqFileSort", key: "sort" },
+  ],
+  shellHtml: (v) => {
+    const opts = ChatData.optionsHtml;
+    const chats = [["", "全部会话"], ...(qqFileSessions || []).slice(0, 150).map(s => [s.conv, s.name || s.conv])];
+    const kindRows = Object.entries(QQ_FILE_KIND_LABELS).map(([k, label]) => {
+      const st = v.stats && v.stats.kinds && v.stats.kinds[k];
+      return [k, st ? `${label} ${st.parsed}/${st.total}` : label];
+    });
+    return `
     <div class="files-toolbar">
       <div class="files-filters">
-        <select id="qqFileChat">${opts(chats, qqFileView.chat)}</select>
+        <select id="qqFileChat">${opts(chats, v.chat)}</select>
         <select id="qqFileState">${opts([["", "全部状态"], ["parsed", "已解析"],
-          ["unparsed", "待解析"], ["missing", "未下载"]], qqFileView.state)}</select>
-        <select id="qqFileKind">${opts([["", "全部类型"], ...kindRows], qqFileView.kind)}</select>
-        <select id="qqFileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], qqFileView.days)}</select>
-        <select id="qqFileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], qqFileView.sort)}</select>
+          ["unparsed", "待解析"], ["missing", "未下载"]], v.state)}</select>
+        <select id="qqFileKind">${opts([["", "全部类型"], ...kindRows], v.kind)}</select>
+        <select id="qqFileDays">${opts([[0, "不限时间"], [7, "最近 7 天"], [30, "最近 30 天"], [365, "最近一年"]], v.days)}</select>
+        <select id="qqFileSort">${opts([["new", "最新在前"], ["old", "最早在前"], ["size", "文件最大"]], v.sort)}</select>
       </div>
       <div class="files-meta" id="qqFileMeta">加载中…</div>
     </div>
     <div id="qqFileItems"></div>
     <button id="qqFileMore" class="mini ghost files-more" style="display:none">加载更多</button>`;
-  const onChange = () => {
-    qqFileView.chat = $("#qqFileChat").value;
-    qqFileView.state = $("#qqFileState").value;
-    qqFileView.kind = $("#qqFileKind").value;
-    qqFileView.days = +$("#qqFileDays").value || 0;
-    qqFileView.sort = $("#qqFileSort").value;
-    refreshQqFiles(true);
-  };
-  ["#qqFileChat", "#qqFileState", "#qqFileKind", "#qqFileDays", "#qqFileSort"].forEach(sel => $(sel).onchange = onChange);
-  $("#qqFileMore").onclick = () => refreshQqFiles(false);
-}
-
-async function showQqFiles(opts = {}) {
-  if (typeof opts === "string") opts = { q: opts };
-  Object.assign(qqFileView, opts);
-  if (!qqFileSessions) {
-    try { qqFileSessions = (await api("/api/qq/local/sessions?limit=300")).sessions || []; }
-    catch { qqFileSessions = []; }
-  }
-  renderQqFileShell();
-  await refreshQqFiles(true);
-  showPane("#fileList");
-}
-
-async function refreshQqFiles(reset = true) {
-  if (qqFileView.loading) return;
-  if (reset) { qqFileView.offset = 0; qqFileView.items = []; }
-  qqFileView.loading = true;
-  const meta = $("#qqFileMeta");
-  if (meta) meta.textContent = "加载中…";
-  const qs = new URLSearchParams({ limit: "100", offset: String(qqFileView.offset),
-                                   sort: qqFileView.sort });
-  if (qqFileView.chat) qs.set("conv", qqFileView.chat);
-  if (qqFileView.kind) qs.set("kind", qqFileView.kind);
-  if (qqFileView.state) qs.set("state", qqFileView.state);
-  if (qqFileView.days) qs.set("days", String(qqFileView.days));
-  if (qqFileView.q) qs.set("q", qqFileView.q);
-  try {
-    const d = await api("/api/qq/local/files?" + qs.toString());
-    qqFileView.items.push(...(d.files || []));
-    qqFileView.offset += (d.files || []).length;
-    qqFileView.hasMore = !!d.hasMore;
-    qqFileView.stats = d.stats || null;
-    renderQqFileItems();
-  } catch (e) {
-    if (meta) meta.textContent = "加载失败：" + e.message;
-  } finally {
-    qqFileView.loading = false;
-  }
-}
-
-function renderQqFileItems() {
-  const box = $("#qqFileItems");
-  if (!box) return;
-  box.innerHTML = "";
-  if (!qqFileView.items.length) {
-    box.innerHTML = `<div class="qa-empty">没有符合条件的 QQ 文件。<br>
-      换个会话 / 类型 / 时间试试；QQ 文件在导入后出现在这里。</div>`;
-  }
-  for (const f of qqFileView.items) {
-    const d = document.createElement("div");
-    d.className = "result-item";
+  },
+  itemHtml: (f) => {
     const badge = (f.kind || "file").toUpperCase();
     const state = f.parsed ? "已解析" : (f.exists ? "待解析" : "未下载");
     const stateCls = f.parsed ? "file-state ok" : "file-state warn";
-    d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(f.conv_name || f.conv)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</span>
+    return `<div class="meta"><span class="meta-trunc">${esc(f.conv_name || f.conv)} · ${fmtTime(f.ts)} · ${fmtSize(f.size)}</span>
         <span class="file-badge">${badge}</span>
         <span class="${stateCls}">${state}</span></div>
       <div class="snippet">${esc(f.name)}</div>`;
-    d.onclick = () => openQqFilePreview(f);
-    box.appendChild(d);
-  }
-  const meta = $("#qqFileMeta");
-  if (meta) {
+  },
+  onItem: (f) => openQqFilePreview(f),
+  emptyHtml: () => `<div class="qa-empty">没有符合条件的 QQ 文件。<br>
+      换个会话 / 类型 / 时间试试；QQ 文件在导入后出现在这里。</div>`,
+  metaText: (v) => {
     let statsText = "";
-    const st = qqFileView.stats;
+    const st = v.stats;
     if (st) {
-      if (qqFileView.kind && st.kinds && st.kinds[qqFileView.kind]) {
-        const k = st.kinds[qqFileView.kind];
-        statsText = `${QQ_FILE_KIND_LABELS[qqFileView.kind] || "当前类型"} 已解析 ${k.parsed}/${k.total} · `;
+      if (v.kind && st.kinds && st.kinds[v.kind]) {
+        const k = st.kinds[v.kind];
+        statsText = `${QQ_FILE_KIND_LABELS[v.kind] || "当前类型"} 已解析 ${k.parsed}/${k.total} · `;
       }
       statsText += `全部 已解析 ${st.parsed}/${st.total}（本机 ${st.local || 0} · 未下载 ${st.missing || 0}）`;
     }
-    meta.textContent = `${qqFileView.items.length} 个 QQ 文件${statsText ? " · " + statsText : ""}${qqFileView.hasMore ? " · 还有更多" : ""}`;
-  }
-  const more = $("#qqFileMore");
-  if (more) more.style.display = qqFileView.hasMore ? "" : "none";
-}
+    return `${v.items.length} 个 QQ 文件${statsText ? " · " + statsText : ""}${v.hasMore ? " · 还有更多" : ""}`;
+  },
+  sessions: async () => {
+    if (!qqFileSessions) {
+      try { qqFileSessions = (await api("/api/qq/local/sessions?limit=300")).sessions || []; }
+      catch { qqFileSessions = []; }
+    }
+  },
+});
+
+function renderQqFileShell() { qqFileList.renderShell(); }
+async function showQqFiles(opts = {}) { return qqFileList.show(opts); }
+async function refreshQqFiles(reset = true) { return qqFileList.refresh(reset); }
+function renderQqFileItems() { qqFileList.renderItems(); }
 
 /* QQ 文件预览：与微信文件预览同一套版式；正文走懒解析，AI 提问按文件独立会话 */
 async function openQqFilePreview(f) {
@@ -1849,90 +1826,47 @@ async function openQqFilePreview(f) {
 }
 
 /* ---------------- QQ 链接中心 ---------------- */
-function renderQqLinkShell() {
-  const box = $("#linkList");
-  const opts = (rows, cur) => rows.map(([v, label]) =>
-    `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
-  const chats = [["", "全部会话"], ...(qqFileSessions || []).slice(0, 150).map(s => [s.conv, s.name || s.conv])];
-  box.innerHTML = `
+const qqLinkList = ChatData.createList({
+  view: qqLinkView,
+  ids: { box: "#linkList", meta: "#qqLinkMeta", items: "#qqLinkItems", more: "#qqLinkMore" },
+  endpoint: "/api/qq/local/links",
+  query: (v) => {
+    const qs = new URLSearchParams({ limit: "100", offset: String(v.offset), sort: v.sort });
+    if (v.chat) qs.set("conv", v.chat);
+    if (v.platform) qs.set("platform", v.platform);
+    if (v.state) qs.set("state", v.state);
+    if (v.days) qs.set("days", String(v.days));
+    if (v.q) qs.set("q", v.q);
+    return qs;
+  },
+  parse: (d) => ({ items: d.links || [], hasMore: !!d.hasMore, stats: d.stats || null }),
+  selectors: [
+    { id: "#qqLinkChat", key: "chat" }, { id: "#qqLinkPlatform", key: "platform" },
+    { id: "#qqLinkState", key: "state" }, { id: "#qqLinkDays", key: "days", numeric: true },
+    { id: "#qqLinkSort", key: "sort" },
+  ],
+  shellHtml: (v) => {
+    const opts = ChatData.optionsHtml;
+    const chats = [["", "全部会话"], ...(qqFileSessions || []).slice(0, 150).map(s => [s.conv, s.name || s.conv])];
+    return `
     <div class="files-toolbar">
       <div class="files-filters">
-        <select id="qqLinkChat">${opts(chats, qqLinkView.chat)}</select>
+        <select id="qqLinkChat">${opts(chats, v.chat)}</select>
         <select id="qqLinkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"],
-          ["bili", "B站"], ["article", "文章"], ["generic", "网页"]], qqLinkView.platform)}</select>
+          ["bili", "B站"], ["article", "文章"], ["generic", "网页"]], v.platform)}</select>
         <select id="qqLinkState">${opts([["", "全部状态"], ["parsed", "已解析"],
           ["pending", "待解析"], ["failed", "解析失败"],
-          ["stale", "未解析（历史）"]], qqLinkView.state)}</select>
+          ["stale", "未解析（历史）"]], v.state)}</select>
         <select id="qqLinkDays">${opts([[0, "不限时间"], [7, "最近 7 天"],
-          [30, "最近 30 天"], [365, "最近一年"]], qqLinkView.days)}</select>
-        <select id="qqLinkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], qqLinkView.sort)}</select>
+          [30, "最近 30 天"], [365, "最近一年"]], v.days)}</select>
+        <select id="qqLinkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], v.sort)}</select>
       </div>
       <div class="files-meta" id="qqLinkMeta">加载中…</div>
     </div>
     <div id="qqLinkItems"></div>
     <button id="qqLinkMore" class="mini ghost files-more" style="display:none">加载更多</button>`;
-  const onChange = () => {
-    qqLinkView.chat = $("#qqLinkChat").value;
-    qqLinkView.platform = $("#qqLinkPlatform").value;
-    qqLinkView.state = $("#qqLinkState").value;
-    qqLinkView.days = +$("#qqLinkDays").value || 0;
-    qqLinkView.sort = $("#qqLinkSort").value;
-    refreshQqLinks(true);
-  };
-  ["#qqLinkChat", "#qqLinkPlatform", "#qqLinkState", "#qqLinkDays", "#qqLinkSort"].forEach(sel => $(sel).onchange = onChange);
-  $("#qqLinkMore").onclick = () => refreshQqLinks(false);
-}
-
-async function showQqLinks() {
-  if (!qqFileSessions) {
-    try { qqFileSessions = (await api("/api/qq/local/sessions?limit=300")).sessions || []; }
-    catch { qqFileSessions = []; }
-  }
-  renderQqLinkShell();
-  await refreshQqLinks(true);
-  showPane("#linkList");
-  // 正文由后台常驻 worker 负责解析（新链接即时、历史积压空闲时清），
-  // 打开页面不再触发解析，避免「点开才开始处理」的错觉。
-}
-
-async function refreshQqLinks(reset = true) {
-  if (qqLinkView.loading) return;
-  if (reset) { qqLinkView.offset = 0; qqLinkView.items = []; }
-  qqLinkView.loading = true;
-  const meta = $("#qqLinkMeta");
-  if (meta) meta.textContent = "加载中…";
-  const qs = new URLSearchParams({ limit: "100", offset: String(qqLinkView.offset),
-                                   sort: qqLinkView.sort });
-  if (qqLinkView.chat) qs.set("conv", qqLinkView.chat);
-  if (qqLinkView.platform) qs.set("platform", qqLinkView.platform);
-  if (qqLinkView.state) qs.set("state", qqLinkView.state);
-  if (qqLinkView.days) qs.set("days", String(qqLinkView.days));
-  if (qqLinkView.q) qs.set("q", qqLinkView.q);
-  try {
-    const d = await api("/api/qq/local/links?" + qs.toString());
-    qqLinkView.items.push(...(d.links || []));
-    qqLinkView.offset += (d.links || []).length;
-    qqLinkView.hasMore = !!d.hasMore;
-    qqLinkView.stats = d.stats || null;
-    renderQqLinkItems();
-  } catch (e) {
-    if (meta) meta.textContent = "加载失败：" + e.message;
-  } finally {
-    qqLinkView.loading = false;
-  }
-}
-
-function renderQqLinkItems() {
-  const box = $("#qqLinkItems");
-  if (!box) return;
-  box.innerHTML = "";
-  if (!qqLinkView.items.length) {
-    box.innerHTML = `<div class="qa-empty">没有符合条件的 QQ 链接。<br>
-      换个会话/平台/状态或时间范围试试；QQ 聊天里的链接导入后会自动补解析。</div>`;
-  }
-  for (const l of qqLinkView.items) {
-    const d = document.createElement("div");
-    d.className = "result-item";
+  },
+  itemHtml: (l) => {
     const badge = l.parsed
       ? `<span class="link-badge ok">已解析</span>`
       : l.state === "failed"
@@ -1941,20 +1875,27 @@ function renderQqLinkItems() {
           ? `<span class="link-badge" title="较早的历史链接，点开时再解析">未解析</span>`
           : `<span class="link-badge">解析中</span>`;
     const title = (l.title || l.url).split("\n")[0];
-    d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(l.conv_name || l.conv)} · ${fmtTime(l.ts)}</span> ${badge}</div>
+    return `<div class="meta"><span class="meta-trunc">${esc(l.conv_name || l.conv)} · ${fmtTime(l.ts)}</span> ${badge}</div>
       <div class="snippet"><span class="file-badge">${esc(l.platform || "网页")}</span> ${esc(title)}</div>`;
-    d.onclick = () => openLinkPreview(l.url, l.title || l.url);
-    box.appendChild(d);
-  }
-  const meta = $("#qqLinkMeta");
-  if (meta) {
-    const parsedN = qqLinkView.items.filter(x => x.parsed).length;
-    meta.textContent = `${qqLinkView.items.length} 条 QQ 链接 · ${parsedN} 条已解析`
-      + (qqLinkView.hasMore ? " · 还有更多" : "");
-  }
-  const more = $("#qqLinkMore");
-  if (more) more.style.display = qqLinkView.hasMore ? "" : "none";
-}
+  },
+  onItem: (l) => openLinkPreview(l.url, l.title || l.url),
+  emptyHtml: () => `<div class="qa-empty">没有符合条件的 QQ 链接。<br>
+      换个会话/平台/状态或时间范围试试；QQ 聊天里的链接导入后会自动补解析。</div>`,
+  metaText: (v) => `${v.items.length} 条 QQ 链接 · ${v.items.filter(x => x.parsed).length} 条已解析`
+    + (v.hasMore ? " · 还有更多" : ""),
+  sessions: async () => {
+    if (!qqFileSessions) {
+      try { qqFileSessions = (await api("/api/qq/local/sessions?limit=300")).sessions || []; }
+      catch { qqFileSessions = []; }
+    }
+  },
+  // 正文由后台常驻 worker 解析；打开页面不再触发解析，避免「点开才开始处理」的错觉。
+});
+
+function renderQqLinkShell() { qqLinkList.renderShell(); }
+async function showQqLinks() { return qqLinkList.show(); }
+async function refreshQqLinks(reset = true) { return qqLinkList.refresh(reset); }
+function renderQqLinkItems() { qqLinkList.renderItems(); }
 
 function startQqLinkParse(limit, quiet) {
   api("/api/qq/local/links/parse", { method: "POST",
@@ -1980,160 +1921,99 @@ function startQqLinkParse(limit, quiet) {
 }
 
 
-async function refreshFiles(reset = true) {
-  if (isQQ()) return refreshQqFiles();
-  if (fileView.loading) return;
-  if (reset) { fileView.offset = 0; fileView.items = []; }
-  fileView.loading = true;
-  const meta = $("#fileMeta");
-  if (meta) meta.textContent = "加载中…";
-  const qs = new URLSearchParams({ n: "200", offset: String(fileView.offset), sort: fileView.sort });
-  if (fileView.chat) qs.set("chat", fileView.chat);
-  if (fileView.kind) qs.set("kind", fileView.kind);
-  if (fileView.q) qs.set("q", fileView.q);
-  if (fileView.days) qs.set("since", String(Math.floor(Date.now() / 1000) - fileView.days * 86400));
-  try {
-    const list = await api("/api/files?" + qs.toString());
-    fileView.items.push(...list);
-    fileView.offset += list.length;
-    fileView.hasMore = list.length >= 200;
-    renderFileItems();
-  } catch (e) {
-    if (meta) meta.textContent = "加载失败：" + e.message;
-  } finally {
-    fileView.loading = false;
-  }
-}
-
-async function showFiles(opts = {}) {
-  if (typeof opts === "string") opts = { q: opts };
-  if (isQQ()) return showQqFiles(opts);
-  Object.assign(fileView, opts);
-  if (!fileSessions) {
-    try { fileSessions = await api("/api/sessions"); } catch { fileSessions = []; }
-  }
-  if (!fileView.stats) {
-    try { fileView.stats = await api("/api/files/stats"); } catch { fileView.stats = null; }
-  }
-  renderFileShell();
-  await refreshFiles(true);
-  showPane("#fileList");
-}
 const linkView = { platform: "", state: "", days: 0, sort: "new", q: "", chat: "",
                    offset: 0, items: [], hasMore: true, loading: false, queue: null };
 let linkQueryTimer = null;
 
-function renderLinkShell() {
-  const box = $("#linkList");
-  const opts = (rows, cur) => rows.map(([v, label]) =>
-    `<option value="${attrEsc(String(v))}" ${String(v) === String(cur) ? "selected" : ""}>${esc(label)}</option>`).join("");
-  box.innerHTML = `
+function wxLinkQuery(v) {
+  const qs = new URLSearchParams({ n: "100", offset: String(v.offset), sort: v.sort });
+  if (v.chat) qs.set("chat", v.chat);
+  if (v.platform) qs.set("platform", v.platform);
+  if (v.state) qs.set("state", v.state);
+  if (v.days) qs.set("days", String(v.days));
+  if (v.q) qs.set("q", v.q);
+  return qs;
+}
+
+const wxLinkList = ChatData.createList({
+  view: linkView,
+  ids: { box: "#linkList", meta: "#linkMeta", items: "#linkItems", more: "#linkMore" },
+  // 微信链接中心额外并发取解析队列状态，是唯一需要自定义 fetch 的列表
+  fetch: async (v) => {
+    const [list, queue] = await Promise.all([
+      api("/api/links?" + wxLinkQuery(v).toString()),
+      api("/api/links/queue").catch(() => null)]);
+    return { list, queue };
+  },
+  parse: (d, v) => {
+    v.queue = d.queue;
+    return { items: d.list, hasMore: d.list.length >= 100 };
+  },
+  selectors: [
+    { id: "#linkChat", key: "chat" }, { id: "#linkPlatform", key: "platform" },
+    { id: "#linkState", key: "state" }, { id: "#linkDays", key: "days", numeric: true },
+    { id: "#linkSort", key: "sort" },
+  ],
+  shellHtml: (v) => {
+    const opts = ChatData.optionsHtml;
+    return `
     <div class="files-toolbar">
       <div class="files-filters">
-        <select id="linkChat">${opts([["", "全部会话"], ...fileSessions.slice(0, 150).map(x => [x.username, x.name || x.username])], linkView.chat)}</select>
+        <select id="linkChat">${opts([["", "全部会话"], ...fileSessions.slice(0, 150).map(x => [x.username, x.name || x.username])], v.chat)}</select>
         <select id="linkPlatform">${opts([["", "全部平台"], ["xhs", "小红书"], ["bili", "B站"],
-          ["article", T("linkArticle")], ["generic", "网页"]], linkView.platform)}</select>
+          ["article", T("linkArticle")], ["generic", "网页"]], v.platform)}</select>
         <select id="linkState">${opts([["", "全部状态"], ["parsed", "已解析"],
-          ["pending", "解析中"], ["failed", "暂不支持"]], linkView.state)}</select>
+          ["pending", "解析中"], ["failed", "暂不支持"]], v.state)}</select>
         <select id="linkDays">${opts([[0, "不限时间"], [7, "最近 7 天"],
-          [30, "最近 30 天"], [365, "最近一年"]], linkView.days)}</select>
-        <select id="linkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], linkView.sort)}</select>
+          [30, "最近 30 天"], [365, "最近一年"]], v.days)}</select>
+        <select id="linkSort">${opts([["new", "最新在前"], ["old", "最早在前"]], v.sort)}</select>
       </div>
       <div class="files-meta" id="linkMeta">加载中…</div>
     </div>
     <div id="linkItems"></div>
     <button id="linkMore" class="mini ghost files-more" style="display:none">加载更多</button>`;
-  const onChange = () => {
-    linkView.platform = $("#linkPlatform").value;
-    linkView.state = $("#linkState").value;
-    linkView.days = +$("#linkDays").value || 0;
-    linkView.sort = $("#linkSort").value;
-    refreshLinks(true);
-  };
-  ["#linkChat", "#linkPlatform", "#linkState", "#linkDays", "#linkSort"].forEach(sel => $(sel).onchange = onChange);
-  $("#linkMore").onclick = () => refreshLinks(false);
-}
-
-function renderLinkItems() {
-  const box = $("#linkItems");
-  if (!box) return;
-  box.innerHTML = "";
-  if (!linkView.items.length) {
-    box.innerHTML = `<div class="qa-empty">没有符合条件的链接。<br>
-      ${Q("换个平台/状态或时间范围试试；聊天里的链接会自动登记并解析。")}</div>`;
-  }
-  for (const l of linkView.items) {
-    const d = document.createElement("div");
-    d.className = "result-item";
+  },
+  itemHtml: (l) => {
     const badge = l.parsed
       ? `<span class="link-badge ok">已解析</span>`
       : l.platform_key === "wxapp" ? `<span class="link-badge">仅卡片信息</span>`
       : l.state === 2 ? `<span class="link-badge fail">暂不支持</span>`
       : `<span class="link-badge">解析中</span>`;
-    d.innerHTML = `<div class="meta"><span class="meta-trunc">${esc(l.chat_name)} · ${fmtTime(l.received)}</span> ${badge}</div>
+    return `<div class="meta"><span class="meta-trunc">${esc(l.chat_name)} · ${fmtTime(l.received)}</span> ${badge}</div>
       <div class="snippet"><span class="file-badge">${esc(Q(l.platform))}</span> ${esc(l.title)}${l.chars ? ` · ${l.chars} 字` : ""}</div>`;
-    d.onclick = () => {
-      if (l.url.startsWith("wxapp://")) {
-        toast(Q("小程序内容需要在微信里打开，无法抓取正文"));
-        return;
-      }
-      openLinkPreview(l.url, l.title);
-    };
-    box.appendChild(d);
-  }
-  const meta = $("#linkMeta");
-  if (meta) {
-    const parsedN = linkView.items.filter(x => x.parsed).length;
+  },
+  onItem: (l) => {
+    if (l.url.startsWith("wxapp://")) {
+      toast(Q("小程序内容需要在微信里打开，无法抓取正文"));
+      return;
+    }
+    openLinkPreview(l.url, l.title);
+  },
+  emptyHtml: () => `<div class="qa-empty">没有符合条件的链接。<br>
+      ${Q("换个平台/状态或时间范围试试；聊天里的链接会自动登记并解析。")}</div>`,
+  metaText: (v) => {
+    const parsedN = v.items.filter(x => x.parsed).length;
     let extra = "";
-    const q = linkView.queue;
+    const q = v.queue;
     if (q) {
       extra = ` · 待解析 ${q.pending}`;
       if (q.current) extra += ` · 正在解析：${esc(q.current.slice(0, 40))}`;
       if (q.error) extra += ` · 最近失败：${esc(q.error.slice(0, 40))}`;
     }
-    meta.textContent = `${linkView.items.length} 条链接 · ${parsedN} 条已解析${extra}`;
-  }
-  const more = $("#linkMore");
-  if (more) more.style.display = linkView.hasMore ? "" : "none";
-}
+    return `${v.items.length} 条链接 · ${parsedN} 条已解析${extra}`;
+  },
+  sessions: ensureWxSessions,
+});
 
+function renderLinkShell() { wxLinkList.renderShell(); }
+function renderLinkItems() { wxLinkList.renderItems(); }
 async function refreshLinks(reset = true) {
-  if (isQQ()) return refreshQqLinks();
-  if (linkView.loading) return;
-  if (reset) { linkView.offset = 0; linkView.items = []; }
-  linkView.loading = true;
-  const meta = $("#linkMeta");
-  if (meta) meta.textContent = "加载中…";
-  const qs = new URLSearchParams({ n: "100", offset: String(linkView.offset), sort: linkView.sort });
-  if (linkView.chat) qs.set("chat", linkView.chat);
-  if (linkView.platform) qs.set("platform", linkView.platform);
-  if (linkView.state) qs.set("state", linkView.state);
-  if (linkView.days) qs.set("days", String(linkView.days));
-  if (linkView.q) qs.set("q", linkView.q);
-  try {
-    const [list, queue] = await Promise.all([
-      api("/api/links?" + qs.toString()),
-      api("/api/links/queue").catch(() => null)]);
-    linkView.items.push(...list);
-    linkView.offset += list.length;
-    linkView.hasMore = list.length >= 100;
-    linkView.queue = queue;
-    renderLinkItems();
-  } catch (e) {
-    if (meta) meta.textContent = "加载失败：" + e.message;
-  } finally {
-    linkView.loading = false;
-  }
+  if (isQQ()) return refreshQqLinks(reset);
+  return wxLinkList.refresh(reset);
 }
-
 async function showLinks() {
   if (isQQ()) return showQqLinks();
-  if (!fileSessions) {
-    try { fileSessions = await api("/api/sessions"); } catch { fileSessions = []; }
-  }
-  renderLinkShell();
-  await refreshLinks(true);
-  showPane("#linkList");
+  return wxLinkList.show();
 }
 
 /* ---------------- QQ 空间：独立页面，不显示微信朋友圈数据 ---------------- */
@@ -2387,6 +2267,7 @@ function settingSections() {
     { id: "general", label: "通用", icon: "⚙", desc: "开机自启与程序行为" },
     { id: "model", label: "AI 模型", icon: "✦", desc: "接口与回答方式" },
     { id: "privacy", label: "隐私与脱敏", icon: "⊘", desc: "发往云端前屏蔽敏感信息" },
+    { id: "cloud", label: "云端分流", icon: "☁", desc: "知识库副本与机器人托管" },
   ];
   if (isQQ()) {
     list.push({ id: "qqbot", label: "QQ 机器人", icon: "⇄", desc: "qqbot 凭据、菜单与消息" });
@@ -2434,17 +2315,24 @@ async function showSettings(section) {
   body.removeAttribute("data-l10n");   // 每次重渲染都要允许再次本地化
   body.innerHTML = `<div class="qa-empty">加载中…</div>`;
 
-  if (settingsSection === "general") await renderSettingsGeneral(body);
-  if (settingsSection === "model") await renderSettingsModel(body);
-  if (settingsSection === "privacy") await renderSettingsPrivacy(body);
-  if (settingsSection === "wxbot") await renderSettingsWxBot(body);
-  if (settingsSection === "qqbot") await renderSettingsQqBot(body);
-  if (settingsSection === "qqlocal") await renderSettingsQqLocal(body);
-  if (settingsSection === "data") await renderSettingsData(body);
-  if (settingsSection === "index") await renderSettingsIndex(body);
-  if (settingsSection === "about") renderSettingsAbout(body, status);
-  // 兜底：把设置页里残留的微信术语换成 QQ 说法（不影响 input value / 消息正文）
-  if (window.Platform) window.Platform.localize(body);
+  // 渲染函数抛异常时不要永久停在「加载中…」，把真实错误显示出来便于定位
+  try {
+    if (settingsSection === "general") await renderSettingsGeneral(body);
+    if (settingsSection === "model") await renderSettingsModel(body);
+    if (settingsSection === "privacy") await renderSettingsPrivacy(body);
+    if (settingsSection === "cloud") await renderSettingsCloud(body);
+    if (settingsSection === "wxbot") await renderSettingsWxBot(body);
+    if (settingsSection === "qqbot") await renderSettingsQqBot(body);
+    if (settingsSection === "qqlocal") await renderSettingsQqLocal(body);
+    if (settingsSection === "data") await renderSettingsData(body);
+    if (settingsSection === "index") await renderSettingsIndex(body);
+    if (settingsSection === "about") renderSettingsAbout(body, status);
+    // 兜底：把设置页里残留的微信术语换成 QQ 说法（不影响 input value / 消息正文）
+    if (window.Platform) window.Platform.localize(body);
+  } catch (e) {
+    body.innerHTML = `<div class="qa-empty">设置页加载失败：${esc(String(e && e.message || e))}<br>`
+      + `<small>可先刷新页面；若持续出现，请把这段信息反馈给我。</small></div>`;
+  }
 }
 
 async function renderSettingsGeneral(body) {
@@ -3493,16 +3381,16 @@ function showQqSessionMenu(x, y, c) {
   setTimeout(() => document.addEventListener("mousedown", closeSessionMenu, { once: true }), 0);
 }
 
-async function qqSetPin(c, pinned) {
-  try {
-    await api("/api/qq/local/session/pin", { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conv: c.conv, pinned }) });
-    c.pinned = pinned;
-    toast(pinned ? "已置顶" : "已取消置顶");
-    loadQqConversations();
-  } catch (e) { toast("操作失败：" + e.message); }
+function pinQqLocal(c, pinned) {
+  return ChatData.setPin({
+    endpoint: "/api/qq/local/session/pin",
+    body: { conv: c.conv, pinned },
+    pinned: !!pinned,
+    onDone: () => { c.pinned = pinned ? 1 : 0; loadQqConversations(); },
+  });
 }
+
+async function qqSetPin(c, pinned) { return pinQqLocal(c, pinned); }
 
 async function loadQqConversations() {
   const box = $("#qqList");
@@ -3546,13 +3434,7 @@ async function loadQqConversations() {
       const pinBtn = item.querySelector(".pin-act");
       pinBtn.onclick = async (e) => {
         e.stopPropagation();
-        try {
-          await api("/api/qq/local/session/pin", { method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ conv: c.conv, pinned: c.pinned ? 0 : 1 }) });
-          toast(c.pinned ? "已取消置顶" : "已置顶");
-          loadQqConversations();
-        } catch (err) { toast("操作失败：" + err.message); }
+        await pinQqLocal(c, c.pinned ? 0 : 1);
       };
       item.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -3735,7 +3617,7 @@ async function openQqConversation(conv, name, scene, focusId = 0) {
 /* ---------------------------------------------------------------- QQ 本地记录（NT 数据库）
    QQ 模式的消息列表来自本机 QQ NT 解密库，与微信知识库完全分开。 */
 /* QQ 本地会话实时刷新：与微信同款 SSE（后端同步入库后 0.5 秒内推送） */
-let _qqEs = null;
+const qqLiveState = { es: null };
 function _qqLastLocalId() {
   let mx = 0;
   document.querySelectorAll("#msgs [data-id^='qq-local-']").forEach(el => {
@@ -3749,12 +3631,10 @@ function qqLiveStart() {
   if (!(isQQ() && state.qqConvKind === "local" && state.qqConv)) return;
   const conv = state.qqConv;
   const after = _qqLastLocalId();
-  const es = new EventSource(`/api/qq/local/stream?conv=${encodeURIComponent(conv)}&after_id=${after}`);
-  _qqEs = es;
-  es.onmessage = (ev) => {
-    let d = null;
-    try { d = JSON.parse(ev.data); } catch { return; }
-    if (!d) return;
+  ChatData.startLive({
+    store: qqLiveState,
+    url: () => `/api/qq/local/stream?conv=${encodeURIComponent(conv)}&after_id=${after}`,
+    onData: (d) => {
     if (d.messages && d.messages.length) {
       if (!(isQQ() && state.qqConvKind === "local" && state.qqConv === conv)) return;
       if ($("#msgList").style.display === "none") return;   // 预览/设置页打开时不插
@@ -3780,11 +3660,11 @@ function qqLiveStart() {
         if (l2) l2.scrollTop = keep;
       });
     }
-  };
-  es.onerror = () => { /* EventSource 自带重连 */ };
+    },
+  });
 }
 function qqLiveStop() {
-  if (_qqEs) { try { _qqEs.close(); } catch {} _qqEs = null; }
+  if (qqLiveState.es) { try { qqLiveState.es.close(); } catch {} qqLiveState.es = null; }
 }
 
 function qqLocalMediaSrc(path) {

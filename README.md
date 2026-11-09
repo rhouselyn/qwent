@@ -4,7 +4,9 @@
 
 **Qwent = QQ + WeChat Agent。把本机微信与 QQ 的聊天记录变成可搜索、可引用、可问答的私人知识库；两套界面、两套 Agent，各自分析各自的记录。**
 
-全程本地运行 · 只读解密 · 不向微信发送任何消息 · 点左上角「微」即可切换 QQ 界面
+默认全程本地运行 · 只读解密 · 不向微信发送任何消息 · 点左上角「微」即可切换 QQ 界面
+
+> 开启「设置 → 云端分流」后，知识库副本会加密同步到你的服务器，QQ / 微信机器人改由服务器常驻。详见 [云端分流](#云端分流)。
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?logo=windows11&logoColor=white)
@@ -35,7 +37,7 @@
 
 > 解密本机微信数据库 → 把文字、语音、图片、文件、链接和朋友圈全部解析入库 → 提供语义搜索、跨会话汇总、撤回留存与带引用的 AI 问答。
 
-你不需要手动导出聊天记录：解密、索引、OCR、语音转写都在本机完成。每个回答都会带 `[1]`、`[2]` 这样的引用编号，点击直接跳到原始消息、文件或文章正文。聊天数据只在本机读写；外发请求仅限你配置的 LLM 接口，以及解析链接/朋友圈媒体时访问对应站点。
+你不需要手动导出聊天记录：解密、索引、OCR、语音转写都在本机完成。每个回答都会带 `[1]`、`[2]` 这样的引用编号，点击直接跳到原始消息、文件或文章正文。默认配置下聊天数据只在本机读写；外发请求仅限你配置的 LLM 接口，以及解析链接/朋友圈媒体时访问对应站点。**开启云端分流后，全量聊天记录副本会加密上传到你自己的服务器**（见下方章节）。
 
 想随时查这些记录？直接打开网页即可：界面还原微信样式，搜索、引用溯源、AI 问答都在浏览器里完成。点左上角的「微」字会把整个界面切成 QQ 皮肤（蓝色导航、QQ 圆形头像、QQ 空间、独立的 QQ 设置）；QQ 模式会读取本机 QQ NT 数据库里的聊天记录、联系人和文件，和微信数据分开保存、分开提问（详见 [微信 / QQ 双界面](#微信--qq-双界面)）。出门在外想用手机查，还可以接入 QQ 官方机器人——市面上的微信机器人大多基于非官方协议，随时面临封号风险，而 QQ 机器人是 QQ 官方开放平台提供的合法能力，在 QQ 里直接提问，回答来自本机 QQ 记录（详见 [QQ 机器人](#qq-机器人)）。
 
@@ -132,6 +134,8 @@ flowchart LR
 | `backend/app/qq_messages.py` | QQ 机器人消息落库与会话/消息/搜索（独立 `qq_message` 表，附件元数据存 `media`） |
 | `backend/app/qq_attach.py` | QQ 附件立即下载留存：图片 OCR、语音/视频转写、文件正文提取 |
 | `backend/app/platform_text.py` | 系统消息按平台生成真实微信 / QQ 措辞 |
+| `backend/app/chat_core.py` | **两平台共用内核**：SSE 实时更新、置顶、文件定位与分类、分页/排序；`WeChatSource` / `QQLocalSource` 两个子类只声明差异 |
+| `backend/frontend/chat_data.js` | **两平台共用前端数据层**：四个文件/链接中心共用一套 `createList`，置顶与 SSE 连接生命周期也各只有一份 |
 | `backend/frontend/platform.js` / `qq.css` | 平台切换、文案表、QQ 皮肤（品牌色、导航、气泡、引用条） |
 | `backend/frontend/settings_bot.js` | 按平台独立渲染的「微信通道 / QQ 机器人」设置页 |
 | `backend/frontend/` | 无框架的双皮肤 Web UI |
@@ -239,7 +243,9 @@ python backend/scripts/setup.py --index-url https://pypi.tuna.tsinghua.edu.cn/si
 
 **两套 Agent 不合并**：微信与 QQ 各自有状态文件（`wxagent_state.json` / `qqagent_state.json`）、独立提示词、独立 AI 会话（`ai_session.platform`）和独立通道配置；`botcore.py` 只提供无状态工具函数，不保存任何会话或用户数据。两边共用的是同一个本地知识库和检索/模型能力。
 
-两套设置写在不同配置段（`agent_api`+`wxagent` 与 `qqbot`），切换平台不会改动另一边；通用分组（AI 模型、隐私、数据、索引、关于）两边都有。QQ 模式的数据来自本机 QQ NT 数据库 + qqbot，微信模式不再出现任何 QQ 配置项。
+两套设置写在不同配置段（`agent_api`+`wxagent` 与 `qqbot`），切换平台不会改动另一边；通用分组（AI 模型、隐私、数据、索引、关于）两边都有。
+
+**共用边界**：只有解密方式、数据表、皮肤文案、Agent 提示词与通道凭据按平台分开；消息的实时更新（SSE）、置顶、文件定位/分类、分页排序、列表查询与渲染、实时流生命周期都走同一份实现——后端 `chat_core.py`（两个 `Source` 子类只声明差异），前端 `chat_data.js`（四个文件/链接中心通过配置生成）。修一个共性 bug 只改一处，微信与 QQ 同时生效；以后加第三个平台只需再声明一个 Source 和一份前端配置，不用复制整套 UI 与查询逻辑。QQ 模式的数据来自本机 QQ NT 数据库 + qqbot，微信模式不再出现任何 QQ 配置项。
 
 ## 使用
 
@@ -383,7 +389,7 @@ openclaw channels login --channel openclaw-weixin            # 手机微信扫�
 | 全量导入预检（不写库） | `python backend/scripts/m0_import.py --dry-run` |
 | 重新导入 / 断点续传 | `python backend/scripts/m0_import.py`（唯一索引去重，中断后自动续跑） |
 | 导入 QQ 本地记录（QQ 需登录） | `python backend/scripts/qq_import.py`；设置页「QQ 本地记录」也有按钮 |
-| 回归测试（37 项，无需服务） | `python -m unittest discover -s backend/tests -v` |
+| 回归测试（62 项，无需服务） | `python -m unittest discover -s backend/tests -v` |
 | HTTP 接口验收（服务已启动） | `python backend/scripts/smoke_http.py` |
 | 浏览器双界面验收（服务已启动） | `python backend/scripts/smoke_browser.py`，截图在系统临时目录 `wk-shots/` |
 | 双通道状态隔离验收 | `cd backend && python scripts/smoke_state.py` |
@@ -397,7 +403,7 @@ openclaw channels login --channel openclaw-weixin            # 手机微信扫�
 ## 隐私与安全
 
 - **出站脱敏**：发往云端模型的上下文默认替换手机号、身份证、银行卡、邮箱，规则可逐项关闭；本机原文、检索与引用不受影响。
-- **数据不出本机**：解密、索引、OCR、ASR 全部在本地完成；外发请求仅限生成回答时的 LLM 调用，以及解析链接/朋友圈媒体时访问对应站点。
+- **数据不出本机（默认模式）**：解密、索引、OCR、ASR 全部在本地完成；外发请求仅限生成回答时的 LLM 调用，以及解析链接/朋友圈媒体时访问对应站点。**例外**：开启「云端分流」后，全量聊天记录（包含与他人的对话）会以 AES-GCM 加密副本形式同步到你自己配置的服务器；开关需二次确认，密钥只存两端，媒体缓存、数据库密钥与模型权重不上传。关闭开关即恢复纯本地模式。
 - **只读原则**：不调用微信/QQ 任何发送接口，不修改微信/QQ 数据库；QQ 本地库解密文件只写系统临时目录并在导入后删除。
 - **仓库不含隐私**：仓库只包含代码、示例配置和文档。
 - **QQ 机器人凭据与状态本地保存**：QQ 的 AppID/AppSecret 与各用户的会话、开关只写入本机文件（已 git 忽略），不随仓库分发。
@@ -431,6 +437,43 @@ FastAPI · SQLite（FTS5 + sqlite-vec）· bge-small-zh 本地嵌入 · sherpa-o
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)：离线语音识别
 - [BGE / BAAI](https://huggingface.co/BAAI/bge-small-zh-v1.5)：中文向量模型
 - [WeFlow](https://github.com/hicccc77/WeFlow)、[chatlog](https://github.com/sjzar/chatlog)、[PyWxDump](https://github.com/xaoyaoo/PyWxDump)、[WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)：路线调研与实现思路参考
+
+## 云端分流
+
+一个开关，让手机端在电脑关机后也能继续和机器人对话，而电脑上的 Qwent 网页 / 桌面 UI 仍查询本地实时库。
+
+- **数据**：本地 `knowledge.db` 的加密副本放到云服务器。首次做一次全量基线（约 4.25 GB，压缩加密后 2.5–3 GB），之后每 10 分钟按变更行增量同步一次，也可在设置页点「立即增量同步」。
+- **传输**：默认走 SSH 直传（复用本机私钥），两端都不需要公网入站端口、域名或证书；增量包与基线分片均为 zstd + AES-GCM 加密，按序号幂等应用，支持断点续传。
+- **机器人**：开启后本机 `qqbot` 与 OpenClaw Gateway 自动下线、由服务器接管（同一凭据双端在线会互踢）；关闭后原样恢复。微信渠道可把本机已扫码的账号凭据迁到服务器，**不需要在服务器重新扫码**；若凭据失效，退回本地扫码即可。
+- **解耦**：云端最小运行单元由 `build_cloud_bundle.py` 从 `backend/app/` 白名单拷贝同一份源码生成，不含 `backend/frontend/`。**改前端 UI 不会影响服务器上的消息接收、发送与数据更新**；但两端共用问答后端（`main.py` / `agent.py` / `botcore.py`），改问答逻辑需重新构建并部署 bundle。
+- **一致性**：文字问答、FTS5 + 向量混合检索、Agent 工具、引用编号、9 条指令、QQ 菜单与白名单、脱敏、双 Agent 隔离全部保持一致；云端数据最多落后 10 分钟，且不提供图片预览 / 语音回听 / 文件打开位置（手机端本就是纯文本答案）。
+
+配置在 `backend/config.json` 的 `cloud` 段（或设置页「云端分流」分组）：
+
+| 字段 | 说明 |
+|---|---|
+| `enabled` | 总开关，默认 `false` |
+| `takeover_bots` | 是否把 QQ / 微信机器人交给服务器（默认 `true`） |
+| `auto` / `interval_min` | 定时增量同步，默认每 10 分钟 |
+| `transport` / `endpoint` / `scp_*` | 传输方式与 SSH 连接参数 |
+| `encrypt_key` | 32 字节 base64 密钥，两端必须一致；也可用环境变量 `QWENT_CLOUD_KEY` |
+
+```bash
+python backend/scripts/cloud_cli.py test                # 连通性与密钥自检
+python backend/scripts/cloud_cli.py triggers-install    # 主库建 CDC 触发器（幂等）
+python backend/scripts/cloud_cli.py baseline            # 首次全量基线
+python backend/scripts/cloud_cli.py sync                # 手动增量
+python backend/scripts/cloud_cli.py status              # 状态、序号、错误
+```
+
+云端部署见 `cloud/README.md` 与 `云端分流-实施清单.md`。
+
+| 现象 | 处理 |
+|---|---|
+| 手机端回答内容偏旧 | 查看设置页「最后同步」；点「立即增量同步」，或确认本机服务在运行 |
+| `schema 指纹不一致` | 本地已改表结构，重跑一次 `cloud_cli.py baseline`，云端再 `restore` |
+| 机器人两端都不回 | 同一 AppID / 同一微信账号被双端同时占用：关掉本机对应通道或关闭分流开关 |
+| 云端向量检索不生效 | 确认服务器已装 `sqlite-vec` / `transformers`，且 `models/bge-small-zh` 已上传 |
 
 ## 免责声明
 

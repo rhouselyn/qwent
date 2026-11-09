@@ -9,6 +9,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import logging
 import os
 import re
 import queue
@@ -26,6 +27,8 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+log = logging.getLogger("main")  # 与 botcore/qqbot 等模块保持同一套日志约定
+
 PROJECT = Path(__file__).resolve().parent.parent.parent   # C:/Users/14815/Projects/wechat
 CHATTRACE_SRC = PROJECT / "refs" / "ChatTrace" / "src"
 DATA = PROJECT / "data"
@@ -33,18 +36,26 @@ KNOWLEDGE_DB = DATA / "knowledge.db"
 CONFIG = PROJECT / "backend" / "config.json"
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
+import cloud_conf as _cc  # noqa: E402  云端分流：本地/云端共用同一份源码
+IS_CLOUD = _cc.IS_CLOUD
+
 from paths import ACCOUNT_DIR, ACCOUNT_ID, DECRYPTED_DIR  # noqa: E402 自动定位微信账号目录
 
 if CHATTRACE_SRC.is_dir():
     sys.path.insert(0, str(CHATTRACE_SRC))
 
-from chattrace.service.media import MediaService, decode_dat  # noqa: E402
+try:
+    from chattrace.service.media import MediaService, decode_dat  # noqa: E402
+    from chattrace.service.image_key import ImageKeyResolver  # noqa: E402
+except ImportError:      # 云端最小包不含 ChatTrace；媒体解密不适用于云端
+    from cloud_stub import MediaService, decode_dat, ImageKeyResolver  # noqa: E402
 from textutil import display_text as clean_display, search_text as clean_search  # noqa: E402
 import vector  # noqa: E402
 import agent as agent_mod  # noqa: E402
 import privacy  # noqa: E402
 import sns as sns_mod  # noqa: E402
 import platform_text  # noqa: E402  平台文案（系统消息微信/QQ 双版本）
+import chat_core  # noqa: E402      微信/QQ 共用的消息业务内核
 import qq_messages  # noqa: E402    QQ 机器人消息留存
 import qq_local  # noqa: E402       QQ NT 本地记录（消息/联系人/文件）
 
@@ -58,7 +69,6 @@ def vconn():
         con = vector.connect(str(KNOWLEDGE_DB))
         _vec_local.con = con
     return con
-from chattrace.service.image_key import ImageKeyResolver  # noqa: E402
 
 app = FastAPI(title="WeChat Knowledge Assistant")
 
@@ -125,6 +135,8 @@ def _ensure_key_usable() -> bool:
 
 
 def get_media() -> MediaService:
+    if IS_CLOUD:
+        return None          # 云端不解密媒体；机器人问答只走文本检索
     global _media
     with _media_lock:
         if _media is None:
@@ -157,6 +169,12 @@ def ensure_chat_pin(con: sqlite3.Connection):
             con.execute("ALTER TABLE message ADD COLUMN noise INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+
+
+# 平台差异的唯一声明处：表名/键名/分类口径/SSE 节律/文案。
+# 其余（置顶、SSE、定位、分类、分页）都继承 chat_core，两边不再各写一份。
+WX_SOURCE = chat_core.WeChatSource(prepare=ensure_chat_pin)
+QQ_LOCAL_SOURCE = chat_core.QQLocalSource(prepare=qq_local.ensure_schema)
 
 
 def db() -> sqlite3.Connection:
@@ -589,6 +607,20 @@ def _recall_pass(rows: list[sqlite3.Row], con, drop_noise: bool = True) -> list[
     return out
 
 
+def _cloud_status() -> dict:
+    """设置页状态面板与 /cloud/v1/health 共用的云端分流状态。"""
+    try:
+        import importlib
+        mod = importlib.import_module("cloud_apply" if IS_CLOUD else "cloud_sync_local")
+        extra = mod.status() if hasattr(mod, "status") else {}
+    except Exception as exc:      # noqa: BLE001  控制面未就绪不影响主服务
+        extra = {"error": str(exc)[:120]}
+    return {"is_cloud": IS_CLOUD, "enabled": _cc.enabled(),
+            "takeover": _cc.takeover(),
+            "owned_by": "cloud" if (IS_CLOUD or _cc.takeover()) else "local",
+            **extra}
+
+
 # ---------------------------------------------------------------- API: 会话/消息
 @app.get("/api/status")
 def api_status():
@@ -602,6 +634,7 @@ def api_status():
         "llm_model": conf["llm"]["model"],
         "sync": _sync_state,
         "key_fp": "a3045c56",
+        "cloud": _cloud_status(),
     }
 
 
@@ -644,15 +677,14 @@ def api_sessions():
 
 @app.post("/api/sessions/pin")
 def api_session_pin(payload: dict):
-    con = db()
-    ensure_chat_pin(con)
     username = payload.get("username")
     if not username:
         raise HTTPException(400, "缺少 username")
-    pinned = 1 if payload.get("pinned") else 0
-    con.execute("UPDATE chat SET pinned=? WHERE username=?", (pinned, username))
-    con.commit()
-    return {"ok": True, "username": username, "pinned": pinned}
+    con = db()
+    try:
+        return WX_SOURCE.pin(con, username, bool(payload.get("pinned")))
+    finally:
+        con.close()
 
 
 @app.get("/api/messages")
@@ -1624,8 +1656,25 @@ def _warm_models():
         pass
 
 
+def _cloud_startup():
+    """云端最小启动：只拉起 QQ 网关与增量应用循环，不碰本机解密/同步线程。"""
+    try:
+        import qqbot as qqbot_mod
+        qqbot_mod.apply_config(_cc.effective_bot_conf(load_conf()))
+    except Exception as exc:      # noqa: BLE001
+        print(f"[cloud] qqbot startup failed: {exc}")
+    try:
+        import cloud_apply
+        cloud_apply.start()
+    except Exception as exc:      # noqa: BLE001
+        print(f"[cloud] apply loop startup failed: {exc}")
+
+
 @app.on_event("startup")
 def _on_startup():
+    if IS_CLOUD:
+        _cloud_startup()
+        return
     threading.Thread(target=_warm_models, daemon=True).start()
     # 后台预热任务总数（文件/朋友圈要逐条解析，可能几秒），索引页打开即有 n/m
     threading.Thread(target=_job_totals_bg, daemon=True).start()
@@ -1685,11 +1734,25 @@ def _on_startup():
         except Exception:
             pass
     threading.Thread(target=_qq_media_boot, daemon=True).start()
+    # 云端接管：本机微信网关必须停，否则同一份凭据双端在线会互踢
+    if _cc.takeover():
+        try:
+            n = _kill_gateways()
+            if n:
+                print(f"[cloud] 本机微信网关已停止（{n} 个进程），微信通道由云端接管")
+        except Exception as exc:      # noqa: BLE001
+            print(f"[cloud] stop local gateway failed: {exc}")
     try:
         import qqbot as qqbot_mod
-        qqbot_mod.apply_config(load_conf())
+        qqbot_mod.apply_config(_cc.effective_bot_conf(load_conf()))
     except Exception as exc:      # noqa: BLE001 QQ 机器人配置异常不影响主服务
         print(f"[qqbot] startup failed: {exc}")
+    # 云端分流：常驻 10 分钟增量同步循环（循环内部按 cloud.enabled / auto 自判）
+    try:
+        import cloud_sync_local
+        cloud_sync_local.start()
+    except Exception as exc:      # noqa: BLE001
+        print(f"[cloud] sync loop startup failed: {exc}")
 
 
 @app.on_event("shutdown")
@@ -1698,6 +1761,18 @@ def _on_shutdown():
 
     各巡检线程是 daemon，进程退出即结束；这里只处理会留下外部进程/连接的资源。
     """
+    if IS_CLOUD:
+        try:
+            import cloud_apply
+            cloud_apply.stop()
+        except Exception:
+            pass
+        try:
+            import qqbot as qqbot_mod
+            qqbot_mod.shutdown()
+        except Exception:
+            pass
+        return
     for name, proc in list(_job_procs.items()):
         try:
             if proc is not None and proc.poll() is None:
@@ -1714,6 +1789,11 @@ def _on_shutdown():
     try:
         import qqbot as qqbot_mod
         qqbot_mod.shutdown()
+    except Exception:      # noqa: BLE001
+        pass
+    try:
+        import cloud_sync_local
+        cloud_sync_local.stop()
     except Exception:      # noqa: BLE001
         pass
 
@@ -2244,6 +2324,12 @@ def api_links_retry():
 def api_openclaw_toggle(payload: dict):
     """机器人设置里的「启用微信通道」开关：开=写配置并重启网关，关=停网关。"""
     want = bool(payload.get("enabled"))
+    if _cc.takeover() and want:
+        # 云端已接管微信通道：同账号双端在线会互踢，本地只允许停不允许起。
+        killed = _kill_gateways()
+        return {"ok": True, "enabled": False, "gateway": _gateway_running(),
+                "owned_by": "cloud",
+                "output": f"微信通道已由云端接管，本机网关已停止（{killed} 个进程）"}
     conf = load_conf()
     a = conf.setdefault("agent_api", {})
     a["enabled"] = want
@@ -2697,17 +2783,10 @@ def api_file_text(chat: str, local_id: int, ts: int, name: str, limit: int = 200
 @app.post("/api/file/reveal")
 def api_file_reveal(payload: dict):
     """在资源管理器中定位文件（仅本机服务，端口只监听 127.0.0.1）。"""
-    import subprocess
     chat = str(payload.get("chat") or "")
     name = str(payload.get("title") or payload.get("name") or "")
     p = locate_file(chat, int(payload.get("id") or 0), int(payload.get("ts") or 0), name)
-    if not p:
-        raise HTTPException(404, "文件不在本地（可能已被清理或未下载）")
-    try:
-        subprocess.Popen(["explorer.exe", f"/select,{p}"])
-    except Exception as e:      # noqa: BLE001
-        raise HTTPException(500, f"打开所在位置失败：{e}")
-    return {"ok": True}
+    return WX_SOURCE.reveal(p)
 
 
 _FAKE_IP_NETS = [ipaddress.ip_network("198.18.0.0/15")]   # Clash/Surge fake-IP DNS 段
@@ -3583,10 +3662,12 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
     """链接中心：聊天里出现过的链接（收到即登记，后台解析入库）。"""
     con = db()
     _ensure_link_tables(con)
+    n = chat_core.clamp(n, 1, 500)
+    offset = chat_core.clamp(offset, 0, 10**9)
     where, args = ["1=1"], []
     if days:
         where.append("l.msg_ts >= ?")
-        args.append(int(time.time()) - max(1, days) * 86400)
+        args.append(chat_core.since_ts(days))
     if chat:
         where.append("l.chat = ?")
         args.append(chat)
@@ -3659,8 +3740,7 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
             continue
         out.append(item)
     con.close()
-    if sort == "old":
-        out.sort(key=lambda x: x["received"] or 0)
+    chat_core.sort_items(out, sort, ts_key="received")
     if platform == "article":
         rej = {"link_ok": 0, "dedup": 0, "plat": 0, "state": 0, "q": 0, "ok": 0}
         for r in rows:
@@ -3678,7 +3758,7 @@ def api_links(n: int = 100, q: str = "", offset: int = 0, platform: str = "",
             if platform and pk != platform:
                 rej["plat"] += 1; continue
             rej["ok"] += 1
-    return out[offset:offset + n]
+    return chat_core.slice_items(out, offset, n)
 
 
 @app.get("/api/links/queue")
@@ -3700,23 +3780,12 @@ def api_links_queue():
             "error": _LINK_WORKER.get("error") or ""}
 
 
-FILE_KINDS = {
-    "doc": {".pdf", ".doc", ".docx", ".txt", ".md", ".rtf", ".odt"},
-    "sheet": {".xls", ".xlsx", ".xlsm", ".csv"},
-    "slide": {".ppt", ".pptx", ".pptm"},
-    "image": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic"},
-    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"},
-    "media": {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".amr",
-              ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".silk"},
-}
+# 分类表与判定逻辑统一放在 chat_core（QQ 侧共用同一份判定，只是表不同）
+FILE_KINDS = chat_core.WECHAT_KINDS
 
 
 def file_kind(ext: str) -> str:
-    ext = (ext or "").lower()
-    for kind, exts in FILE_KINDS.items():
-        if ext in exts:
-            return kind
-    return "other"
+    return WX_SOURCE.file_kind(ext)
 
 
 def _file_name(packed_info) -> str:
@@ -3737,8 +3806,8 @@ def api_files(q: str = "", n: int = 200, offset: int = 0, chat: str = "",
     rdb = resource_db()
     if not rdb:
         return []
-    n = max(1, min(n, 500))
-    offset = max(0, offset)
+    n = chat_core.clamp(n, 1, 500)
+    offset = chat_core.clamp(offset, 0, 10**9)
     con = db()
     chat_ids = {r[0]: r[1] for r in rdb.execute("SELECT rowid, user_name FROM ChatName2Id")}
     where = ["i.message_local_type & 4294967295 = 49", "length(d.packed_info) > 2"]
@@ -3795,11 +3864,8 @@ def api_files(q: str = "", n: int = 200, offset: int = 0, chat: str = "",
         out = [x for x in out if x.get("status") == "missing"]
     elif state == "unprocessed":
         out = [x for x in out if x.get("status") == "unprocessed"]
-    if sort == "old":
-        out.sort(key=lambda x: x["ts"] or 0)
-    elif sort == "size":
-        out.sort(key=lambda x: x["size"] or 0, reverse=True)
-    page = out[offset:offset + n]
+    chat_core.sort_items(out, sort)
+    page = chat_core.slice_items(out, offset, n)
     # 标记每个文件的正文是否已成功提取（file_text 缓存；空文本=未下载/解析失败）
     keys = [f"{x['chat']}:{x['id']}" for x in page]
     status = {}
@@ -3949,7 +4015,7 @@ def api_qqbot_config(payload: dict):
     CONFIG.write_text(json.dumps(conf, ensure_ascii=False, indent=2),
                       encoding="utf-8")
     import qqbot as qqbot_mod
-    qqbot_mod.apply_config(load_conf())
+    qqbot_mod.apply_config(_cc.effective_bot_conf(load_conf()))
 
     # 首次启用或改了凭据时，自动推送底部菜单，省去手动点按钮
     need_menu = bool(q.get("enabled") and q.get("app_id") and q.get("app_secret")) and (
@@ -5275,43 +5341,19 @@ def _realtime_loop():
 
 @app.get("/api/messages/stream")
 def api_messages_stream(chat: str, after_id: int = 0):
-    """SSE 推送：有新消息立即下发（客户端保持一条连接，不做轮询）。
+    """SSE 推送：与 QQ 共用 chat_core.sse_response，这里只提供微信取数。"""
 
-    取数方式：服务端每 1.5 秒比对一次 id 水位（本地 SQLite，开销极小），
-    有新增就推；无新增每 15 秒发一次心跳。前端 EventSource 断线会自动重连。
-    """
-    from fastapi.responses import StreamingResponse
+    def fetch(last, limit):
+        con = db()
+        try:
+            rows = con.execute("SELECT * FROM message WHERE chat_user=? AND id > ? "
+                              "ORDER BY id LIMIT ?", (chat, last, limit)).fetchall()
+            out = _recall_pass(rows, con) if rows else []
+            return out, max([last] + [int(r["id"]) for r in rows])
+        finally:
+            con.close()
 
-    def gen():
-        last = int(after_id or 0)
-        idle = 0
-        yield "retry: 3000\n\n"
-        while True:
-            try:
-                con = db()
-                rows = con.execute("SELECT * FROM message WHERE chat_user=? AND id > ? "
-                                   "ORDER BY id LIMIT 40", (chat, last)).fetchall()
-                if rows:
-                    out = _recall_pass(rows, con)
-                    last = max(last, max(r["id"] for r in rows))
-                    if out:
-                        payload = json.dumps({"messages": out, "max_id": last},
-                                             ensure_ascii=False)
-                        yield "data: " + payload + "\n\n"
-                        idle = 0
-                else:
-                    idle += 1
-                    if idle >= 10:
-                        idle = 0
-                        yield ": ping\n\n"
-                con.close()
-            except Exception:
-                yield ": error\n\n"
-            time.sleep(0.4)
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+    return WX_SOURCE.sse(after_id, fetch)
 
 
 @app.get("/api/messages/new")
@@ -6399,51 +6441,17 @@ def _qq_bump_version():
 
 @app.get("/api/qq/local/stream")
 def api_qq_local_stream(conv: str, after_id: int = 0):
-    """SSE 推送 QQ 新消息（与微信 /api/messages/stream 同款机制）。
+    """SSE 推送 QQ 新消息：与微信共用 chat_core.sse_response，只多一个 chats 事件。"""
 
-    服务端每 0.5 秒比对 id 水位，有新增立即下发；QQ 实时同步导入任何会话的
-    新内容时附带 chats 事件，前端借此刷新会话列表（别的会话来消息也能看到）。
-    无新增每 15 秒心跳；EventSource 断线自动重连。
-    """
-    from fastapi.responses import StreamingResponse
+    def fetch(last, limit):
+        con = db()
+        try:
+            rows = qq_local.messages(con, conv, limit, after=last) if conv else []
+            return rows, max([last] + [int(r["id"]) for r in rows])
+        finally:
+            con.close()
 
-    def gen():
-        global _qq_data_version
-        last = int(after_id or 0)
-        seen_version = _qq_data_version
-        idle = 0
-        nn = chr(10) * 2                    # SSE 事件以空行结尾
-        yield "retry: 3000" + nn
-        while True:
-            try:
-                con = db()
-                rows = []
-                if conv:
-                    rows = qq_local.messages(con, conv, 40, after=last)
-                version_changed = _qq_data_version != seen_version
-                if rows:
-                    last = max(last, max(r["id"] for r in rows))
-                    payload = json.dumps({"messages": rows, "max_id": last},
-                                         ensure_ascii=False)
-                    yield "data: " + payload + nn
-                    idle = 0
-                if version_changed:
-                    seen_version = _qq_data_version
-                    yield "data: " + json.dumps({"chats": True}, ensure_ascii=False) + nn
-                    idle = 0
-                if not rows and not version_changed:
-                    idle += 1
-                    if idle >= 30:
-                        idle = 0
-                        yield ": ping" + nn
-                con.close()
-            except Exception:
-                yield ": error" + nn
-            time.sleep(0.5)
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+    return QQ_LOCAL_SOURCE.sse(after_id, fetch, version=lambda: _qq_data_version)
 
 
 _QQ_AV_DIR = KNOWLEDGE_DB.parent / "qq_avatar"
@@ -6590,7 +6598,7 @@ def api_qq_local_session_pin(payload: dict):
         raise HTTPException(400, "无效的会话")
     con = db()
     try:
-        qq_local.set_pinned(con, conv, bool(payload.get("pinned")))
+        out = QQ_LOCAL_SOURCE.pin(con, conv, bool(payload.get("pinned")))
         # 留痕：置顶被意外改动时能从日志追溯是谁改的
         try:
             import traceback
@@ -6599,9 +6607,9 @@ def api_qq_local_session_pin(payload: dict):
         except Exception:
             caller = ""
         print(f"[qq_pin] {conv} -> {bool(payload.get('pinned'))} ({caller})")
+        return out
     finally:
         con.close()
-    return {"ok": True, "conv": conv, "pinned": bool(payload.get("pinned"))}
 
 
 @app.get("/api/qq/local/messages")
@@ -6654,21 +6662,14 @@ def api_qq_local_file_parse(payload: dict):
 
 @app.post("/api/qq/local/file/reveal")
 def api_qq_local_file_reveal(payload: dict):
-    """在资源管理器中定位 QQ 文件。"""
-    import subprocess
+    """在资源管理器中定位 QQ 文件：与微信共用 chat_core.reveal_path。"""
     con = db()
     try:
         row = con.execute("SELECT path FROM qq_file WHERE id=?",
                           (int(payload.get("id") or 0),)).fetchone()
     finally:
         con.close()
-    if not row or not row[0] or not Path(row[0]).is_file():
-        raise HTTPException(404, "文件不在本机（可能已被清理或未下载）")
-    try:
-        subprocess.Popen(["explorer.exe", f"/select,{row[0]}"])
-    except Exception as e:      # noqa: BLE001
-        raise HTTPException(500, f"打开所在位置失败：{e}")
-    return {"ok": True}
+    return QQ_LOCAL_SOURCE.reveal(row[0] if row else "")
 
 
 _qq_file_parse_state = {"running": False, "done": 0, "total": 0, "progress": "",
@@ -7016,6 +7017,14 @@ def api_qq_local_media(path: str = ""):
     if not p:
         raise HTTPException(404, "文件不存在或不在允许目录")
     return FileResponse(p)
+
+
+# ---------------------------------------------------------------- 云端分流控制面
+try:
+    import cloud_api
+    app.include_router(cloud_api.router)
+except Exception as exc:      # noqa: BLE001  控制面不可用不影响主服务
+    print(f"[cloud] api router skipped: {exc}")
 
 
 # ---------------------------------------------------------------- 静态前端

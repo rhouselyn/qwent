@@ -17,7 +17,7 @@ os.environ.setdefault("USE_TF", "0")   # 避免 transformers 导入损坏的 TF 
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 
 PROJECT = Path(__file__).resolve().parent.parent.parent
-MODEL_DIR = PROJECT / "models" / "bge-small-zh"
+MODEL_DIR = Path(os.environ.get("QWENT_MODELS_DIR") or (PROJECT / "models")) / "bge-small-zh"
 DIM = 512
 MAX_LEN = 128          # 消息很短，128 token 足够，显著提速
 
@@ -31,7 +31,8 @@ def available() -> bool:
     global _dl_tried
     if (MODEL_DIR / "config.json").exists():
         return True
-    if _dl_tried:
+    if _dl_tried or os.environ.get("QWENT_CLOUD", "").strip() == "1":
+        # 云端镜像必须自带模型或明确降级，不在启动时联网拉 95MB
         return False
     _dl_tried = True
     try:                                   # 首次使用自动下载(约 95MB,走 hf-mirror)

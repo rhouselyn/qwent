@@ -94,7 +94,12 @@ def kb_brief() -> str:
         llm = (M.load_conf().get("llm") or {})
         model = str(llm.get("model") or "未设置")
         ready = "已配置" if llm.get("api_key") else "未配置 API Key"
-        return f"本机记录约 {n:,} 条 · 模型 {model}（{ready}）"
+        try:
+            import cloud_conf as _cc
+            label = "云端镜像" if _cc.IS_CLOUD else "本机记录"
+        except Exception:
+            label = "本机记录"
+        return f"{label}约 {n:,} 条 · 模型 {model}（{ready}）"
     except Exception as exc:  # noqa: BLE001
         log.warning("kb_brief failed: %s", exc)
         return "本机知识库状态暂时读取失败（不影响提问）"

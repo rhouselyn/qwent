@@ -1,0 +1,20 @@
+[Unit]
+Description=Qwent Cloud (WeChat/QQ knowledge assistant)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qwent
+Environment=QWENT_CLOUD=1
+Environment=QWENT_DATA_DIR=/opt/qwent/data
+Environment=QWENT_MODELS_DIR=/opt/qwent/models
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/qwent/.venv/bin/python /opt/qwent/cloud_server.py 8721
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/qwent/logs/qwent.log
+StandardError=append:/opt/qwent/logs/qwent.log
+
+[Install]
+WantedBy=multi-user.target

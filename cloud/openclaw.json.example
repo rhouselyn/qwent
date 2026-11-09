@@ -1,0 +1,32 @@
+{
+  "_comment": "这是要【合并】进服务器 ~/.openclaw/openclaw.json 的片段，不是替换文件。不改 agents.defaults.model.primary，避免影响已有的 QQ Bot（老仙女）。用 merge_openclaw.py 执行合并。",
+  "plugins": {
+    "entries": {
+      "openclaw-weixin": { "enabled": true }
+    },
+    "allow": ["openclaw-weixin"]
+  },
+  "models": {
+    "providers": {
+      "wechatkb": {
+        "baseUrl": "http://127.0.0.1:8721/v1",
+        "apiKey": "填本地 backend/config.json 里 agent_api.api_key 的同一个值",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "models": [{ "id": "wechat-kb", "name": "Qwent" }]
+      }
+    }
+  },
+  "agents": {
+    "_comment_ownership": "多 agent 名单必须声明 ownership，否则 OpenClaw 校验失败、Gateway 起不来（连已有 QQ Bot 一起下线）",
+    "ownership": "explicit",
+    "entries": {
+      "qwent": {
+        "model": { "primary": "wechatkb/wechat-kb" }
+      }
+    }
+  },
+  "channels": {
+    "openclaw-weixin": {}
+  }
+}

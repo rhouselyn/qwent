@@ -1173,6 +1173,12 @@ def _recent_line_budget(text: str) -> int:
     return 400 if text.startswith(("[图片]", "[语音]", "[视频]")) else 220
 
 
+def _recent_line(ts, who: str, text: str, budget: int = 220) -> str:
+    """微信 / QQ 最近记录共用的单行格式；数据源不同，时间/发言人/文本由调用方给。"""
+    txt = (text or "").replace(chr(10), " ").strip()
+    return f"{_fmt(ts)} {who}: {txt[:budget]}" if txt else ""
+
+
 def _recent_block(chat: str, hours: int = 24, limit: int = 60) -> str:
     """取会话最近记录，拼成文本（供 Agent 系统提示预注入；无编号，避免干扰顺序引用）。"""
     con = _db()
@@ -1186,10 +1192,10 @@ def _recent_block(chat: str, hours: int = 24, limit: int = 60) -> str:
     out = []
     for r in rows:
         b = _msg_brief(con, r)
-        txt = b["text"].replace(chr(10), " ")[:_recent_line_budget(b["text"])]
-        if not txt:
-            continue
-        out.append(f"{_fmt(r['ts'])} {b['who']}: {txt}")
+        line = _recent_line(r["ts"], b["who"], b["text"],
+                            _recent_line_budget(b["text"]))
+        if line:
+            out.append(line)
     con.close()
     return chr(10).join(out[-50:])
 
@@ -1205,11 +1211,10 @@ def _qq_recent_block(conv: str, limit: int = 80) -> str:
         con.close()
     out = []
     for r in rows:
-        text = (r.get("text") or "").replace(chr(10), " ").strip()
-        if not text:
-            continue
         who = "我" if r.get("is_sender") else (r.get("sender_name") or "?")
-        out.append(f"{_fmt(r.get('ts') or 0)} {who}: {text[:220]}")
+        line = _recent_line(r.get("ts") or 0, who, r.get("text") or "")
+        if line:
+            out.append(line)
     return chr(10).join(out)
 
 
@@ -1421,26 +1426,23 @@ def run(question: str, conf: dict, chat_ctx: str | None = None,
                 f"用户正在浏览 QQ 会话「{chat_name or chat_ctx}」（conv={chat_ctx}）。"
                 f"默认先在该会话内回答：调用 search_qq 时把 conv 设为 {chat_ctx}；"
                 "只有用户明确要求跨群/全局时才省略 conv。")
-            try:
-                rc = _qq_recent_block(chat_ctx, limit=80)
-                if rc:
-                    ctx_bits.append(
-                        "【最近 QQ 记录】（该会话最近的真实发言，时间正序，未编号；"
-                        "引用具体消息时请用 search_qq 检索取得 ref 编号）：" + chr(10) + rc)
-            except Exception:
-                pass
+            recent_fn = lambda: _qq_recent_block(chat_ctx, limit=80)  # noqa: E731
+            recent_title = ("【最近 QQ 记录】（该会话最近的真实发言，时间正序，未编号；"
+                            "引用具体消息时请用 search_qq 检索取得 ref 编号）：")
         else:
             ctx_bits.append(
                 f"用户正在浏览会话「{chat_name or chat_ctx}」（username={chat_ctx}）。"
                 "默认在该会话范围内回答，不需要 find_sessions；"
                 "只有用户明确要求跨会话/全局时才扩大范围。")
-            # 预注入最近记录：常见问题可零检索直接回答
-            try:
-                rc = _recent_block(chat_ctx, hours=24, limit=60)
-                if rc:
-                    ctx_bits.append("【最近记录】（该会话最近的真实发言，时间正序）：" + chr(10) + rc)
-            except Exception:
-                pass
+            recent_fn = lambda: _recent_block(chat_ctx, hours=24, limit=60)  # noqa: E731
+            recent_title = "【最近记录】（该会话最近的真实发言，时间正序）："
+        # 预注入最近记录：常见问题可零检索直接回答（两平台共用同一段流程）
+        try:
+            rc = recent_fn()
+            if rc:
+                ctx_bits.append(recent_title + chr(10) + rc)
+        except Exception:
+            pass
     if quoted:
         parts = []
         for q in quoted[:10]:

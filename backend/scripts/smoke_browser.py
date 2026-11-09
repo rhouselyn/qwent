@@ -360,9 +360,13 @@ try:
              "return e?getComputedStyle(e).backgroundColor:'none'})()") not in ("none", "rgba(0, 0, 0, 0)"),
           js("(()=>{const e=document.querySelector('#qqConvList .qq-conv.pinned');"
              "return e?getComputedStyle(e).backgroundColor:'none'})()"))
+    # SSE 连接生命周期已抽到共用层 ChatData.startLive；这里验证「QQ 仍订阅
+    # 自己的流端点」+「共用层确实创建 EventSource」，不再绑定实现写在哪个文件。
     check("QQ 会话详情走 SSE 订阅",
-          "EventSource" in str(js("String(qqLiveStart)")) and
-          "/api/qq/local/stream" in str(js("String(qqLiveStart)")), "qqLiveStart uses EventSource")
+          "/api/qq/local/stream" in str(js("String(qqLiveStart)")) and
+          "ChatData.startLive" in str(js("String(qqLiveStart)")) and
+          "EventSource" in str(js("typeof ChatData==='object' ? String(ChatData.startLive) : ''")),
+          "qqLiveStart uses shared live stream")
     # 还原用户原有置顶（测试临时加的取消掉，原有的恢复）
     js("""
       (async () => {
@@ -512,8 +516,14 @@ try:
     check("微信通道无「微信 Agent 入口」段", "微信 Agent 入口" not in body2, body2[:100])
     check("微信通道无「新用户」措辞", "新用户" not in body2, body2[:100])
     js("[...document.querySelectorAll('#settingsNav .sf-item')].find(x=>x.dataset.sec==='about').click()")
-    time.sleep(2.2)
-    about = str(js("document.querySelector('#sfBody').textContent") or "")
+    # /api/storage 要统计 4GB 库 + 目录大小，固定 sleep 偶发读到「…统计中」；
+    # 等真实结果出现再断言，避免验收抖动。
+    about = ""
+    for _ in range(30):
+        about = str(js("document.querySelector('#sfBody').textContent") or "")
+        if "合计占用" in about and "微信占用" in about:
+            break
+        time.sleep(0.5)
     check("关于页有占用明细", "占用明细" in about and "合计占用" in about, about[:120])
     check("知识库概览正好 6 格",
           (js("document.querySelectorAll('#kbStats .settings-stat').length") or 0) == 6,

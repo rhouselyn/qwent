@@ -29,6 +29,15 @@ refs/ChatTrace/REFERENCES.md
 *.log
 *.lock
 
+# ===== 云端分流构建产物与本机密钥（严禁上传）=====
+dist/
+cloud/config-cloud.json
+cloud/*.key
+data/cloud_*
+data/cloud_out/
+data/cloud_inbox/
+data/cloud_restore/
+
 # ===== 桌面壳构建产物 =====
 desktop/node_modules/
 desktop/src-tauri/target/

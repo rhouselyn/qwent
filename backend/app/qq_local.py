@@ -16,11 +16,23 @@ QQ 9.9（NT 架构）把聊天记录放在
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes as wt
+import os
+
+if os.name == "nt":
+    import ctypes.wintypes as wt
+else:
+    # 云端/Linux 没有 ctypes.wintypes：给最小类型替身，保证模块可导入。
+    # 下面几个 ctypes.Structure 只服务于 Windows 进程内存扫钥；云端只读
+    # knowledge.db 里的 qq_* 表，永远不会调用 _kernel32() / find_qq_pid()。
+    class _WinTypesShim:
+        DWORD = ctypes.c_uint32
+        HMODULE = ctypes.c_void_p
+
+    wt = _WinTypesShim()
+
 import hashlib
 import hmac as hmac_mod
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -31,10 +43,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import chat_core  # 微信/QQ 共用的分页、排序、分类、置顶内核
+
 PROJECT = Path(__file__).resolve().parent.parent.parent
 DATA = PROJECT / "data"
 DB_PATH = DATA / "knowledge.db"
-QQ_ROOT = Path(os.path.expandvars(r"%USERPROFILE%\Documents\Tencent Files"))
+QQ_ROOT = (Path(os.path.expandvars(r"%USERPROFILE%\Documents\Tencent Files"))
+           if os.name == "nt" else Path.home() / "Tencent Files")
 
 EXT_HEADER = 1024
 PAGE_SIZE = 4096
@@ -912,17 +927,8 @@ def sync_contacts(con: sqlite3.Connection, account: Path | None = None) -> dict:
 
 
 def _file_kind(name: str) -> str:
-    ext = Path(name or "").suffix.lower()
-    if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
-        return "image"
-    if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
-        return "video"
-    if ext in (".mp3", ".wav", ".amr", ".silk", ".m4a"):
-        return "audio"
-    if ext in (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-               ".txt", ".md", ".csv", ".zip", ".rar", ".7z"):
-        return ext.lstrip(".")
-    return "file"
+    # 分类逻辑与微信共用，只是 QQ 的分类表按扩展名分（见 chat_core.QQ_KINDS）
+    return chat_core.file_kind(name, chat_core.QQ_KINDS, "file")
 
 
 def _conv_for(uid: str, uin: int, group: int, by_uid: dict, by_uin: dict) -> tuple[str, str]:
@@ -1683,17 +1689,15 @@ def sessions(con: sqlite3.Connection, q: str = "", limit: int = 300) -> list[dic
         sql += " WHERE name LIKE ?"
         args.append(f"%{q.strip()}%")
     sql += " ORDER BY IFNULL(pinned,0) DESC, last_ts DESC LIMIT ?"
-    args.append(max(1, min(limit, 1000)))
+    args.append(chat_core.clamp(limit, 1, 1000))
     keys = ["conv", "name", "is_group", "uin", "uid", "last_ts", "cnt",
             "last_text", "last_is_sender", "pinned"]
     return [dict(zip(keys, r)) for r in con.execute(sql, args).fetchall()]
 
 
 def set_pinned(con: sqlite3.Connection, conv: str, pinned: bool) -> None:
-    ensure_schema(con)
-    con.execute("UPDATE qq_chat SET pinned=? WHERE conv=?",
-                (1 if pinned else 0, conv))
-    con.commit()
+    # 与微信共用置顶实现；这里只声明 QQ 的表名/键名与 schema 迁移钩子
+    chat_core.set_pinned(con, "qq_chat", "conv", conv, pinned, ensure_schema)
 
 
 _ACCOUNT_CACHE: dict[str, Path] = {}
@@ -1926,7 +1930,7 @@ def files(con: sqlite3.Connection, q: str = "", kind: str = "", conv: str = "",
         args.append(conv)
     if days:
         where.append("f.ts>=?")
-        args.append(int(time.time()) - int(days) * 86400)
+        args.append(chat_core.since_ts(days))
     if state == "missing":
         where.append("IFNULL(f.path,'')=''")
     elif state == "parsed":
@@ -1937,12 +1941,14 @@ def files(con: sqlite3.Connection, q: str = "", kind: str = "", conv: str = "",
         where.append("NOT EXISTS(SELECT 1 FROM qq_file_text t WHERE t.file_id=f.id "
                      "AND IFNULL(t.error,'')='')")
     cond = (" WHERE " + " AND ".join(where)) if where else ""
-    order = {"old": "f.ts ASC", "size": "f.size DESC"}.get(sort, "f.ts DESC")
+    order = chat_core.sort_sql(sort, {"old": "f.ts ASC", "size": "f.size DESC"},
+                               "f.ts DESC")
     sql = ("SELECT f.id,f.conv,c.name AS conv_name,f.msg_id,f.name,f.size,f.ts,"
            "f.path,f.kind,f.sender_name FROM qq_file f "
            "LEFT JOIN qq_chat c ON c.conv=f.conv" + cond +
            f" ORDER BY {order} LIMIT ? OFFSET ?")
-    page_args = args + [max(1, min(limit, 500)), max(0, offset)]
+    n = chat_core.clamp(limit, 1, 500)
+    page_args = args + [n, chat_core.clamp(offset, 0, 10**9)]
     keys = ["id", "conv", "conv_name", "msg_id", "name", "size", "ts", "path",
             "kind", "sender_name"]
     out = []
@@ -1967,7 +1973,7 @@ def files(con: sqlite3.Connection, q: str = "", kind: str = "", conv: str = "",
             "WHERE t.file_id=f.id AND IFNULL(t.error,'')='' AND t.chars>0)) "
             "FROM qq_file f GROUP BY f.kind"):
         kinds[k or "file"] = {"total": n, "parsed": p or 0}
-    return {"files": out, "hasMore": len(out) >= max(1, min(limit, 500)),
+    return {"files": out, "hasMore": len(out) >= n,
             "stats": {"total": total, "parsed": parsed_n, "local": local_n,
                       "missing": total - local_n, "kinds": kinds}}
 
@@ -2041,7 +2047,7 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
         args.append(conv)
     if days:
         where.append("l.ts>=?")
-        args.append(int(time.time()) - int(days) * 86400)
+        args.append(chat_core.since_ts(days))
     # 状态筛选必须进 SQL：以前在 Python 里过滤，但分页已经先按 ts 取了 100 条，
     # 于是「解析失败/未解析」这类老链接永远筛不出来。
     now = time.time()
@@ -2062,12 +2068,13 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
         args.append(stale_before)
         where.append("NOT EXISTS(SELECT 1 FROM link_cache lc WHERE lc.url=l.url)")
     cond = (" WHERE " + " AND ".join(where)) if where else ""
-    order = "l.ts ASC" if sort == "old" else "l.ts DESC"
+    order = chat_core.sort_sql(sort, {"old": "l.ts ASC"}, "l.ts DESC")
     sql = ("SELECT l.id,l.url,l.title,l.conv,c.name AS conv_name,l.msg_id,l.ts,"
            "IFNULL(l.state,''),IFNULL(l.error,'') "
            "FROM qq_link l LEFT JOIN qq_chat c ON c.conv=l.conv" + cond +
            f" ORDER BY {order} LIMIT ? OFFSET ?")
-    page_args = args + [max(1, min(limit, 500)), max(0, offset)]
+    n = chat_core.clamp(limit, 1, 500)
+    page_args = args + [n, chat_core.clamp(offset, 0, 10**9)]
     # 已解析 URL 集合（link_cache 里的 url 是规范化后的）
     try:
         from link_media import normalize_url
@@ -2109,7 +2116,7 @@ def links(con: sqlite3.Connection, q: str = "", conv: str = "", limit: int = 100
     if platform:
         out = [x for x in out if x["platform_key"] == platform]
     total = con.execute("SELECT COUNT(*) FROM qq_link").fetchone()[0] or 0
-    return {"links": out, "hasMore": len(out) >= max(1, min(limit, 500)),
+    return {"links": out, "hasMore": len(out) >= n,
             "stats": {"total": total, "parsed": len(parsed_urls)}}
 
 

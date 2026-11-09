@@ -72,6 +72,11 @@ def discover_accounts(root: Path | None = None) -> list[Path]:
 
 def resolve() -> tuple[Path, str]:
     """返回 (account_dir, account_id);找不到时给出可操作的报错。"""
+    if os.environ.get("QWENT_CLOUD", "").strip() == "1":
+        # 云端没有微信客户端与加密库：给一个占位目录，让 `import main` 不再
+        # 抛 SystemExit。所有依赖 ACCOUNT_DIR 的解密/同步线程在云端均不启动。
+        base = Path(os.environ.get("QWENT_DATA_DIR") or (PROJECT / "data"))
+        return base / "empty_account", "cloud"
     cfg = _cfg_account()
     override = cfg.get("account_dir") or os.environ.get("WECHAT_ACCOUNT_DIR")
     if override:
@@ -100,6 +105,8 @@ ACCOUNT_DIR, ACCOUNT_ID = resolve()
 if os.name == "nt":
     DECRYPTED_DIR = Path(os.path.expandvars(r"%LOCALAPPDATA%")) / "ChatTrace" / \
         "accounts" / ACCOUNT_ID / "decrypted"
+elif ACCOUNT_ID == "cloud":
+    DECRYPTED_DIR = Path(os.environ.get("QWENT_DATA_DIR") or (PROJECT / "data")) / "decrypted"
 else:
     # mac/Linux：解密产物放本项目的用户态状态目录（ChatTrace CLI 不跨平台，
     # 进程内解密由 main._decrypt_quick 的非 Windows 分支完成）

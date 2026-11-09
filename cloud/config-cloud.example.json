@@ -1,0 +1,64 @@
+{
+  "account": {
+    "account_dir": "",
+    "data_root": ""
+  },
+  "llm": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "在这里填与本地相同的 LLM Key",
+    "model": "deepseek-chat",
+    "thinking": false,
+    "thinking_model": "deepseek-reasoner"
+  },
+  "embedding": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "",
+    "model": "BAAI/bge-m3"
+  },
+  "qa": {
+    "max_context": 30,
+    "temperature": 0.3,
+    "recent_hours": 24,
+    "context_around": 3
+  },
+  "privacy": {
+    "enabled": true,
+    "phone": true,
+    "idcard": true,
+    "bankcard": true,
+    "email": true
+  },
+  "agent_api": {
+    "enabled": true,
+    "api_key": "填本地 backend/config.json 里 agent_api.api_key 的同一个值",
+    "model": "wechat-kb",
+    "base_url": "http://127.0.0.1:8721/v1"
+  },
+  "sync": {
+    "realtime": false,
+    "auto": false
+  },
+  "qqbot": {
+    "enabled": true,
+    "app_id": "填本地 backend/config.json 里 qqbot.app_id",
+    "app_secret": "填本地 backend/config.json 里 qqbot.app_secret",
+    "group_reply": false,
+    "citations": false,
+    "default_explorer": false,
+    "default_thinking": false,
+    "allow_openids": []
+  },
+  "cloud": {
+    "enabled": true,
+    "takeover_bots": true,
+    "auto": true,
+    "interval_min": 10,
+    "transport": "file",
+    "endpoint": "/opt/qwent/inbox",
+    "encrypt_key": "填与本地相同的 32 字节 base64 密钥",
+    "prefix": "",
+    "max_pack_mb": 64,
+    "keep_deltas": 200,
+    "baseline_chunk_mb": 64
+  }
+}

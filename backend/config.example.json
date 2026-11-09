@@ -52,5 +52,22 @@
     "citations": false,
     "default_explorer": false,
     "default_thinking": false
+  },
+  "cloud": {
+    "enabled": false,
+    "takeover_bots": true,
+    "auto": true,
+    "interval_min": 10,
+    "transport": "scp",
+    "endpoint": "",
+    "scp_user": "root",
+    "scp_key": "",
+    "scp_dir": "/opt/qwent/inbox",
+    "scp_port": 22,
+    "encrypt_key": "",
+    "prefix": "",
+    "max_pack_mb": 64,
+    "keep_deltas": 200,
+    "baseline_chunk_mb": 64
   }
 }
