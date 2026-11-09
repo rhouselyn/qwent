@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parent
 ART = ROOT / "assets" / "bubbles.png"
 ICON_DIR = ROOT / "src-tauri" / "icons"
 
-TILE = (34, 39, 43, 255)          # 墨色底，接近 UI 左栏深色
-TILE_RADIUS = 0.24                 # 圆角比例
-ART_RATIO = 0.74                   # 图案占底的比例
+TILE = (255, 255, 255, 255)       # 白色圆角底，保证托盘和 exe 小尺寸下清晰
+TILE_RADIUS = 0.18                 # 圆角比例
+ART_RATIO = 0.90                   # 图案占底的比例
 
 
 def compose(size: int) -> Image.Image:
