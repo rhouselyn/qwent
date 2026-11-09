@@ -159,7 +159,7 @@
       if (big) { big.textContent = b.logo; big.classList.toggle("qq-logo", cur === "qq"); }
       const h2 = document.querySelector(".chat-empty h2");
       if (h2) h2.textContent = b.title;
-      const desc = document.querySelector(".chat-empty > p:not(.hint)");
+      const desc = document.querySelector(".chat-empty > p:not(.hint):not(.qwent-sub)");
       if (desc) desc.innerHTML = b.emptyDesc;
 
       const nav = NAV[cur];

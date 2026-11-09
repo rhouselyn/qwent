@@ -3314,6 +3314,23 @@ $("#loadMore").onclick = () => {
     loadMessages(state.current.username, { before: state.msgs[state.current.username][0].id });
 };
 
+/* 空态底部的状态行：按当前平台显示各自的消息量（以前两平台都显示微信的条数） */
+const statusInfo = { wx: 0, qq: 0, qqChats: 0, llm: "", model: "" };
+function renderStatusHint() {
+  const el = $("#statusHint");
+  if (!el) return;
+  const llm = statusInfo.llm === "configured"
+    ? `模型 ${statusInfo.model} 已就绪`
+    : "未配置 LLM Key（问答将展示检索原文，填入 backend/config.json 后启用 AI 回答）";
+  if (isQQ()) {
+    el.textContent = `QQ 记录就绪：${(statusInfo.qq || 0).toLocaleString()} 条消息`
+      + (statusInfo.qqChats ? ` · ${statusInfo.qqChats.toLocaleString()} 个会话` : "")
+      + ` · ${llm}`;
+  } else {
+    el.textContent = `微信知识库就绪：${(statusInfo.wx || 0).toLocaleString()} 条消息 · ${llm}`;
+  }
+}
+
 /* ---------------- 自动刷新（实时同步推送新消息后自动更新列表和聊天窗） ---------------- */
 let _autoRefreshTimer = null;
 function startAutoRefresh() {
@@ -3356,9 +3373,15 @@ async function applyDeepLink() {
 (async function init() {
   try {
     const s = await api("/api/status");
-    $("#statusHint").textContent =
-      `知识库就绪：${s.messages.toLocaleString()} 条消息 · ` +
-      (s.llm === "configured" ? `模型 ${s.llm_model} 已就绪` : "未配置 LLM Key（问答将展示检索原文，填入 backend/config.json 后启用 AI 回答）");
+    statusInfo.wx = s.messages || 0;
+    statusInfo.llm = s.llm;
+    statusInfo.model = s.llm_model;
+    renderStatusHint();
+    api("/api/qq/local/overview").then((q) => {
+      statusInfo.qq = q.messages || 0;
+      statusInfo.qqChats = q.chats || 0;
+      renderStatusHint();
+    }).catch(() => {});
     try { const me = await api("/api/me"); state.selfUsername = me.username; } catch {}
     await loadSessions();
     // 按当前平台初始化列表：QQ 模式要显示 QQ 会话 + 视图切换 tab，
@@ -4130,6 +4153,7 @@ function onPlatformChange(p) {
   $("#settingsFull").style.display = "none";
   $("#drawer") && ($("#drawer").style.display = "none");
   syncQqConvActive();
+  renderStatusHint();
   if (state.view === "settings") { showSettings(); toast(p === "qq" ? "已切换到 QQ 界面" : "已切换到微信界面"); return; }
   switchView(state.view || "chats");
   toast(p === "qq" ? "已切换到 QQ 界面 · 设置与微信互相独立" : "已切换到微信界面");
