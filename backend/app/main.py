@@ -1721,7 +1721,7 @@ def _on_startup():
     threading.Thread(target=_qq_sync_loop, daemon=True).start()
     # 开机自启：首次运行自动登记（可在设置里关闭）
     threading.Thread(target=_autostart_ensure_default, daemon=True).start()
-    # QQ 实时同步：文件通知 + WAL 帧补丁 + rowid 游标，新消息约 0.5~1 秒可查
+    # QQ 实时同步：文件通知触发快照与增量导入
     threading.Thread(target=_qq_rt_loop, daemon=True).start()
     # QQ 链接正文：常驻后台解析（新链接即时，历史积压空闲时清）
     if not _QQ_LINK_DAEMON["started"]:
@@ -6182,6 +6182,8 @@ def _qq_sync_run(reason: str = "", light: bool = False):
             except Exception as exc:  # noqa: BLE001
                 print(f"[qq_sync] contacts failed: {exc}")
         if result.get("messages") or result.get("files") or result.get("links"):
+            _qq_bump_version()
+        if result.get("files") or result.get("links"):
             threading.Thread(target=_qq_auto_parse_after_sync, daemon=True).start()
         if reason:
             print(f"[qq_sync] {reason}: +{result.get('messages')} messages, "
@@ -6211,6 +6213,11 @@ def _qq_watcher_wait(timeout_ms: int = 1000) -> bool:
         return True
     try:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.FindFirstChangeNotificationW.restype = wintypes.HANDLE
+        k32.FindFirstChangeNotificationW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL, wintypes.DWORD]
+        k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.FindNextChangeNotification.argtypes = [wintypes.HANDLE]
+        k32.FindCloseChangeNotification.argtypes = [wintypes.HANDLE]
         FILE_NOTIFY_CHANGE_FILE_NAME = 0x1
         FILE_NOTIFY_CHANGE_SIZE = 0x8
         FILE_NOTIFY_CHANGE_LAST_WRITE = 0x10
@@ -6230,6 +6237,11 @@ def _qq_watcher_wait(timeout_ms: int = 1000) -> bool:
         if r == 0:                       # WAIT_OBJECT_0：有变化
             k32.FindNextChangeNotification(h)
             return True
+        if r == 0xFFFFFFFF:
+            k32.FindCloseChangeNotification(h)
+            _QQ_WATCH["handle"] = None
+            time.sleep(1)
+            return True
         return False
     except Exception:
         time.sleep(timeout_ms / 1000.0)
@@ -6237,14 +6249,7 @@ def _qq_watcher_wait(timeout_ms: int = 1000) -> bool:
 
 
 def _qq_rt_loop():
-    """实时同步 v2（WAL 帧级增量）：
-
-    每 2 秒看 nt_msg.db + -wal 指纹（0.002s）→ 变化抖动 1 秒 →
-    live_update 只解密 WAL 新帧（毫秒级）打补丁进本地解密副本 →
-    对副本走轻量导入（只解析重叠 15 分钟窗口）。
-    新消息从 QQ 落库到本助手可查约 2~5 秒。
-    任何一步失败回退整库轻量同步（约 6 秒）。
-    """
+    """检测 QQ 数据库变化，生成快照并导入近期消息。"""
     last_st = ("", 0)
     live_dir = KNOWLEDGE_DB.parent / "qq_live"
     while True:
@@ -6271,25 +6276,24 @@ def _qq_rt_loop():
             except OSError:
                 wst0 = None
             st0 = p.stat()
-            cur = (int(st0.st_mtime), st0.st_size,
-                   int(wst0.st_mtime) if wst0 else 0, wst0.st_size if wst0 else 0)
+            cur = (st0.st_mtime_ns, st0.st_size,
+                   wst0.st_mtime_ns if wst0 else 0, wst0.st_size if wst0 else 0)
             first_rt = not _qq_sync_state.get("rt_booted")
-            if not first_rt and (cur == last_st or cur == _qq_sync_state["finger"].get("nt_msg.db")):
+            if not first_rt and cur == last_st:
                 # 等文件系统通知（零 CPU）而不是定时轮询；超时 5 秒兜底
                 _qq_watcher_wait(5000)
                 continue
-            # 抖动 0.3 秒：等 QQ 写完这一波帧（再短会读到写了一半的 WAL）
-            time.sleep(0.3)
+            # 等待一小段时间，并用指纹检查避免读取正在写入的 WAL。
+            time.sleep(0.03)
             try:
                 wst1 = wal_p.stat()
             except OSError:
                 wst1 = None
             st1 = p.stat()
-            cur1 = (int(st1.st_mtime), st1.st_size,
-                    int(wst1.st_mtime) if wst1 else 0, wst1.st_size if wst1 else 0)
+            cur1 = (st1.st_mtime_ns, st1.st_size,
+                    wst1.st_mtime_ns if wst1 else 0, wst1.st_size if wst1 else 0)
             if cur1 != cur:
                 continue
-            last_st = cur1
             if _qq_sync_state["running"]:
                 continue
             _qq_sync_state["rt_booted"] = True
@@ -6302,21 +6306,15 @@ def _qq_rt_loop():
                 con = db()
                 try:
                     r = qq_local.live_update(con, live_dir, progress=_p)
-                    # 游标增量：只读 rowid > 上次的最大 rowid（走主键索引，不扫全表）
-                    cursors = {}
-                    for k, v in con.execute(
-                            "SELECT key,value FROM meta WHERE key LIKE 'qq_rt_rid_%'"):
-                        if str(v).isdigit():
-                            cursors[k[len('qq_rt_rid_'):]] = int(v)
-                    result = qq_local.import_all(
-                        con, rebuild=False, since_ts=0 if cursors else int(time.time()) - 49 * 3600,
-                        light=True, decrypt_dir=live_dir, progress=_p,
-                        after_rowid=cursors if cursors else None)
-                    for tbl, rid in (result.get("max_rowid") or {}).items():
-                        con.execute("INSERT INTO meta(key,value) VALUES(?,?) "
-                                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                                    ("qq_rt_rid_" + tbl, str(rid)))
-                    con.commit()
+                    if r["rowids"] == set():
+                        result = {"account": account.name, "messages": 0, "scanned": 0,
+                                  "chats": 0, "contacts": 0, "files": 0, "links": 0,
+                                  "max_rowid": {}}
+                    else:
+                        result = qq_local.import_all(
+                            con, rebuild=False, since_ts=int(time.time()) - 49 * 3600,
+                            light=True, decrypt_dir=live_dir, progress=_p,
+                            changed_rowids=r["rowids"])
                 finally:
                     con.close()
                 _qq_sync_state["last_result"] = result
@@ -6325,13 +6323,18 @@ def _qq_rt_loop():
                 _qq_sync_state["last"] = time.strftime("%m-%d %H:%M:%S")
                 _qq_sync_state["last_ok"] = time.time()
                 _qq_sync_state["finger"] = qq_local.db_fingerprints()
+                last_st = cur1
                 if result.get("messages") or result.get("files") or result.get("links"):
                     print(f"[qq_rt] +{result.get('messages')} msgs, "
                           f"+{result.get('files')} files, +{result.get('links')} links "
                           f"(patched={r.get('patched')})")
                     _qq_bump_version()
+                if result.get("files") or result.get("links"):
                     threading.Thread(target=_qq_auto_parse_after_sync, daemon=True).start()
             except Exception as exc:  # noqa: BLE001
+                if str(exc) == "QQ 数据库正在写入，请重试":
+                    time.sleep(0.15)
+                    continue
                 _qq_sync_state["error"] = str(exc)[:200]
                 _qq_sync_state["progress"] = "同步失败"
                 print(f"[qq_rt] fallback to full light sync: {exc}")
@@ -6443,10 +6446,16 @@ def _qq_bump_version():
 def api_qq_local_stream(conv: str, after_id: int = 0):
     """SSE 推送 QQ 新消息：与微信共用 chat_core.sse_response，只多一个 chats 事件。"""
 
+    con = db()
+    try:
+        qq_local.ensure_schema(con)
+    finally:
+        con.close()
+
     def fetch(last, limit):
         con = db()
         try:
-            rows = qq_local.messages(con, conv, limit, after=last) if conv else []
+            rows = qq_local.messages(con, conv, limit, after=last, schema_ready=True) if conv else []
             return rows, max([last] + [int(r["id"]) for r in rows])
         finally:
             con.close()

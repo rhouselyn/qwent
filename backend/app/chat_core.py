@@ -202,6 +202,6 @@ class QQLocalSource(ChatSource):
     chat_key = "conv"
     taxonomy = QQ_KINDS
     kind_default = "file"
-    sse_poll = 0.5
+    sse_poll = 0.1
     sse_idle = 30
     reveal_missing = "文件不在本机（可能已被清理或未下载）"

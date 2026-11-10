@@ -32,6 +32,7 @@ else:
 
 import hashlib
 import hmac as hmac_mod
+import itertools
 import json
 import re
 import shutil
@@ -1071,7 +1072,7 @@ def _ctype_of(parsed: dict) -> int:
 
 
 def _qq_insert_msgs(con: sqlite3.Connection, batch: list[tuple],
-                    incremental: bool = False) -> None:
+                    incremental: bool = False) -> int:
     """写入消息。增量模式用 DO NOTHING：库里的原文永不被撤回改写覆盖（防撤回核心）。"""
     sql = ("INSERT INTO qq_local_message(conv,msg_id,ts,sender_uid,"
            "sender_uin,sender_name,is_sender,mtype,ctype,text,parsed) "
@@ -1080,7 +1081,7 @@ def _qq_insert_msgs(con: sqlite3.Connection, batch: list[tuple],
         sql += " ON CONFLICT(msg_id) DO NOTHING"
     else:
         sql += " ON CONFLICT(msg_id) DO UPDATE SET text=excluded.text,"               "parsed=excluded.parsed,ctype=excluded.ctype"
-    con.executemany(sql, batch)
+    return con.executemany(sql, batch).rowcount
 
 
 _RECALL_TIP = re.compile(r"^(.*?)(?:\((\d{5,})\))?\s*撤回了一条消息")
@@ -1106,17 +1107,66 @@ def _match_recalls(con: sqlite3.Connection, tips: list[tuple]) -> None:
     con.commit()
 
 
+_LIVE_STATE: dict[str, dict] = {}
+
+
+def _leaf_rowids(page: bytes, pgno: int) -> set[int] | None:
+    """提取 SQLite 表叶子页的行号；无法解析时返回 None，调用方回退补扫。"""
+    start = 100 if pgno == 1 else 0
+    if len(page) != PAGE_SIZE or page[start] != 0x0d:
+        return set()
+    count = struct.unpack_from(">H", page, start + 3)[0]
+    pointers_end = start + 8 + count * 2
+    if pointers_end > PAGE_SIZE:
+        return None
+
+    def read_varint(pos):
+        value = 0
+        for i in range(9):
+            if pos + i >= PAGE_SIZE:
+                raise ValueError("invalid SQLite varint")
+            b = page[pos + i]
+            value = (value << 8 | b) if i == 8 else (value << 7 | (b & 0x7f))
+            if i == 8 or b < 0x80:
+                return value, i + 1
+        raise ValueError("invalid SQLite varint")
+
+    rows = set()
+    try:
+        for i in range(count):
+            offset = struct.unpack_from(">H", page, start + 8 + 2 * i)[0]
+            if offset < pointers_end or offset >= PAGE_SIZE:
+                return None
+            _, n = read_varint(offset)
+            rowid, _ = read_varint(offset + n)
+            rows.add(rowid if rowid < 1 << 63 else rowid - (1 << 64))
+    except (IndexError, ValueError, struct.error):
+        return None
+    return rows
+
+
+def _rowid_compatible(path: Path) -> bool:
+    """仅在消息 ID 是 SQLite 行号别名时使用变化页增量。"""
+    try:
+        con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            for table in ("c2c_msg_table", "group_msg_table"):
+                schema = con.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()
+                if not schema or "WITHOUT ROWID" in (schema[0] or "").upper():
+                    return False
+                pk = [r for r in con.execute(f'PRAGMA table_info("{table}")') if r[5]]
+                if len(pk) != 1 or pk[0][1] != "40001" or pk[0][2].upper() != "INTEGER":
+                    return False
+            return True
+        finally:
+            con.close()
+    except sqlite3.DatabaseError:
+        return False
+
+
 def live_update(con: sqlite3.Connection, live_dir: Path, account: Path | None = None,
                 progress=None) -> dict:
-    """实时同步核心：维护一份解密副本 data/qq_live/nt_msg.db，只增量解密新内容。
-
-    - 首次/失效（换号/QQ 重装修复）：整库解密一次（约 6 秒）自举；
-    - 主文件变大：只解密新增页；
-    - 新提交先落 nt_msg.db-wal：按 WAL 帧（24 字节头 + 4096 页）逐帧解密，
-      打补丁进副本——每帧一次 4KB AES，毫秒级。
-    返回 {"bootstrapped": bool, "patched": int}。之后调用方对该副本走
-    import_all(light=True, decrypt_dir=live_dir) 读新消息。
-    """
+    """解密主库并重放已提交的 WAL，生成一致的实时副本。"""
     account = account or pick_account()
     dbdir = account / "nt_qq" / "nt_db"
     src = dbdir / "nt_msg.db"
@@ -1139,75 +1189,150 @@ def live_update(con: sqlite3.Connection, live_dir: Path, account: Path | None = 
     key = bytes.fromhex(key_hex)
     live_dir.mkdir(parents=True, exist_ok=True)
     plain = live_dir / "nt_msg.db"
-    con.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+    def fingerprint(path):
+        try:
+            st = path.stat()
+            return st.st_mtime_ns, st.st_size
+        except FileNotFoundError:
+            return None
 
-    def mget(k, d=""):
-        r = con.execute("SELECT value FROM meta WHERE key=?", (k,)).fetchone()
-        return r[0] if r else d
+    before = (fingerprint(src), fingerprint(wal))
+    temp = live_dir / "nt_msg.db.tmp"
+    state_key = str(plain.resolve())
+    state = _LIVE_STATE.get(state_key, {})
+    touched = False
+    try:
+        blob = wal.read_bytes() if before[1] and before[1][1] else b""
+        frames = []
+        committed = 0
+        committed_pages = 0
+        if blob:
+            if len(blob) < 32 or struct.unpack(">I", blob[:4])[0] not in (0x377f0682, 0x377f0683):
+                raise RuntimeError("QQ WAL 文件头无效")
+            if struct.unpack(">I", blob[8:12])[0] != PAGE_SIZE:
+                raise RuntimeError("QQ WAL 页面大小不匹配")
+            frame_size = PAGE_SIZE + 24
+            for pos in range(32, len(blob) - frame_size + 1, frame_size):
+                frame = blob[pos:pos + frame_size]
+                if frame[8:16] != blob[16:24]:
+                    break
+                pgno, db_pages = struct.unpack(">II", frame[:8])
+                if not pgno:
+                    break
+                frames.append((pgno, frame))
+                if db_pages:
+                    committed = len(frames)
+                    committed_pages = db_pages
+        old_count = state.get("committed", 0)
+        header = blob[:32]
+        incremental = (state.get("salt") == salt and state.get("plain") == fingerprint(plain)
+                       and plain.is_file())
+        wal_prefix = (incremental and (state.get("header") == header or not state.get("header"))
+                      and committed >= old_count
+                      and (not old_count or hashlib.sha256(frames[old_count - 1][1]).digest()
+                           == state.get("last_frame")))
+        # 同一 WAL 世代的检查点只将已提交帧写回主库；先处理新帧，重置时再对比主库。
+        fast_wal = bool(wal_prefix and header and state.get("header") == header
+                        and old_count and committed > old_count)
+        appended = bool(wal_prefix and (state.get("main") == before[0] or fast_wal))
+        rebase = incremental and not appended
+        main_changed = not incremental or (not appended and state.get("main") != before[0])
+        main = src.read_bytes() if main_changed or rebase else b""
+        pages = memoryview(main)[EXT_HEADER:]
+        page_count = len(pages) // PAGE_SIZE
+        hashes = ([hashlib.blake2b(pages[i:i + PAGE_SIZE], digest_size=16).digest()
+                   for i in range(0, page_count * PAGE_SIZE, PAGE_SIZE)]
+                  if main_changed else state.get("hashes", []))
+        def unchanged():
+            if not fast_wal:
+                return before == (fingerprint(src), fingerprint(wal))
+            try:
+                with src.open("rb") as f:
+                    f.seek(EXT_HEADER)
+                    same_salt = f.read(SALT_SIZE).hex() == salt
+                return same_salt and fingerprint(wal) == before[1]
+            except OSError:
+                return False
 
-    def mset(k, v):
-        con.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) "
-                    "DO UPDATE SET value=excluded.value", (k, str(v)))
+        if not unchanged():
+            raise RuntimeError("QQ 数据库正在写入，请重试")
+        if not incremental:
+            if progress:
+                progress("重建实时解密副本…")
+            decrypt_db(src, temp, key)
+        destination = plain if incremental else temp
+        touched = incremental
+        changed_pages = set()
+        with destination.open("r+b") as out:
+            def write_page(pgno, page):
+                page = bytes(page)
+                skip = SALT_SIZE if pgno == 1 else 0
+                body = page[skip:]
+                iv = body[len(body) - RESERVE:len(body) - RESERVE + IV_SIZE]
+                plain_page = _aes_cbc_decrypt(key, iv, body[:len(body) - RESERVE])
+                if pgno == 1:
+                    plain_page = bytearray(b"SQLite format 3\x00" + plain_page)
+                    plain_page[16:18] = struct.pack(">H", PAGE_SIZE)
+                    plain_page[20] = 0
+                out.seek((pgno - 1) * PAGE_SIZE)
+                out.write(bytes(plain_page).ljust(PAGE_SIZE, b"\x00")[:PAGE_SIZE])
+                changed_pages.add(pgno)
 
-    st = src.stat()
-    boot = False
-    if (mget("qq_live_salt") != salt or not plain.is_file()
-            or int(mget("qq_live_main_size", "0")) > st.st_size):
-        if progress:
-            progress("重建实时解密副本…")
-        decrypt_db(src, plain, key)
-        mset("qq_live_salt", salt)
-        mset("qq_live_main_size", st.st_size)
-        wst = wal.stat() if wal.exists() else None
-        mset("qq_live_wal_off", wst.st_size if wst else 0)
-        return {"bootstrapped": True, "patched": 0}
-    patched = 0
-
-    def write_page(pgno: int, plain_bytes: bytes) -> None:
-        with open(plain, "r+b") as f:
-            f.seek((pgno - 1) * PAGE_SIZE)
-            f.write(plain_bytes[:PAGE_SIZE].ljust(PAGE_SIZE, b"\x00"))
-
-    # 1) 主文件尾部新增页（QQ 很少直接写主库，通常走 WAL）
-    old_size = int(mget("qq_live_main_size"))
-    if st.st_size > old_size:
-        with src.open("rb") as f:
-            f.seek(old_size)
-            data = f.read(st.st_size - old_size)
-        base = old_size // PAGE_SIZE
-        for i in range(len(data) // PAGE_SIZE):
-            page = data[i * PAGE_SIZE:(i + 1) * PAGE_SIZE]
-            skip = SALT_SIZE if base + i == 0 else 0
-            body = page[skip:]
-            enc = body[:len(body) - RESERVE]
-            iv = body[len(body) - RESERVE:len(body) - RESERVE + IV_SIZE]
-            write_page(base + i + 1, _aes_cbc_decrypt(key, iv, enc))
-            patched += 1
-        mset("qq_live_main_size", st.st_size)
-    # 2) WAL 新帧（新消息基本都在这里）
-    if wal.exists():
-        wst = wal.stat()
-        off = int(mget("qq_live_wal_off", "0"))
-        if wst.st_size < off:
-            off = 0                    # checkpoint 后 WAL 重置，重放幂等
-        if wst.st_size > off:
-            with wal.open("rb") as f:
-                f.seek(off)
-                blob = f.read(wst.st_size - off)
-            frame = PAGE_SIZE + 24
-            nfull = len(blob) // frame
-            for i in range(nfull):
-                fr = blob[i * frame:(i + 1) * frame]
-                pgno = struct.unpack(">I", fr[:4])[0]
-                if pgno == 0 or pgno * PAGE_SIZE > st.st_size:
-                    continue
-                page = fr[24:24 + PAGE_SIZE]
-                enc = page[:PAGE_SIZE - RESERVE]
-                iv = page[PAGE_SIZE - RESERVE:PAGE_SIZE - RESERVE + IV_SIZE]
-                write_page(pgno, _aes_cbc_decrypt(key, iv, enc))
-                patched += 1
-            mset("qq_live_wal_off", off + nfull * frame)
-    return {"bootstrapped": False, "patched": patched}
+            if rebase:
+                old_hashes = state.get("hashes", [])
+                changed = {i + 1 for i, h in enumerate(hashes)
+                           if i >= len(old_hashes) or old_hashes[i] != h}
+                changed.update(state.get("wal_pages", ()))
+                for pgno in sorted(changed):
+                    if pgno <= page_count:
+                        start = (pgno - 1) * PAGE_SIZE
+                        write_page(pgno, pages[start:start + PAGE_SIZE])
+            for pgno, frame in frames[old_count if appended else 0:committed]:
+                write_page(pgno, frame[24:])
+            if committed_pages:
+                out.truncate(committed_pages * PAGE_SIZE)
+            elif rebase:
+                out.truncate(page_count * PAGE_SIZE)
+            rowids = set() if incremental else None
+            if rowids is not None:
+                for pgno in changed_pages:
+                    out.seek((pgno - 1) * PAGE_SIZE)
+                    page = out.read(PAGE_SIZE)
+                    if not page:
+                        continue
+                    found = _leaf_rowids(page, pgno)
+                    if found is None:
+                        rowids = None
+                        break
+                    rowids.update(found)
+        if not unchanged():
+            raise RuntimeError("QQ 数据库正在写入，请重试")
+        if not incremental:
+            os.replace(temp, plain)
+        with plain.open("rb") as snapshot:
+            snapshot.seek(40)
+            schema_cookie = snapshot.read(4)
+        compatible = (state.get("rowid_compatible") if incremental
+                      and state.get("schema_cookie") == schema_cookie
+                      else _rowid_compatible(plain))
+        if not compatible:
+            rowids = None
+        _LIVE_STATE[state_key] = {"main": state.get("main") if appended else before[0], "salt": salt,
+                                  "plain": fingerprint(plain), "header": header,
+                                  "committed": committed, "hashes": hashes,
+                                  "schema_cookie": schema_cookie, "rowid_compatible": compatible,
+                                  "wal_pages": {pgno for pgno, _ in frames[:committed]},
+                                  "last_frame": hashlib.sha256(frames[committed - 1][1]).digest()
+                                  if committed else b""}
+        return {"bootstrapped": not incremental,
+                "patched": committed - (old_count if appended else 0),
+                "rowids": rowids}
+    except Exception:
+        if touched:
+            _LIVE_STATE.pop(state_key, None)
+        raise
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def reparse_cards(con: sqlite3.Connection, decrypt_dir: Path, limit: int = 0,
@@ -1321,7 +1446,8 @@ def db_fingerprints(qq: str | None = None) -> dict:
 def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = True,
                decrypt_dir: str | None = None, progress=None,
                since_ts: int = 0, light: bool = False,
-               after_rowid: dict | None = None) -> dict:
+               after_rowid: dict | None = None,
+               changed_rowids: set[int] | None = None) -> dict:
     """导入 QQ 本地记录；返回统计。decrypt_dir 仅供调试（跳过解密）。
 
     since_ts>0 时为增量同步：只读取该时间之后的消息，会话聚合计数按受影响会话
@@ -1389,10 +1515,11 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
                              c.get("name") or "", c.get("nickname") or "", conv))
         for code, g in groups.items():
             contacts.append((f"group:{code}", "group", "", code, g["name"], "", f"group:{code}"))
-        con.executemany(
-            "INSERT OR REPLACE INTO qq_contact(key,kind,uid,uin,name,nickname,conv) "
-            "VALUES(?,?,?,?,?,?,?)", contacts)
-        con.commit()
+        if not light:
+            con.executemany(
+                "INSERT OR REPLACE INTO qq_contact(key,kind,uid,uin,name,nickname,conv) "
+                "VALUES(?,?,?,?,?,?,?)", contacts)
+            con.commit()
 
         if progress:
             progress("正在读取 QQ 聊天记录…")
@@ -1405,20 +1532,38 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
         files = []
         links = []
         recall_tips: list[tuple] = []
+        pending_rowids = None
+        if changed_rowids is not None:
+            pending_rowids = set(changed_rowids)
+            candidates = list(pending_rowids)
+            for i in range(0, len(candidates), 800):
+                part = candidates[i:i + 800]
+                placeholders = ','.join('?' for _ in part)
+                pending_rowids.difference_update(r[0] for r in con.execute(
+                    f'SELECT msg_id FROM qq_local_message WHERE msg_id IN ({placeholders})', part))
+            pending_rowids = list(pending_rowids)
         for table, is_group in (("c2c_msg_table", False), ("group_msg_table", True)):
             cols = ["40001", "40050", "40013", "40020", "40033", "40021",
                     "40030", "40011", "40800", "40090"]
             batch = []
             row_where, row_args = "", []
-            if after_rowid is not None:
+            if pending_rowids is not None:
+                chunks = (pending_rowids[i:i + 800] for i in range(0, len(pending_rowids), 800))
+                rows = itertools.chain.from_iterable(
+                    _rows_chunked(con_msg, table, cols, chunk=800,
+                                  where='rowid IN (' + ','.join('?' for _ in part) + ')',
+                                  args=part) for part in chunks)
+            elif after_rowid is not None:
                 # 游标增量：直接走 rowid 主键索引，只读新行（毫秒级），不扫全表
                 row_where = "rowid>?"
                 row_args = [int(after_rowid.get(table) or 0)]
             elif since_ts:
                 row_where = '"40050">=?'
                 row_args = [int(since_ts)]
-            for row in _rows_chunked(con_msg, table, cols, chunk=800,
-                                     where=row_where, args=row_args):
+            if pending_rowids is None:
+                rows = _rows_chunked(con_msg, table, cols, chunk=800,
+                                     where=row_where, args=row_args)
+            for row in rows:
                 (_rid, msg_id, ts, direction, sender_uid, sender_uin,
                  peer_uid, peer_uin, mtype, blob, sname) = row
                 total += 1
@@ -1495,14 +1640,12 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
                     recall_tips.append((conv, int(msg_id), int(ts or 0),
                                         int(sender_uin or 0), is_sender, text))
                 if len(batch) >= 1000:
-                    _qq_insert_msgs(con, batch, incremental=bool(since_ts))
-                    inserted += len(batch)
+                    inserted += _qq_insert_msgs(con, batch, incremental=bool(since_ts or changed_rowids is not None))
                     batch.clear()
                     if progress and inserted % 50000 < 1000:
                         progress(f"已解析 {inserted} 条…")
             if batch:
-                _qq_insert_msgs(con, batch, incremental=bool(since_ts))
-                inserted += len(batch)
+                inserted += _qq_insert_msgs(con, batch, incremental=bool(since_ts or changed_rowids is not None))
         # 撤回提示 → 回标同会话同一人的最近一条原消息（原文已入库，只打标）
         _match_recalls(con, recall_tips)
         con_msg.close()
@@ -1555,14 +1698,16 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
                                   _file_kind(name), hit[2] if hit else ""))
             finally:
                 con_i.close()
+        files_added = 0
+        links_added = 0
         if files:
-            con.executemany(
+            files_added = con.executemany(
                 "INSERT OR IGNORE INTO qq_file(file_key,conv,msg_id,ts,name,size,path,kind,sender_name) "
-                "VALUES(?,?,?,?,?,?,?,?,?)", files)
+                "VALUES(?,?,?,?,?,?,?,?,?)", files).rowcount
         if links:
-            con.executemany(
+            links_added = con.executemany(
                 "INSERT OR IGNORE INTO qq_link(link_key,url,title,conv,msg_id,ts) "
-                "VALUES(?,?,?,?,?,?)", links)
+                "VALUES(?,?,?,?,?,?)", links).rowcount
 
         # 会话聚合（名称优先用联系人/群备注）
         for conv, a in conv_agg.items():
@@ -1585,7 +1730,7 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
             for conv, _p in pinned_rows:
                 con.execute("UPDATE qq_chat SET pinned=1 WHERE conv=?", (conv,))
         # 增量模式：窗口内计数只是增量，受影响会话按全表重算，保证可重复执行
-        if since_ts and conv_agg:
+        if (since_ts or changed_rowids is not None) and conv_agg:
             affected = list(conv_agg.keys())
             for i in range(0, len(affected), 200):
                 part = affected[i:i + 200]
@@ -1602,13 +1747,20 @@ def import_all(con: sqlite3.Connection, qq: str | None = None, rebuild: bool = T
                         (cnt, last_ts, (top[0] or "")[:200] if top else "",
                          (top[1] if top else 0), conv))
         # 联系人列表带上最近会话
-        con.execute("""UPDATE qq_contact SET
+        contact_update = """UPDATE qq_contact SET
             last_ts=COALESCE((SELECT c.last_ts FROM qq_chat c WHERE c.conv=qq_contact.conv),0),
-            cnt=COALESCE((SELECT c.cnt FROM qq_chat c WHERE c.conv=qq_contact.conv),0)""")
+            cnt=COALESCE((SELECT c.cnt FROM qq_chat c WHERE c.conv=qq_contact.conv),0)"""
+        if not light:
+            con.execute(contact_update)
+        else:
+            affected = list(conv_agg)
+            for i in range(0, len(affected), 200):
+                part = affected[i:i + 200]
+                con.execute(contact_update + ' WHERE conv IN (' + ','.join('?' for _ in part) + ')', part)
         con.commit()
         return {"account": account.name, "messages": inserted, "scanned": total,
                 "chats": len(conv_agg), "contacts": len(contacts),
-                "files": len(files), "links": len(links),
+                "files": files_added, "links": links_added,
                 "max_rowid": max_rowid}
     finally:
         if tmp:
@@ -1806,8 +1958,10 @@ def hydrate_media(rows: list[dict], account: Path | None = None) -> list[dict]:
 
 
 def messages(con: sqlite3.Connection, conv: str, limit: int = 200,
-             before: int = 0, around: int = 0, after: int = 0) -> list[dict]:
-    ensure_schema(con)
+             before: int = 0, around: int = 0, after: int = 0,
+             schema_ready: bool = False) -> list[dict]:
+    if not schema_ready:
+        ensure_schema(con)
     cols = ("id,conv,msg_id,ts,sender_uid,sender_uin,sender_name,is_sender,"
             "mtype,ctype,text,parsed,recalled,recall_who")
     sql = f"SELECT {cols} FROM qq_local_message WHERE conv=?"
@@ -1825,7 +1979,7 @@ def messages(con: sqlite3.Connection, conv: str, limit: int = 200,
             except Exception:
                 d["parsed"] = {"kind": "text", "text": d.get("text") or ""}
             out.append(d)
-        return hydrate_media(out)
+        return hydrate_media(out) if out else []
     if around:
         # 引用跳转：以目标消息为中心取前后各一半，老消息也能定位
         anchor = con.execute(
@@ -1860,7 +2014,7 @@ def messages(con: sqlite3.Connection, conv: str, limit: int = 200,
         except Exception:
             d["parsed"] = {"kind": "text", "text": d.get("text") or ""}
         out.append(d)
-    return hydrate_media(out)
+    return hydrate_media(out) if out else []
 
 
 _INITIAL_CACHE: dict[str, str] = {}
