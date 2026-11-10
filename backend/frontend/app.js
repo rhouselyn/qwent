@@ -480,10 +480,14 @@ function mergeMessages(chat, incoming) {
   return add;
 }
 
-/* 把新消息按时间位置插入 DOM（只在正看这个会话时动 DOM）。 */
-function insertMessages(chat, add) {
+/* 把新消息按时间位置插入 DOM（只在正看这个会话时动 DOM）。
+   微信 / QQ 本地记录共用：QQ 用 opts 换渲染器、id 前缀和"正在看"判定。 */
+function insertMessages(chat, add, opts = {}) {
   if (!add.length) return;
-  if (!state.current || state.current.username !== chat) return;
+  const render = opts.render || renderMsg;
+  const idSel = (m) => `[data-id="${opts.idPrefix || ""}${m.id}"]`;
+  if (opts.viewing ? !opts.viewing()
+                   : (!state.current || state.current.username !== chat)) return;
   const viewingChat = $("#msgList").style.display !== "none"
     && $("#previewPane").style.display === "none" && !isAssistant();
   if (!viewingChat) return;
@@ -495,17 +499,22 @@ function insertMessages(chat, add) {
   const keepBottom = (!state.pinBottom && sc) ? sc.scrollHeight - sc.scrollTop : null;
   const ordered = state.msgs[chat];
   for (const m of add.slice().sort(msgOrder)) {
-    if (box.querySelector(`[data-id="${m.id}"]`)) continue;
+    if (box.querySelector(idSel(m))) continue;
     // 找排序中位于它后面、且已在 DOM 里的那条消息作为插入点
     let ref = null;
     for (let i = ordered.findIndex(x => x.id === m.id) + 1; i < ordered.length; i++) {
-      ref = box.querySelector(`[data-id="${ordered[i].id}"]`);
+      ref = box.querySelector(idSel(ordered[i]));
       if (ref) break;
+    }
+    // ref 头上紧挂的时间分隔属于 ref：要插到分隔之前，别插进它和消息中间
+    if (ref && ref.previousElementSibling
+        && ref.previousElementSibling.classList.contains("time-divider")) {
+      ref = ref.previousElementSibling;
     }
     const idx = ordered.findIndex(x => x.id === m.id);
     const prevTs = idx > 0 ? (ordered[idx - 1].ts || 0) : 0;
     if (needsDivider(prevTs, m.ts)) box.insertBefore(makeTimeDivider(m.ts), ref);
-    box.insertBefore(renderMsg(m), ref);
+    box.insertBefore(render(m), ref);
   }
   if (keepBottom !== null) sc.scrollTop = sc.scrollHeight - keepBottom;
 }
@@ -3395,8 +3404,8 @@ async function qqSetPin(c, pinned) { return pinQqLocal(c, pinned); }
 async function loadQqConversations() {
   const box = $("#qqList");
   if (!box) return;
-  box.innerHTML = `<div id="qqConvList"></div>`;
-  const list = $("#qqConvList");
+  const list = document.createElement("div");
+  list.id = "qqConvList";
   const ai = document.createElement("div");
   ai.className = "session-item ai";
   ai.innerHTML = `<div class="ava">✦</div>
@@ -3486,6 +3495,19 @@ async function loadQqConversations() {
     empty.textContent = "还没有 QQ 记录。到「设置 → QQ 本地记录」点「导入 QQ 聊天记录」。";
     list.appendChild(empty);
   }
+  const current = box.querySelector("#qqConvList");
+  if (!current) {
+    box.replaceChildren(list);
+    return;
+  }
+  const oldItems = [...current.children];
+  const nextItems = [...list.children].map((item) => {
+    const i = oldItems.findIndex((old) => old.isEqualNode(item));
+    return i < 0 ? item : oldItems.splice(i, 1)[0];
+  });
+  const scrollTop = current.scrollTop;
+  current.replaceChildren(...nextItems);
+  current.scrollTop = scrollTop;
 }
 
 function renderQqMessage(it) {
@@ -3637,20 +3659,21 @@ function qqLiveStart() {
     onData: (d) => {
     if (d.messages && d.messages.length) {
       if (!(isQQ() && state.qqConvKind === "local" && state.qqConv === conv)) return;
-      if ($("#msgList").style.display === "none") return;   // 预览/设置页打开时不插
-      const box = $("#msgs");
-      const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 100;
-      const have = new Set([...box.querySelectorAll("[data-id^='qq-local-']")]
-        .map(el => +String(el.dataset.id).replace("qq-local-", "")));
-      const wraps = [...box.querySelectorAll(".msg[data-id^='qq-local-']")];
-      let prevTs = wraps.length ? +(wraps[wraps.length - 1].dataset.ts || 0) : 0;
-      for (const it of d.messages) {
-        if (have.has(it.id)) continue;
-        if (needsDivider(prevTs, it.ts)) box.appendChild(makeTimeDivider(it.ts));
-        box.appendChild(renderQqLocalMessage(it));
-        prevTs = it.ts || prevTs;
+      // 手机上早发的消息可能晚同步进本地库（id 更大、ts 更旧），与微信同款：
+      // mergeMessages 按时间归位 + insertMessages 插到 DOM 对应时间位置。
+      // 不能按到达顺序 append——会把旧消息挂到新消息下面，时间分隔跟着乱。
+      const prevLast = (state.msgs[conv] || []).slice(-1)[0];
+      const add = mergeMessages(conv, d.messages);
+      if (!add.length) return;
+      insertMessages(conv, add, {
+        render: renderQqLocalMessage,
+        idPrefix: "qq-local-",
+        viewing: () => (isQQ() && state.qqConvKind === "local" && state.qqConv === conv),
+      });
+      const newest = add.reduce((a, b) => (msgOrder(b, a) > 0 ? b : a));
+      if (state.pinBottom && (!prevLast || msgOrder(newest, prevLast) > 0)) {
+        scrollMsgsToBottom();
       }
-      if (stick) scrollMsgsToBottom();
     }
     if (d.chats) {
       const list = $("#qqConvList");
@@ -3963,6 +3986,7 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
   try {
     const d = await msgsPromise;
     const items = d.messages || [];
+    state.msgs[conv] = items;         // 供 mergeMessages/insertMessages 按时间归位
     oldest = items.length ? (items[0].ts || 0) : 0;
     const frag = document.createDocumentFragment();
     let lastTs = 0;
@@ -3983,6 +4007,7 @@ async function openQqLocalConversation(conv, name, isGroup, focusId = 0) {
             encodeURIComponent(conv) + "&limit=120&before=" + oldest);
           const rows = prev.messages || [];
           if (!rows.length) { more.textContent = "没有更早的消息了"; return; }
+          state.msgs[conv] = [...rows, ...(state.msgs[conv] || [])];
           const frag2 = document.createDocumentFragment();
           let ts2 = 0;
           for (const it of rows) {
